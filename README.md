@@ -19,9 +19,11 @@ files, identifies them, and stages one proposal per item — Movies/Series via
 the *arr app's own TVDB/TMDB lookup, Adult via the StashDB/FansDB/TPDB/Ollama
 identification pipeline, with Apply carrying the resolved scene identifier
 through to Whisparr V3), **Purge** (`POST
-/api/modes/{movies,series}/purge/scan` matches a per-mode tag allowlist,
+/api/modes/{movies,series,adult}/purge/scan` matches a per-mode tag allowlist,
 managed via `/api/modes/{mode}/purge/allowlist`, against every tracked
-item's native tags), and **Dedup**, Movies only for now (`POST
+item's native tags — Adult needed no code changes, since Whisparr's tracked
+scenes resolve through the same `movie` resource Radarr already uses), and
+**Dedup**, Movies only for now (`POST
 /api/modes/movies/dedup/scan` groups unmapped files with any already-tracked
 item sharing the same TMDB ID, ffprobes every candidate directly, and
 stages a proposal per duplicate group with a precomputed quality winner).
@@ -35,9 +37,9 @@ the live vocabulary and `POST`/`DELETE
 /api/modes/{mode}/items/{itemId}/tags[/{tagId}]` to assign or remove one,
 creating a genuinely new tag upstream automatically — this one isn't staged
 through the review queue, since assigning a tag is already a single
-deliberate action, not an automatic decision needing approval. The rest of
-Adult mode (Purge/Dedup), Series Dedup, AI-suggested tags, and the
-React frontend don't exist yet. Not ready to run as a media tool.
+deliberate action, not an automatic decision needing approval. Adult Dedup,
+Series Dedup, AI-suggested tags, and the React frontend don't exist yet.
+Not ready to run as a media tool.
 
 Secrets are encrypted at rest with a locally generated key
 (`<data-dir>/secret.key`, mode 0600) rather than an OS keychain — the

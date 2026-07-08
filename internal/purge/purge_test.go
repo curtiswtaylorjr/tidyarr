@@ -198,3 +198,69 @@ func TestApply_RejectsMissingTrackedID(t *testing.T) {
 		t.Fatal("expected Apply to refuse a proposal with no tracked id")
 	}
 }
+
+func newTestWhisparrSession(t *testing.T, handler http.HandlerFunc) *mode.Session {
+	t.Helper()
+	srv := httptest.NewServer(handler)
+	t.Cleanup(srv.Close)
+	return &mode.Session{
+		Mode:    mode.Adult,
+		Servarr: servarr.New(servarr.Config{BaseURL: srv.URL, APIKey: "test-key", App: servarr.Whisparr}, srv.Client()),
+	}
+}
+
+// TestScan_AdultWhisparrProposesOnlyItemsMatchingAllowlist is the explicit
+// Whisparr counterpart to TestScan_ProposesOnlyItemsMatchingAllowlist. Purge
+// needed no code changes to support Adult: Whisparr's itemResource() resolves
+// to "movie" (the same default branch Radarr uses, client.go:66-73), so a
+// Whisparr scene is fetched via the identical GET /api/v3/movie request a
+// Radarr session already issues. This test locks that wire-path equivalence
+// in as a regression guard rather than leaving it merely implied.
+func TestScan_AdultWhisparrProposesOnlyItemsMatchingAllowlist(t *testing.T) {
+	sess := newTestWhisparrSession(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v3/movie":
+			w.Write([]byte(`[
+				{"id":1,"title":"Vanilla Scene","path":"/media/Adult/Vanilla Scene","rootFolderPath":"/media/Adult","tags":[9]},
+				{"id":2,"title":"Flagged Scene","path":"/media/Adult/Flagged Scene","rootFolderPath":"/media/Adult","tags":[1,2]}
+			]`))
+		case "/api/v3/tag":
+			w.Write([]byte(`[{"id":1,"label":"BDSM"},{"id":2,"label":"unrelated"},{"id":9,"label":"family-friendly"}]`))
+		default:
+			t.Fatalf("unexpected request: %s", r.URL.Path)
+		}
+	})
+
+	got, err := Scan(context.Background(), sess, []string{"BDSM"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected exactly 1 matched proposal, got %d: %+v", len(got), got)
+	}
+	p := got[0]
+	if p.TrackedID != 2 || p.Title != "Flagged Scene" || p.Status != proposals.Pending {
+		t.Errorf("unexpected proposal: %+v", p)
+	}
+}
+
+// TestApply_AdultWhisparrDeletesTrackedScene confirms Apply's delete request
+// against a Whisparr session hits the same movie-shaped path a Radarr session
+// does — DeleteTracked routes through the same itemResource()="movie" branch
+// (client.go:66-73), so there is no Adult-specific behavior to diverge.
+func TestApply_AdultWhisparrDeletesTrackedScene(t *testing.T) {
+	var gotPath string
+	sess := newTestWhisparrSession(t, func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.String()
+	})
+
+	err := Apply(context.Background(), sess, proposals.Proposal{
+		ID: 1, Status: proposals.Pending, Title: "Flagged Scene", TrackedID: 2,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if gotPath != "/api/v3/movie/2?deleteFiles=true" {
+		t.Errorf("unexpected delete request: %s", gotPath)
+	}
+}
