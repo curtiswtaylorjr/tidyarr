@@ -18,7 +18,13 @@ review workflows the design calls for, three of them queue-staged:
 files, identifies them, and stages one proposal per item — Movies/Series via
 the *arr app's own TVDB/TMDB lookup, Adult via the StashDB/FansDB/TPDB/Ollama
 identification pipeline, with Apply carrying the resolved scene identifier
-through to Whisparr V3), **Purge** (`POST
+through to Whisparr V3. When Adult identification confidently identifies a
+file via web search but it matches no existing scene anywhere, the resulting
+Unmatched proposal can be given back to the community databases as a new
+scene draft — `POST /api/proposals/{id}/submit-draft`, preferring TPDB when
+configured and falling back to StashDB — a separate, explicitly
+human-triggered action, unlike the original CLIs' automatic submission during
+scan), **Purge** (`POST
 /api/modes/{movies,series,adult}/purge/scan` matches a per-mode tag allowlist,
 managed via `/api/modes/{mode}/purge/allowlist`, against every tracked
 item's native tags — Adult needed no code changes, since Whisparr's tracked

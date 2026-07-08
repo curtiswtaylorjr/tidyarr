@@ -79,8 +79,17 @@ type Proposal struct {
 	ForeignID        string      `json:"foreignId,omitempty"`
 	ItemType         string      `json:"itemType,omitempty"`
 	Candidates       []Candidate `json:"candidates,omitempty"`
-	CreatedAt        string      `json:"createdAt"`
-	AppliedAt        string      `json:"appliedAt,omitempty"`
+	// Studio and Date are captured from Adult identification alongside Title,
+	// even on an Unmatched (web-identified-only) proposal — SubmitDraft needs
+	// them to give the scene back to the community databases.
+	Studio string `json:"studio,omitempty"`
+	Date   string `json:"date,omitempty"`
+	// DraftID and DraftSubmittedAt record a successful SubmitDraft call — set
+	// once, never cleared, so a proposal is never submitted as a draft twice.
+	DraftID          string `json:"draftId,omitempty"`
+	DraftSubmittedAt string `json:"draftSubmittedAt,omitempty"`
+	CreatedAt        string `json:"createdAt"`
+	AppliedAt        string `json:"appliedAt,omitempty"`
 }
 
 type Store struct {
@@ -120,12 +129,12 @@ func (s *Store) ReplacePending(ctx context.Context, m mode.Mode, wf Workflow, fr
 			INSERT INTO proposals (
 				mode, workflow, status, source_name, source_path, root_folder_path,
 				title, tvdb_id, tmdb_id, quality_profile_id, reason, tracked_id,
-				foreign_id, item_type, candidates_json
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				foreign_id, item_type, candidates_json, studio, scene_date
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			RETURNING id, created_at
 		`, string(p.Mode), string(p.Workflow), string(p.Status), p.SourceName, p.SourcePath, p.RootFolderPath,
 			p.Title, p.TVDBID, p.TMDBID, p.QualityProfileID, p.Reason, p.TrackedID,
-			p.ForeignID, p.ItemType, string(candidatesJSON))
+			p.ForeignID, p.ItemType, string(candidatesJSON), p.Studio, p.Date)
 		if err := row.Scan(&p.ID, &p.CreatedAt); err != nil {
 			return nil, fmt.Errorf("inserting proposal for %q: %w", p.SourceName, err)
 		}
@@ -143,7 +152,8 @@ func (s *Store) List(ctx context.Context, m mode.Mode, wf Workflow) ([]Proposal,
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, mode, workflow, status, source_name, source_path, root_folder_path,
 		       title, tvdb_id, tmdb_id, quality_profile_id, reason, tracked_id,
-		       foreign_id, item_type, candidates_json,
+		       foreign_id, item_type, candidates_json, studio, scene_date,
+		       draft_id, COALESCE(draft_submitted_at, ''),
 		       created_at, COALESCE(applied_at, '')
 		FROM proposals WHERE mode = ? AND workflow = ? ORDER BY id DESC
 	`, string(m), string(wf))
@@ -168,7 +178,8 @@ func (s *Store) Get(ctx context.Context, id int64) (*Proposal, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT id, mode, workflow, status, source_name, source_path, root_folder_path,
 		       title, tvdb_id, tmdb_id, quality_profile_id, reason, tracked_id,
-		       foreign_id, item_type, candidates_json,
+		       foreign_id, item_type, candidates_json, studio, scene_date,
+		       draft_id, COALESCE(draft_submitted_at, ''),
 		       created_at, COALESCE(applied_at, '')
 		FROM proposals WHERE id = ?
 	`, id)
@@ -206,6 +217,22 @@ func (s *Store) Dismiss(ctx context.Context, id int64) error {
 	return checkAffected(res, id)
 }
 
+// MarkDraftSubmitted records that a scene draft was successfully submitted to
+// a community database for proposal id, stamping draftID and the current
+// time. Does not change Status — the proposal stays Unmatched (or whatever it
+// was) since submitting a draft doesn't identify the file; it only offers it
+// up for others to identify.
+func (s *Store) MarkDraftSubmitted(ctx context.Context, id int64, draftID string) error {
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE proposals SET draft_id = ?, draft_submitted_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+		WHERE id = ?
+	`, draftID, id)
+	if err != nil {
+		return fmt.Errorf("marking proposal %d draft-submitted: %w", id, err)
+	}
+	return checkAffected(res, id)
+}
+
 func checkAffected(res sql.Result, id int64) error {
 	n, err := res.RowsAffected()
 	if err != nil {
@@ -226,7 +253,8 @@ func scanProposal(row rowScanner) (Proposal, error) {
 	var m, wf, status, candidatesJSON string
 	if err := row.Scan(&p.ID, &m, &wf, &status, &p.SourceName, &p.SourcePath, &p.RootFolderPath,
 		&p.Title, &p.TVDBID, &p.TMDBID, &p.QualityProfileID, &p.Reason, &p.TrackedID,
-		&p.ForeignID, &p.ItemType, &candidatesJSON,
+		&p.ForeignID, &p.ItemType, &candidatesJSON, &p.Studio, &p.Date,
+		&p.DraftID, &p.DraftSubmittedAt,
 		&p.CreatedAt, &p.AppliedAt); err != nil {
 		return Proposal{}, err
 	}

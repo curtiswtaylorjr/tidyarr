@@ -162,6 +162,72 @@ func TestReplacePending_PersistsForeignIDAndItemType(t *testing.T) {
 	}
 }
 
+// Adult Rename captures Studio/Date at Scan time even for Unmatched
+// (web-identified-only) proposals — SubmitDraft needs them for give-back.
+func TestReplacePending_PersistsStudioAndDate(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	saved, err := s.ReplacePending(ctx, mode.Adult, Rename, []Proposal{
+		{
+			Status: Unmatched, SourceName: "Some Scene", SourcePath: "/media/Adult/Some Scene",
+			RootFolderPath: "/media/Adult", Title: "Some Scene",
+			Studio: "Some Studio", Date: "2024", Reason: "web-identified only",
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if saved[0].Studio != "Some Studio" || saved[0].Date != "2024" {
+		t.Fatalf("expected Studio/Date to survive the insert, got %+v", saved[0])
+	}
+
+	got, err := s.Get(ctx, saved[0].ID)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.Studio != "Some Studio" || got.Date != "2024" {
+		t.Fatalf("expected Studio/Date to round-trip from storage, got %+v", got)
+	}
+}
+
+func TestMarkDraftSubmitted_PersistsDraftID(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	saved, err := s.ReplacePending(ctx, mode.Adult, Rename, []Proposal{
+		{Status: Unmatched, SourceName: "Some Scene", Title: "Some Scene"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if saved[0].DraftID != "" || saved[0].DraftSubmittedAt != "" {
+		t.Fatalf("expected no draft yet, got %+v", saved[0])
+	}
+
+	if err := s.MarkDraftSubmitted(ctx, saved[0].ID, "draft123"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got, err := s.Get(ctx, saved[0].ID)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.DraftID != "draft123" || got.DraftSubmittedAt == "" {
+		t.Fatalf("expected DraftID/DraftSubmittedAt to persist, got %+v", got)
+	}
+	if got.Status != Unmatched {
+		t.Fatalf("expected status to remain Unmatched after a draft submission, got %q", got.Status)
+	}
+}
+
+func TestMarkDraftSubmitted_NotFound(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.MarkDraftSubmitted(context.Background(), 999, "x"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected ErrNotFound, got %v", err)
+	}
+}
+
 func TestReplacePending_LeavesAppliedAndDismissedAlone(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()

@@ -12,6 +12,7 @@ import (
 	"github.com/curtiswtaylorjr/tidyarr/internal/mode"
 	"github.com/curtiswtaylorjr/tidyarr/internal/proposals"
 	"github.com/curtiswtaylorjr/tidyarr/internal/servarr"
+	"github.com/curtiswtaylorjr/tidyarr/internal/stashbox"
 )
 
 func newTestSession(t *testing.T, app servarr.App, handler http.HandlerFunc) *mode.Session {
@@ -394,5 +395,81 @@ func TestScan_AdultFailsFastWhenIdentifyUnconfigured(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "identification isn't configured") {
 		t.Errorf("expected an actionable config error mentioning identification, got %v", err)
+	}
+}
+
+func TestSubmitDraft_Success(t *testing.T) {
+	var gotTitle string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Variables struct {
+				Input struct {
+					Title string `json:"title"`
+				} `json:"input"`
+			} `json:"variables"`
+		}
+		json.NewDecoder(r.Body).Decode(&req)
+		gotTitle = req.Variables.Input.Title
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"data":{"submitSceneDraft":{"id":"draft123"}}}`))
+	}))
+	defer srv.Close()
+
+	sess := newTestSession(t, servarr.Whisparr, func(w http.ResponseWriter, r *http.Request) {
+		t.Fatalf("SubmitDraft must never call the *arr app, got %s %s", r.Method, r.URL.Path)
+	})
+	sess.Identify = &identify.Identifier{GiveBack: identify.NewGiveBack(map[string]*stashbox.Client{
+		"tpdb": stashbox.New(stashbox.Config{Endpoint: srv.URL, APIKey: "k", IsBearer: true}, srv.Client()),
+	})}
+
+	p := proposals.Proposal{
+		ID: 1, Workflow: proposals.Rename, Status: proposals.Unmatched,
+		Title: "Some Scene", Studio: "Some Studio", Date: "2024",
+	}
+	draftID, err := SubmitDraft(context.Background(), sess, p)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if draftID != "draft123" {
+		t.Fatalf("got draft id %q", draftID)
+	}
+	if gotTitle != "Some Scene" {
+		t.Fatalf("expected the proposal's title to reach the give-back mutation, got %q", gotTitle)
+	}
+}
+
+func TestSubmitDraft_RejectsNonUnmatchedProposal(t *testing.T) {
+	sess := newTestSession(t, servarr.Whisparr, func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("must not call the *arr app")
+	})
+	sess.Identify = &identify.Identifier{GiveBack: identify.NewGiveBack(nil)}
+
+	p := proposals.Proposal{ID: 1, Workflow: proposals.Rename, Status: proposals.Pending, Title: "X"}
+	if _, err := SubmitDraft(context.Background(), sess, p); err == nil {
+		t.Fatal("expected an error for a non-Unmatched proposal")
+	}
+}
+
+func TestSubmitDraft_RejectsAlreadyDrafted(t *testing.T) {
+	sess := newTestSession(t, servarr.Whisparr, func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("must not call the *arr app")
+	})
+	sess.Identify = &identify.Identifier{GiveBack: identify.NewGiveBack(nil)}
+
+	p := proposals.Proposal{ID: 1, Workflow: proposals.Rename, Status: proposals.Unmatched, Title: "X", DraftID: "already-there"}
+	if _, err := SubmitDraft(context.Background(), sess, p); err == nil {
+		t.Fatal("expected an error for a proposal that already has a draft")
+	}
+}
+
+func TestSubmitDraft_RejectsUnconfiguredGiveBack(t *testing.T) {
+	sess := newTestSession(t, servarr.Whisparr, func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("must not call the *arr app")
+	})
+	// sess.Identify left nil — no Ollama backbone configured at all.
+
+	p := proposals.Proposal{ID: 1, Workflow: proposals.Rename, Status: proposals.Unmatched, Title: "X"}
+	if _, err := SubmitDraft(context.Background(), sess, p); err == nil {
+		t.Fatal("expected an error when give-back isn't configured")
 	}
 }

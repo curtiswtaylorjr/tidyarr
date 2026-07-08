@@ -95,6 +95,39 @@ func TestSubmitDraft_Success(t *testing.T) {
 	}
 }
 
+// TPDB is where the original CLI ultimately submitted unknown titles — when
+// both boxes are configured, SubmitDraft must prefer tpdb over stashdb.
+func TestSubmitDraft_PrefersTPDBWhenConfigured(t *testing.T) {
+	var tpdbCalled, stashdbCalled bool
+	tpdbSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		tpdbCalled = true
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"submitSceneDraft":{"id":"tpdb-draft"}}}`))
+	}))
+	defer tpdbSrv.Close()
+	stashdbSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		stashdbCalled = true
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"submitSceneDraft":{"id":"stashdb-draft"}}}`))
+	}))
+	defer stashdbSrv.Close()
+
+	tpdbClient := stashbox.New(stashbox.Config{Endpoint: tpdbSrv.URL, APIKey: "k", IsBearer: true}, &http.Client{Timeout: 5 * time.Second})
+	stashdbClient := stashbox.New(stashbox.Config{Endpoint: stashdbSrv.URL, APIKey: "k"}, &http.Client{Timeout: 5 * time.Second})
+	g := NewGiveBack(map[string]*stashbox.Client{"tpdb": tpdbClient, "stashdb": stashdbClient})
+
+	id, err := g.SubmitDraft(context.Background(), "Title", "Studio", "2024")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if id != "tpdb-draft" {
+		t.Fatalf("expected tpdb's draft id, got %q", id)
+	}
+	if !tpdbCalled || stashdbCalled {
+		t.Fatalf("expected only tpdb to be called, got tpdbCalled=%v stashdbCalled=%v", tpdbCalled, stashdbCalled)
+	}
+}
+
 // A "not authorized" response latches draft submission off for the rest of
 // this GiveBack's lifetime, so the caller doesn't need to log the same
 // warning once per file.

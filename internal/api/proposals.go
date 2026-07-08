@@ -138,6 +138,51 @@ func applyByWorkflow(ctx context.Context, propStore *proposals.Store, sess *mode
 	}
 }
 
+// submitDraftHandler gives an Adult proposal's identification back to the
+// community databases (TPDB/StashDB) — a separate, explicitly human-triggered
+// action from Apply, only meaningful for Unmatched Adult Rename proposals
+// that were confidently AI-identified but matched nothing (see
+// rename.SubmitDraft's doc comment for why this isn't automatic).
+func submitDraftHandler(httpClient *http.Client, connStore *connections.Store, settingsStore *settings.Store, propStore *proposals.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id, ok := parseProposalID(w, r)
+		if !ok {
+			return
+		}
+		ctx := r.Context()
+
+		p, err := propStore.Get(ctx, id)
+		if err != nil {
+			proposalNotFoundOr500(w, err)
+			return
+		}
+
+		sess, err := mode.Build(ctx, connStore, settingsStore, httpClient, p.Mode)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		draftID, err := rename.SubmitDraft(ctx, sess, *p)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		if err := propStore.MarkDraftSubmitted(ctx, id, draftID); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		updated, err := propStore.Get(ctx, id)
+		if err != nil {
+			proposalNotFoundOr500(w, err)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(updated)
+	}
+}
+
 // dismissProposalHandler marks one proposal reviewed-and-rejected, dropping
 // it out of the live queue without acting on it.
 func dismissProposalHandler(propStore *proposals.Store) http.HandlerFunc {

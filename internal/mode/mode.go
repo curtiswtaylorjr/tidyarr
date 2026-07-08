@@ -48,6 +48,16 @@ const AdultOllamaModelKey = "adult_ollama_model"
 // constant is correct.
 const adultThrottleInterval = 1 * time.Second
 
+// TPDBGraphQLURL is TPDB's stash-box-protocol-compatible GraphQL endpoint,
+// used ONLY for give-back (fingerprint/draft submission) — a completely
+// different host from the REST search API at the "tpdb" connection's URL.
+// Hardcoded rather than a connection field: TPDB is a single fixed public
+// service, not a self-hostable app like Whisparr, so there's nothing for a
+// user to point it at. The same API key configured for the "tpdb" connection
+// authenticates here too (as a Bearer token). A var (not const) so tests can
+// override it to point at a fake server.
+var TPDBGraphQLURL = "https://theporndb.net/graphql"
+
 // service reports which connections.Store key and servarr.App back this
 // mode's primary client.
 func (m Mode) service() (service string, app servarr.App, err error) {
@@ -135,15 +145,18 @@ func buildIdentifier(ctx context.Context, store *connections.Store, settingsStor
 	}
 
 	boxes := map[string]*stashbox.Client{}
+	giveBackBoxes := map[string]*stashbox.Client{}
 	for _, name := range []string{"stashdb", "fansdb"} {
 		conn, err := optionalConn(ctx, store, name)
 		if err != nil {
 			return nil, err
 		}
 		if conn != nil {
-			boxes[name] = stashbox.New(stashbox.Config{
+			client := stashbox.New(stashbox.Config{
 				Endpoint: conn.URL, APIKey: conn.APIKey, IsBearer: false, HasVoteField: true,
 			}, httpClient)
+			boxes[name] = client
+			giveBackBoxes[name] = client
 		}
 	}
 
@@ -152,6 +165,11 @@ func buildIdentifier(ctx context.Context, store *connections.Store, settingsStor
 		return nil, err
 	} else if conn != nil {
 		tpdb = tpdbrest.New(conn.URL, conn.APIKey, httpClient)
+		// TPDB's GraphQL endpoint (give-back only) is a different host from its
+		// REST search API, but shares the same API key — see TPDBGraphQLURL.
+		giveBackBoxes["tpdb"] = stashbox.New(stashbox.Config{
+			Endpoint: TPDBGraphQLURL, APIKey: conn.APIKey, IsBearer: true, HasVoteField: false,
+		}, httpClient)
 	}
 
 	var brave *bravesearch.Client
@@ -166,6 +184,7 @@ func buildIdentifier(ctx context.Context, store *connections.Store, settingsStor
 		Ollama:   ollama.New(ollamaConn.URL, model, httpClient),
 		Brave:    brave,
 		Throttle: throttle.New(adultThrottleInterval),
+		GiveBack: identify.NewGiveBack(giveBackBoxes),
 	}, nil
 }
 

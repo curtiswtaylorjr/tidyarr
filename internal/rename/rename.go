@@ -137,6 +137,12 @@ func proposeOneAdult(
 	}
 	res, err := ident.Identify(ctx, uf.Name, filepath.Base(root.Path))
 	p.Status, p.Reason, p.Title, p.ForeignID, p.ItemType = classifyAdultMatch(res, err)
+	if res != nil {
+		// Captured regardless of match outcome: an Unmatched (web-identified-only)
+		// proposal still needs Studio/Date for SubmitDraft to give the scene back
+		// to the community databases.
+		p.Studio, p.Date = res.Studio, res.Date
+	}
 	if p.Status == proposals.Pending {
 		p.QualityProfileID = servarr.DefaultQualityProfileID(tracked, root.Path, profiles)
 	}
@@ -198,4 +204,33 @@ func Apply(ctx context.Context, sess *mode.Session, p proposals.Proposal) (track
 		return id, fmt.Errorf("registered as id=%d but triggering the downloaded-files scan failed: %w", id, err)
 	}
 	return id, nil
+}
+
+// SubmitDraft gives an Adult proposal's identification back to the community
+// databases (TPDB preferred, StashDB as fallback — see identify.GiveBack) when
+// AI+web-search confidently identified a file (Title/Studio present) but it
+// matched no existing scene anywhere. This is a distinct, human-triggered
+// action from Apply — unlike the original CLI, which submitted automatically
+// during its scan, Tidyarr never fires an outbound mutation without an
+// explicit human decision (see the design spec's staged-for-approval
+// principle). p must be Unmatched and not already have a DraftID — submitting
+// a draft twice for the same proposal is refused rather than silently
+// duplicating it on the remote database.
+func SubmitDraft(ctx context.Context, sess *mode.Session, p proposals.Proposal) (string, error) {
+	if p.Workflow != proposals.Rename {
+		return "", fmt.Errorf("proposal %d is a %q proposal, not rename — cannot submit a draft", p.ID, p.Workflow)
+	}
+	if p.Status != proposals.Unmatched {
+		return "", fmt.Errorf("proposal %d is %q, not unmatched — nothing to give back", p.ID, p.Status)
+	}
+	if p.DraftID != "" {
+		return "", fmt.Errorf("proposal %d already has a draft (%s) — refusing to submit a duplicate", p.ID, p.DraftID)
+	}
+	if p.Title == "" {
+		return "", fmt.Errorf("proposal %d has no identified title — nothing to give back", p.ID)
+	}
+	if sess.Identify == nil || sess.Identify.GiveBack == nil {
+		return "", fmt.Errorf("give-back isn't configured — add a TPDB or StashDB connection in Settings")
+	}
+	return sess.Identify.GiveBack.SubmitDraft(ctx, p.Title, p.Studio, p.Date)
 }

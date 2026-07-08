@@ -18,6 +18,10 @@ type Identifier struct {
 	Ollama   *ollama.Client
 	Brave    *bravesearch.Client // nil if no Brave key is available — web search step is skipped
 	Throttle *throttle.Throttle
+	// GiveBack submits identification results back to the community databases
+	// (fingerprints, or scene drafts for web-identified-only matches). Nil if
+	// neither TPDB nor StashDB/FansDB is configured — callers must nil-check.
+	GiveBack *GiveBack
 }
 
 var skipParentNames = map[string]bool{

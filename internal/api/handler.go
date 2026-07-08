@@ -51,6 +51,7 @@ func NewMux(httpClient *http.Client, connStore *connections.Store, propStore *pr
 	mux.HandleFunc("PUT /api/settings/adult-ollama-model", putAdultOllamaModelHandler(settingsStore))
 
 	mux.HandleFunc("POST /api/proposals/{id}/apply", applyProposalHandler(httpClient, connStore, settingsStore, propStore))
+	mux.HandleFunc("POST /api/proposals/{id}/submit-draft", submitDraftHandler(httpClient, connStore, settingsStore, propStore))
 	mux.HandleFunc("POST /api/proposals/{id}/dismiss", dismissProposalHandler(propStore))
 	return mux
 }

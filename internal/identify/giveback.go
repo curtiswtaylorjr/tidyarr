@@ -48,9 +48,11 @@ func (g *GiveBack) SubmitFingerprint(ctx context.Context, box, sceneID, phash st
 	return client.SubmitFingerprint(ctx, sceneID, phash, durationSeconds)
 }
 
-// SubmitDraft submits a new scene draft to StashDB for community review, when
+// SubmitDraft submits a new scene draft for community review, when
 // AI+web-search confidently identified a file but it matches NO existing
-// scene anywhere.
+// scene anywhere. TPDB is preferred when configured (it's the box the
+// original CLI ultimately submitted unknown titles to); StashDB is the
+// fallback when TPDB isn't configured.
 //
 // Auto-disables draft submission for the REST of this run's lifetime (this
 // GiveBack instance) once a "not authorized" response is seen — the current
@@ -65,9 +67,12 @@ func (g *GiveBack) SubmitDraft(ctx context.Context, title, studio, date string) 
 		return "", ErrDraftSubmissionDisabled
 	}
 
-	client, ok := g.Boxes["stashdb"]
+	client, ok := g.Boxes["tpdb"]
 	if !ok || client == nil {
-		return "", fmt.Errorf("stashdb not configured — cannot submit a draft")
+		client, ok = g.Boxes["stashdb"]
+	}
+	if !ok || client == nil {
+		return "", fmt.Errorf("neither tpdb nor stashdb configured — cannot submit a draft")
 	}
 
 	draftID, err := client.SubmitSceneDraft(ctx, title, studio, date)
