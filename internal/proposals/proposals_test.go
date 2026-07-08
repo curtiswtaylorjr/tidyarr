@@ -123,6 +123,45 @@ func TestReplacePending_PersistsTrackedIDSetAtScanTime(t *testing.T) {
 	}
 }
 
+// Adult Rename sets ForeignID/ItemType at Scan time (derived from the AI
+// identification result) — ReplacePending's INSERT and both SELECT paths must
+// persist and round-trip them, proving the six order-sensitive column sites
+// all agree.
+func TestReplacePending_PersistsForeignIDAndItemType(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	saved, err := s.ReplacePending(ctx, mode.Adult, Rename, []Proposal{
+		{
+			Status: Pending, SourceName: "Some Scene", SourcePath: "/media/Adult/Some Scene",
+			RootFolderPath: "/media/Adult", Title: "Some Scene",
+			ForeignID: "abc-uuid", ItemType: "scene",
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if saved[0].ForeignID != "abc-uuid" || saved[0].ItemType != "scene" {
+		t.Fatalf("expected ForeignID/ItemType to survive the insert, got %+v", saved[0])
+	}
+
+	got, err := s.Get(ctx, saved[0].ID)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.ForeignID != "abc-uuid" || got.ItemType != "scene" {
+		t.Fatalf("expected ForeignID/ItemType to round-trip from storage, got %+v", got)
+	}
+
+	listed, err := s.List(ctx, mode.Adult, Rename)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(listed) != 1 || listed[0].ForeignID != "abc-uuid" || listed[0].ItemType != "scene" {
+		t.Fatalf("expected List to reflect the persisted identifiers, got %+v", listed)
+	}
+}
+
 func TestReplacePending_LeavesAppliedAndDismissedAlone(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()

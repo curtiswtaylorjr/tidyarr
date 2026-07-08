@@ -76,6 +76,8 @@ type Proposal struct {
 	QualityProfileID int         `json:"qualityProfileId,omitempty"`
 	Reason           string      `json:"reason,omitempty"`
 	TrackedID        int         `json:"trackedId,omitempty"`
+	ForeignID        string      `json:"foreignId,omitempty"`
+	ItemType         string      `json:"itemType,omitempty"`
 	Candidates       []Candidate `json:"candidates,omitempty"`
 	CreatedAt        string      `json:"createdAt"`
 	AppliedAt        string      `json:"appliedAt,omitempty"`
@@ -117,11 +119,13 @@ func (s *Store) ReplacePending(ctx context.Context, m mode.Mode, wf Workflow, fr
 		row := tx.QueryRowContext(ctx, `
 			INSERT INTO proposals (
 				mode, workflow, status, source_name, source_path, root_folder_path,
-				title, tvdb_id, tmdb_id, quality_profile_id, reason, tracked_id, candidates_json
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				title, tvdb_id, tmdb_id, quality_profile_id, reason, tracked_id,
+				foreign_id, item_type, candidates_json
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			RETURNING id, created_at
 		`, string(p.Mode), string(p.Workflow), string(p.Status), p.SourceName, p.SourcePath, p.RootFolderPath,
-			p.Title, p.TVDBID, p.TMDBID, p.QualityProfileID, p.Reason, p.TrackedID, string(candidatesJSON))
+			p.Title, p.TVDBID, p.TMDBID, p.QualityProfileID, p.Reason, p.TrackedID,
+			p.ForeignID, p.ItemType, string(candidatesJSON))
 		if err := row.Scan(&p.ID, &p.CreatedAt); err != nil {
 			return nil, fmt.Errorf("inserting proposal for %q: %w", p.SourceName, err)
 		}
@@ -138,7 +142,8 @@ func (s *Store) ReplacePending(ctx context.Context, m mode.Mode, wf Workflow, fr
 func (s *Store) List(ctx context.Context, m mode.Mode, wf Workflow) ([]Proposal, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, mode, workflow, status, source_name, source_path, root_folder_path,
-		       title, tvdb_id, tmdb_id, quality_profile_id, reason, tracked_id, candidates_json,
+		       title, tvdb_id, tmdb_id, quality_profile_id, reason, tracked_id,
+		       foreign_id, item_type, candidates_json,
 		       created_at, COALESCE(applied_at, '')
 		FROM proposals WHERE mode = ? AND workflow = ? ORDER BY id DESC
 	`, string(m), string(wf))
@@ -162,7 +167,8 @@ func (s *Store) List(ctx context.Context, m mode.Mode, wf Workflow) ([]Proposal,
 func (s *Store) Get(ctx context.Context, id int64) (*Proposal, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT id, mode, workflow, status, source_name, source_path, root_folder_path,
-		       title, tvdb_id, tmdb_id, quality_profile_id, reason, tracked_id, candidates_json,
+		       title, tvdb_id, tmdb_id, quality_profile_id, reason, tracked_id,
+		       foreign_id, item_type, candidates_json,
 		       created_at, COALESCE(applied_at, '')
 		FROM proposals WHERE id = ?
 	`, id)
@@ -219,7 +225,8 @@ func scanProposal(row rowScanner) (Proposal, error) {
 	var p Proposal
 	var m, wf, status, candidatesJSON string
 	if err := row.Scan(&p.ID, &m, &wf, &status, &p.SourceName, &p.SourcePath, &p.RootFolderPath,
-		&p.Title, &p.TVDBID, &p.TMDBID, &p.QualityProfileID, &p.Reason, &p.TrackedID, &candidatesJSON,
+		&p.Title, &p.TVDBID, &p.TMDBID, &p.QualityProfileID, &p.Reason, &p.TrackedID,
+		&p.ForeignID, &p.ItemType, &candidatesJSON,
 		&p.CreatedAt, &p.AppliedAt); err != nil {
 		return Proposal{}, err
 	}

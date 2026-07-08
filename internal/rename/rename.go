@@ -16,6 +16,7 @@ import (
 	"strings"
 
 	"github.com/curtiswtaylorjr/tidyarr/internal/config"
+	"github.com/curtiswtaylorjr/tidyarr/internal/identify"
 	"github.com/curtiswtaylorjr/tidyarr/internal/mode"
 	"github.com/curtiswtaylorjr/tidyarr/internal/proposals"
 	"github.com/curtiswtaylorjr/tidyarr/internal/searchterm"
@@ -28,6 +29,14 @@ import (
 // (Unmatched) — surfaced either way, never silently dropped.
 func Scan(ctx context.Context, sess *mode.Session) ([]proposals.Proposal, error) {
 	client := sess.Servarr
+
+	// Adult identification runs through sess.Identify, which mode.Build leaves
+	// nil when the Ollama backbone isn't configured. Fail fast with an
+	// actionable message rather than nil-panicking mid-walk or burying the real
+	// "you haven't configured identification" signal under N Unmatched rows.
+	if sess.Mode == mode.Adult && sess.Identify == nil {
+		return nil, fmt.Errorf("adult identification isn't configured — add an Ollama connection and set the Ollama model in Settings, plus at least one of StashDB/FansDB/TPDB")
+	}
 
 	folders, err := client.RootFolders(ctx)
 	if err != nil {
@@ -48,7 +57,11 @@ func Scan(ctx context.Context, sess *mode.Session) ([]proposals.Proposal, error)
 			if config.SidecarExts[strings.ToLower(filepath.Ext(uf.Name))] {
 				continue
 			}
-			out = append(out, proposeOne(ctx, client, sess.Mode, root, uf, tracked, profiles))
+			if sess.Mode == mode.Adult {
+				out = append(out, proposeOneAdult(ctx, sess.Identify, sess.Mode, root, uf, tracked, profiles))
+			} else {
+				out = append(out, proposeOne(ctx, client, sess.Mode, root, uf, tracked, profiles))
+			}
 		}
 	}
 	return out, nil
@@ -107,6 +120,49 @@ func findTrackedDuplicate(tracked []servarr.TrackedItem, app servarr.App, lr ser
 	return nil
 }
 
+// proposeOneAdult resolves one unmapped folder via the AI identification
+// pipeline (sess.Identify) instead of the *arr app's own TVDB/TMDB Lookup.
+// Duplicate detection is intentionally skipped: TrackedItem carries no
+// ForeignID/StashId to key an Adult scene against (see spec §7) — an
+// already-tracked duplicate surfaces safely as Whisparr's own foreignId
+// uniqueness rejection at Apply, not silent corruption.
+func proposeOneAdult(
+	ctx context.Context, ident *identify.Identifier, m mode.Mode,
+	root servarr.RootFolder, uf servarr.UnmappedFolder,
+	tracked []servarr.TrackedItem, profiles []servarr.QualityProfile,
+) proposals.Proposal {
+	p := proposals.Proposal{
+		Mode: m, Workflow: proposals.Rename,
+		SourceName: uf.Name, SourcePath: uf.Path, RootFolderPath: root.Path,
+	}
+	res, err := ident.Identify(ctx, uf.Name, filepath.Base(root.Path))
+	p.Status, p.Reason, p.Title, p.ForeignID, p.ItemType = classifyAdultMatch(res, err)
+	if p.Status == proposals.Pending {
+		p.QualityProfileID = servarr.DefaultQualityProfileID(tracked, root.Path, profiles)
+	}
+	return p
+}
+
+// classifyAdultMatch maps a completed Identify result to a proposal's
+// identification-derived fields, or to an Unmatched reason. A match without a
+// valid stash-box scene identifier (web_search-only, SceneID=="" || Box=="")
+// is a correctness requirement to reject: it has no valid Whisparr ForeignID.
+func classifyAdultMatch(res *identify.MatchResult, err error) (status proposals.Status, reason, title, foreignID, itemType string) {
+	switch {
+	case err != nil:
+		return proposals.Unmatched, fmt.Sprintf("identification failed: %v", err), "", "", ""
+	case res == nil:
+		return proposals.Unmatched, "no confident identification", "", "", ""
+	case res.SceneID == "" || res.Box == "":
+		return proposals.Unmatched, "web-identified only (no scene ID) — needs manual review", "", "", ""
+	}
+	foreignID = res.SceneID
+	if res.Box == "tpdb" {
+		foreignID = "tpdbId:" + res.SceneID
+	}
+	return proposals.Pending, "", res.Title, foreignID, res.Type
+}
+
 // Apply registers p's identified item with sess's Servarr app, then triggers
 // a broad downloaded-scan so the app picks up the file already sitting on
 // disk under p.RootFolderPath. p must be Pending — Apply refuses anything
@@ -122,8 +178,18 @@ func Apply(ctx context.Context, sess *mode.Session, p proposals.Proposal) (track
 		return 0, fmt.Errorf("proposal %d is %q, not pending — nothing to apply", p.ID, p.Status)
 	}
 
+	// Structural safety guard at the mutation boundary: a Whisparr scene needs
+	// BOTH a ForeignID and an ItemType, or Whisparr silently files it as a
+	// mis-typed movie (its ItemType enum's zero value is "movie"). Refuse here
+	// rather than trusting Scan-convention — even a hand-crafted or future-buggy
+	// Adult proposal can never be registered without a real scene identifier.
+	if sess.Servarr.AppType() == servarr.Whisparr && (p.ForeignID == "" || p.ItemType == "") {
+		return 0, fmt.Errorf("proposal %d has no scene identifier — refusing to register it as a mis-typed movie", p.ID)
+	}
+
 	id, err := sess.Servarr.Add(ctx, servarr.AddRequest{
 		Title: p.Title, TVDBID: p.TVDBID, TMDBID: p.TMDBID,
+		ForeignID: p.ForeignID, ItemType: p.ItemType,
 		QualityProfileID: p.QualityProfileID, RootFolderPath: p.RootFolderPath, Monitored: true,
 	})
 	if err != nil {

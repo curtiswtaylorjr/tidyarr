@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
+	"github.com/curtiswtaylorjr/tidyarr/internal/identify"
 	"github.com/curtiswtaylorjr/tidyarr/internal/mode"
 	"github.com/curtiswtaylorjr/tidyarr/internal/proposals"
 	"github.com/curtiswtaylorjr/tidyarr/internal/servarr"
@@ -17,8 +19,11 @@ func newTestSession(t *testing.T, app servarr.App, handler http.HandlerFunc) *mo
 	srv := httptest.NewServer(handler)
 	t.Cleanup(srv.Close)
 	m := mode.Movies
-	if app == servarr.Sonarr {
+	switch app {
+	case servarr.Sonarr:
 		m = mode.Series
+	case servarr.Whisparr:
+		m = mode.Adult
 	}
 	return &mode.Session{
 		Mode:    m,
@@ -234,5 +239,160 @@ func TestApply_RejectsNonPendingProposal(t *testing.T) {
 		if _, err := Apply(context.Background(), sess, proposals.Proposal{Status: status}); err == nil {
 			t.Errorf("expected Apply to refuse a %q proposal", status)
 		}
+	}
+}
+
+func TestApply_RegistersWhisparrSceneWithForeignID(t *testing.T) {
+	var addBody map[string]any
+	var scanTriggered bool
+	sess := newTestSession(t, servarr.Whisparr, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v3/movie":
+			json.NewDecoder(r.Body).Decode(&addBody)
+			w.Write([]byte(`{"id":77}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v3/command":
+			var body map[string]any
+			json.NewDecoder(r.Body).Decode(&body)
+			if body["name"] != "DownloadedMoviesScan" {
+				t.Errorf("expected a DownloadedMoviesScan trigger, got %+v", body)
+			}
+			scanTriggered = true
+			w.Write([]byte(`{}`))
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	})
+
+	p := proposals.Proposal{
+		ID: 1, Status: proposals.Pending, Title: "Some Scene",
+		ForeignID: "abc-uuid", ItemType: "scene",
+		QualityProfileID: 4, RootFolderPath: "/media/Adult",
+	}
+	id, err := Apply(context.Background(), sess, p)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if id != 77 {
+		t.Errorf("expected the tracked id from Add's response (77), got %d", id)
+	}
+	if !scanTriggered {
+		t.Error("expected Apply to trigger a downloaded-files scan after registering")
+	}
+	if addBody["foreignId"] != "abc-uuid" || addBody["itemType"] != "scene" {
+		t.Errorf("expected the scene identifiers in the Add body, got %+v", addBody)
+	}
+	addOptions, ok := addBody["addOptions"].(map[string]any)
+	if !ok || addOptions["searchForMovie"] != false {
+		t.Errorf("expected addOptions.searchForMovie=false, got %+v", addBody["addOptions"])
+	}
+}
+
+func TestApply_RefusesWhisparrProposalWithoutIdentifier(t *testing.T) {
+	// The guard must fire when EITHER field is blank — an empty ItemType alone
+	// still misclassifies a scene as a movie (client.go's AddRequest doc).
+	cases := []struct {
+		name string
+		p    proposals.Proposal
+	}{
+		{"blank foreignId", proposals.Proposal{Status: proposals.Pending, ForeignID: "", ItemType: "scene", Title: "S"}},
+		{"blank itemType", proposals.Proposal{Status: proposals.Pending, ForeignID: "abc", ItemType: "", Title: "S"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			sess := newTestSession(t, servarr.Whisparr, func(w http.ResponseWriter, r *http.Request) {
+				t.Fatalf("guard must refuse before any HTTP call, but got %s %s", r.Method, r.URL.Path)
+			})
+			if _, err := Apply(context.Background(), sess, tc.p); err == nil {
+				t.Fatal("expected Apply to refuse a Whisparr proposal missing a scene identifier")
+			}
+		})
+	}
+}
+
+func TestClassifyAdultMatch(t *testing.T) {
+	cases := []struct {
+		name          string
+		res           *identify.MatchResult
+		err           error
+		wantStatus    proposals.Status
+		wantReason    string
+		wantForeignID string
+		wantItemType  string
+		wantTitle     string
+	}{
+		{
+			name: "identify error", err: errTest,
+			wantStatus: proposals.Unmatched, wantReason: "identification failed: boom",
+		},
+		{
+			name: "nil match", res: nil,
+			wantStatus: proposals.Unmatched, wantReason: "no confident identification",
+		},
+		{
+			name:       "web_search only (no scene id)",
+			res:        &identify.MatchResult{Source: "web_search", SceneID: "", Box: ""},
+			wantStatus: proposals.Unmatched, wantReason: "web-identified only (no scene ID) — needs manual review",
+		},
+		{
+			name:       "stashdb match",
+			res:        &identify.MatchResult{Box: "stashdb", SceneID: "u1", Type: "scene", Title: "T"},
+			wantStatus: proposals.Pending, wantForeignID: "u1", wantItemType: "scene", wantTitle: "T",
+		},
+		{
+			name:       "fansdb match",
+			res:        &identify.MatchResult{Box: "fansdb", SceneID: "u2", Type: "scene"},
+			wantStatus: proposals.Pending, wantForeignID: "u2", wantItemType: "scene",
+		},
+		{
+			name:       "tpdb match gets tpdbId prefix",
+			res:        &identify.MatchResult{Box: "tpdb", SceneID: "77", Type: "scene"},
+			wantStatus: proposals.Pending, wantForeignID: "tpdbId:77", wantItemType: "scene",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			status, reason, title, foreignID, itemType := classifyAdultMatch(tc.res, tc.err)
+			if status != tc.wantStatus {
+				t.Errorf("status: got %q, want %q", status, tc.wantStatus)
+			}
+			if reason != tc.wantReason {
+				t.Errorf("reason: got %q, want %q", reason, tc.wantReason)
+			}
+			if foreignID != tc.wantForeignID {
+				t.Errorf("foreignID: got %q, want %q", foreignID, tc.wantForeignID)
+			}
+			if itemType != tc.wantItemType {
+				t.Errorf("itemType: got %q, want %q", itemType, tc.wantItemType)
+			}
+			if title != tc.wantTitle {
+				t.Errorf("title: got %q, want %q", title, tc.wantTitle)
+			}
+		})
+	}
+}
+
+var errTest = &testError{"boom"}
+
+type testError struct{ msg string }
+
+func (e *testError) Error() string { return e.msg }
+
+func TestScan_AdultFailsFastWhenIdentifyUnconfigured(t *testing.T) {
+	// newTestSession(Whisparr) builds an Adult session with Identify left nil —
+	// exactly the "no Ollama backbone configured" case. Scan must fail fast
+	// before any HTTP call.
+	sess := newTestSession(t, servarr.Whisparr, func(w http.ResponseWriter, r *http.Request) {
+		t.Fatalf("Scan must fail fast before any HTTP call, but got %s %s", r.Method, r.URL.Path)
+	})
+	if sess.Identify != nil {
+		t.Fatal("precondition: expected a nil Identify for this test")
+	}
+
+	_, err := Scan(context.Background(), sess)
+	if err == nil {
+		t.Fatal("expected Scan to fail fast when adult identification isn't configured")
+	}
+	if !strings.Contains(err.Error(), "identification isn't configured") {
+		t.Errorf("expected an actionable config error mentioning identification, got %v", err)
 	}
 }

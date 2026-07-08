@@ -13,9 +13,12 @@ migration runner, the Sonarr/Radarr/Whisparr client and the full
 StashDB/FansDB/TPDB/Brave/Ollama identification pipeline (ported from the
 CLIs this project grew out of), a `/api/connections` endpoint to test and
 persist service credentials (encrypted at rest — see below), and all four
-review workflows the design calls for, three of them for Movies/Series:
-**Rename** (`POST /api/modes/{movies,series}/rename/scan` finds orphaned
-files, identifies them, and stages one proposal per item), **Purge** (`POST
+review workflows the design calls for, three of them queue-staged:
+**Rename** (`POST /api/modes/{movies,series,adult}/rename/scan` finds orphaned
+files, identifies them, and stages one proposal per item — Movies/Series via
+the *arr app's own TVDB/TMDB lookup, Adult via the StashDB/FansDB/TPDB/Ollama
+identification pipeline, with Apply carrying the resolved scene identifier
+through to Whisparr V3), **Purge** (`POST
 /api/modes/{movies,series}/purge/scan` matches a per-mode tag allowlist,
 managed via `/api/modes/{mode}/purge/allowlist`, against every tracked
 item's native tags), and **Dedup**, Movies only for now (`POST
@@ -33,7 +36,7 @@ the live vocabulary and `POST`/`DELETE
 creating a genuinely new tag upstream automatically — this one isn't staged
 through the review queue, since assigning a tag is already a single
 deliberate action, not an automatic decision needing approval. The rest of
-Adult mode (Rename/Purge/Dedup), Series Dedup, AI-suggested tags, and the
+Adult mode (Purge/Dedup), Series Dedup, AI-suggested tags, and the
 React frontend don't exist yet. Not ready to run as a media tool.
 
 Secrets are encrypted at rest with a locally generated key
