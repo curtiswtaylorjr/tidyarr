@@ -49,6 +49,23 @@ func TestTestConnection_Sonarr_WrongKey(t *testing.T) {
 	}
 }
 
+func TestTestConnection_Whisparr_Success(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v3/rootfolder" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		w.Write([]byte(`[{"id":1,"path":"/media/Adult","accessible":true,"freeSpace":123}]`))
+	}))
+	defer srv.Close()
+
+	result := TestConnection(context.Background(), testHTTPClient(), ConnectionTestRequest{
+		Service: "whisparr", URL: srv.URL, APIKey: "test-key",
+	})
+	if !result.OK || result.Error != "" {
+		t.Fatalf("expected success, got %+v", result)
+	}
+}
+
 func TestTestConnection_Ollama_Success(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/tags" {

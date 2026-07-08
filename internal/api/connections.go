@@ -18,7 +18,7 @@ import (
 // read-only call against it — the same thing Settings' "Test connection"
 // button does. Nothing here is persisted.
 type ConnectionTestRequest struct {
-	Service string `json:"service"` // "radarr" | "sonarr" | "ollama" | "stash" | "stashdb" | "fansdb" | "tpdb" | "brave"
+	Service string `json:"service"` // "radarr" | "sonarr" | "whisparr" | "ollama" | "stash" | "stashdb" | "fansdb" | "tpdb" | "brave"
 	URL     string `json:"url"`
 	APIKey  string `json:"apiKey,omitempty"`
 }
@@ -43,6 +43,8 @@ func TestConnection(ctx context.Context, httpClient *http.Client, req Connection
 		return testServarr(ctx, httpClient, servarr.Radarr, req)
 	case "sonarr":
 		return testServarr(ctx, httpClient, servarr.Sonarr, req)
+	case "whisparr":
+		return testServarr(ctx, httpClient, servarr.Whisparr, req)
 	case "ollama":
 		return testOllama(ctx, httpClient, req)
 	case "stash":

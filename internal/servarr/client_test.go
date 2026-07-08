@@ -3,6 +3,7 @@ package servarr
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -317,5 +318,67 @@ func TestUpdateRootFolder_FetchesThenPutsWithMoveFilesTrue(t *testing.T) {
 	}
 	if putBody["someOtherField"] != "must-survive" {
 		t.Error("expected unrelated fields to round-trip unchanged, not be dropped")
+	}
+}
+
+func TestWhisparr_UsesRadarrShapedResourcesAndCommands(t *testing.T) {
+	var gotPath, gotMethod string
+	var gotBody map[string]any
+	c := newTestClient(t, Whisparr, func(w http.ResponseWriter, r *http.Request) {
+		gotPath, gotMethod = r.URL.Path, r.Method
+		json.NewDecoder(r.Body).Decode(&gotBody)
+		w.Write([]byte(`{}`))
+	})
+
+	if err := c.RescanTracked(context.Background(), 5); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if gotPath != "/api/v3/command" || gotMethod != http.MethodPost {
+		t.Fatalf("unexpected request: %s %s", gotMethod, gotPath)
+	}
+	if gotBody["name"] != "RescanMovie" || gotBody["movieId"] != float64(5) {
+		t.Errorf("expected Radarr-shaped RescanMovie/movieId, got %+v", gotBody)
+	}
+}
+
+func TestWhisparr_LookupUsesMovieResource(t *testing.T) {
+	c := newTestClient(t, Whisparr, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v3/movie/lookup" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		w.Write([]byte(`[{"title":"Some Scene","studio":"placeholder"}]`))
+	})
+	if _, err := c.Lookup(context.Background(), "some term"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestWhisparr_DeleteTrackedFileUsesMoviefileResource(t *testing.T) {
+	var gotPath string
+	c := newTestClient(t, Whisparr, func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.WriteHeader(http.StatusOK)
+	})
+	if err := c.DeleteTrackedFile(context.Background(), 7); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if gotPath != "/api/v3/moviefile/7" {
+		t.Errorf("unexpected path: %s", gotPath)
+	}
+}
+
+func TestWhisparr_AddIsUnsupported(t *testing.T) {
+	called := false
+	c := newTestClient(t, Whisparr, func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.Write([]byte(`{"id":1}`))
+	})
+
+	_, err := c.Add(context.Background(), AddRequest{Title: "Some Scene", QualityProfileID: 1, RootFolderPath: "/media/Adult"})
+	if !errors.Is(err, ErrWhisparrAddUnsupported) {
+		t.Fatalf("expected ErrWhisparrAddUnsupported, got %v", err)
+	}
+	if called {
+		t.Error("Add should return before making any HTTP request for Whisparr")
 	}
 }

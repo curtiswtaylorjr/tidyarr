@@ -1,15 +1,24 @@
-// Package servarr is a shared client for Sonarr's and Radarr's REST APIs —
-// nearly identical shapes (both are "servarr"-family apps), parameterized by
-// an App flag for the handful of places their resource/command names differ
-// (series vs movie, episodefile vs moviefile, RescanSeries vs RescanMovie).
-// One implementation, parameterized config, instead of two near-duplicate
-// clients.
+// Package servarr is a shared client for Sonarr's, Radarr's, and Whisparr's
+// REST APIs — nearly identical shapes (all three are "servarr"-family apps),
+// parameterized by an App flag for the handful of places their
+// resource/command names differ (series vs movie, episodefile vs moviefile,
+// RescanSeries vs RescanMovie). One implementation, parameterized config,
+// instead of near-duplicate clients.
+//
+// Whisparr support (App = Whisparr) targets V3 specifically, which is a
+// Radarr fork — confirmed via Whisparr's own GitHub issue tracker ("[V3]
+// Sync with Upstream Radarr Source Code", Whisparr/Whisparr#683) — not V2,
+// which was forked from Sonarr instead and has a different (series/episode-
+// shaped) entity model entirely. Every Whisparr-specific assumption below is
+// commented with how confident it is and where that confidence comes from;
+// none of it has been checked against a live V3 instance yet.
 package servarr
 
 import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -17,13 +26,17 @@ import (
 	"github.com/curtiswtaylorjr/tidyarr/internal/httpx"
 )
 
-// App distinguishes Sonarr from Radarr for the handful of endpoint/command
-// names that differ between them.
+// App distinguishes Sonarr, Radarr, and Whisparr for the handful of
+// endpoint/command names that differ between them.
 type App int
 
 const (
 	Sonarr App = iota
 	Radarr
+	// Whisparr means Whisparr V3 specifically (a Radarr fork) — see the
+	// package doc comment. Not V2 (a Sonarr fork), which this client does
+	// not support.
+	Whisparr
 )
 
 // Config parameterizes the client per app instance.
@@ -42,39 +55,67 @@ func New(cfg Config, httpClient *http.Client) *Client {
 	return &Client{cfg: cfg, http: httpClient}
 }
 
-// itemResource is "series" for Sonarr, "movie" for Radarr — used to build
-// /api/v3/{itemResource}... paths.
+// itemResource is "series" for Sonarr, "movie" for Radarr and Whisparr V3 —
+// used to build /api/v3/{itemResource}... paths.
+//
+// Whisparr's "movie" is confirmed, not assumed: multiple real Whisparr V3
+// bug reports show a literal POST /api/v3/movie call for adding a scene
+// (Whisparr/Whisparr#1033), and devopsarr's generated SDK (built from
+// Whisparr's own live OpenAPI schema) documents GET /api/v3/movie/lookup.
 func (c *Client) itemResource() string {
-	if c.cfg.App == Sonarr {
+	switch c.cfg.App {
+	case Sonarr:
 		return "series"
+	default: // Radarr, Whisparr
+		return "movie"
 	}
-	return "movie"
 }
 
-// fileResource is "episodefile" for Sonarr, "moviefile" for Radarr.
+// fileResource is "episodefile" for Sonarr, "moviefile" for Radarr and
+// Whisparr V3.
+//
+// Whisparr's "moviefile" is a medium-confidence inference, not directly
+// observed: devopsarr's generated SDK docs list a MovieFileApi/
+// MovieFileResource for Whisparr (mirroring Radarr's naming exactly), but no
+// example request showing the literal path was found.
 func (c *Client) fileResource() string {
-	if c.cfg.App == Sonarr {
+	switch c.cfg.App {
+	case Sonarr:
 		return "episodefile"
+	default: // Radarr, Whisparr
+		return "moviefile"
 	}
-	return "moviefile"
 }
 
-// rescanCommand is the command name Sonarr/Radarr uses to rescan a single
-// tracked item's folder for new/changed files.
+// rescanCommand is the command name used to rescan a single tracked item's
+// folder for new/changed files.
+//
+// Whisparr's "RescanMovie" is UNVERIFIED — an assumption from V3's confirmed
+// Radarr-fork lineage, not observed directly anywhere. The Command API's
+// "name" field isn't part of Whisparr's published OpenAPI schema (it's a
+// free-form string validated server-side against the app's internal command
+// registry), so this needs a live check. A wrong value fails loudly (the
+// command endpoint rejects an unrecognized name) rather than silently
+// misbehaving, which is why this ships now instead of blocking on it.
 func (c *Client) rescanCommand() string {
-	if c.cfg.App == Sonarr {
+	switch c.cfg.App {
+	case Sonarr:
 		return "RescanSeries"
+	default: // Radarr, Whisparr (Whisparr unverified — see comment above)
+		return "RescanMovie"
 	}
-	return "RescanMovie"
 }
 
 // downloadedScanCommand is the command name for a broader "scan everything
-// under my root folders for files I don't know about yet" pass.
+// under my root folders for files I don't know about yet" pass. Same
+// unverified-for-Whisparr caveat as rescanCommand.
 func (c *Client) downloadedScanCommand() string {
-	if c.cfg.App == Sonarr {
+	switch c.cfg.App {
+	case Sonarr:
 		return "DownloadedEpisodesScan"
+	default: // Radarr, Whisparr (Whisparr unverified — see rescanCommand)
+		return "DownloadedMoviesScan"
 	}
-	return "DownloadedMoviesScan"
 }
 
 func (c *Client) do(ctx context.Context, method, path string, body any, out any) error {
@@ -217,6 +258,8 @@ func (c *Client) QualityProfiles(ctx context.Context) ([]QualityProfile, error) 
 // kids-classification (which RootFolderPath) decisions are made independently
 // by this tool; this call just hands the resolved answer to Sonarr/Radarr so
 // their own naming/import engine takes it from here.
+//
+// No Whisparr field here yet — see Add.
 type AddRequest struct {
 	Title            string
 	TVDBID           int // Sonarr only
@@ -226,10 +269,29 @@ type AddRequest struct {
 	Monitored        bool
 }
 
+// ErrWhisparrAddUnsupported is returned by Add for a Whisparr client — see
+// Add's doc comment for why this is a hard block rather than a guess.
+var ErrWhisparrAddUnsupported = errors.New("servarr: Add is not yet supported for Whisparr — the scene-identifying request field is unconfirmed")
+
 // Add registers a new series/movie. Sonarr/Radarr's own scan (call
 // ScanForDownloaded afterward) then imports whatever file already exists
 // under the given root folder, applying their own naming/organization.
+//
+// Whisparr is deliberately unsupported here, not guessed at: Radarr's Add
+// body identifies the item with a "tmdbId" int, and Whisparr's MovieResource
+// schema does list a tmdb_id field (inherited from the Radarr fork), but
+// nothing found confirms that's actually what Whisparr expects for a scene
+// identified by a StashDB UUID rather than a TMDB entry — TMDB doesn't
+// catalog adult scenes at all, so the field may be vestigial or repurposed.
+// Getting this wrong wouldn't fail loudly like a bad command name would; it
+// could silently register a scene with no real identification. Every other
+// method here (read-only or delete-by-ID) doesn't have that risk, which is
+// why they're supported today and this one isn't.
 func (c *Client) Add(ctx context.Context, req AddRequest) (id int, err error) {
+	if c.cfg.App == Whisparr {
+		return 0, ErrWhisparrAddUnsupported
+	}
+
 	body := map[string]any{
 		"title":            req.Title,
 		"qualityProfileId": req.QualityProfileID,
