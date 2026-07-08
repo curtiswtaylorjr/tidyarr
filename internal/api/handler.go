@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 
+	"github.com/curtiswtaylorjr/tidyarr/internal/allowlist"
 	"github.com/curtiswtaylorjr/tidyarr/internal/connections"
 	"github.com/curtiswtaylorjr/tidyarr/internal/proposals"
 )
@@ -13,17 +14,25 @@ import (
 // Scan, Apply), so its timeout and transport settings apply uniformly.
 // connStore persists what's actually configured — Test and Save are
 // deliberately separate actions, matching Settings' own "Test connection"
-// then "Save" flow. propStore backs the Rename (and future Purge/Dedup/Tag)
-// review queue.
-func NewMux(httpClient *http.Client, connStore *connections.Store, propStore *proposals.Store) *http.ServeMux {
+// then "Save" flow. propStore backs every workflow's review queue (Rename,
+// Purge, and whatever comes next); allowStore backs Purge's per-mode tag
+// allowlist specifically.
+func NewMux(httpClient *http.Client, connStore *connections.Store, propStore *proposals.Store, allowStore *allowlist.Store) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/connections/test", connectionsTestHandler(httpClient))
 	mux.HandleFunc("GET /api/connections", listConnectionsHandler(connStore))
 	mux.HandleFunc("PUT /api/connections/{service}", upsertConnectionHandler(connStore))
 	mux.HandleFunc("DELETE /api/connections/{service}", deleteConnectionHandler(connStore))
 
-	mux.HandleFunc("POST /api/modes/{mode}/rename/scan", scanHandler(httpClient, connStore, propStore))
-	mux.HandleFunc("GET /api/modes/{mode}/rename/proposals", listProposalsHandler(propStore))
+	mux.HandleFunc("POST /api/modes/{mode}/rename/scan", renameScanHandler(httpClient, connStore, propStore))
+	mux.HandleFunc("GET /api/modes/{mode}/rename/proposals", listProposalsHandler(propStore, proposals.Rename))
+
+	mux.HandleFunc("POST /api/modes/{mode}/purge/scan", purgeScanHandler(httpClient, connStore, propStore, allowStore))
+	mux.HandleFunc("GET /api/modes/{mode}/purge/proposals", listProposalsHandler(propStore, proposals.Purge))
+	mux.HandleFunc("GET /api/modes/{mode}/purge/allowlist", listAllowlistHandler(allowStore))
+	mux.HandleFunc("POST /api/modes/{mode}/purge/allowlist", addAllowlistTagHandler(allowStore))
+	mux.HandleFunc("DELETE /api/modes/{mode}/purge/allowlist/{tag}", removeAllowlistTagHandler(allowStore))
+
 	mux.HandleFunc("POST /api/proposals/{id}/apply", applyProposalHandler(httpClient, connStore, propStore))
 	mux.HandleFunc("POST /api/proposals/{id}/dismiss", dismissProposalHandler(propStore))
 	return mux

@@ -50,6 +50,32 @@ func TestReplacePending_InsertsAndAssignsIDs(t *testing.T) {
 	}
 }
 
+// Purge sets TrackedID at Scan time (it's an input identifying which
+// already-tracked item to delete, unlike Rename where it's only an output
+// of Apply) — ReplacePending's INSERT must actually persist it.
+func TestReplacePending_PersistsTrackedIDSetAtScanTime(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	saved, err := s.ReplacePending(ctx, mode.Movies, Purge, []Proposal{
+		{Status: Pending, SourceName: "Flagged Movie", SourcePath: "/x", RootFolderPath: "/media/Movies", TrackedID: 2},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if saved[0].TrackedID != 2 {
+		t.Fatalf("expected TrackedID to survive the insert, got %+v", saved[0])
+	}
+
+	got, err := s.Get(ctx, saved[0].ID)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.TrackedID != 2 {
+		t.Fatalf("expected TrackedID to round-trip from storage, got %+v", got)
+	}
+}
+
 func TestReplacePending_LeavesAppliedAndDismissedAlone(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()

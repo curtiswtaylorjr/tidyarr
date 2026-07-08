@@ -239,6 +239,37 @@ func (c *Client) DeleteTrackedFile(ctx context.Context, fileID int) error {
 	return c.do(ctx, http.MethodDelete, path, nil, nil)
 }
 
+// DeleteTracked permanently removes a tracked series/movie/scene AND its
+// underlying file(s) in one atomic call (deleteFiles=true) — the mechanism
+// behind Purge. Deliberately not a two-step unmonitor-then-delete-file: that
+// would leave a dangling unmonitored, fileless entry behind if the second
+// call never happened, which is a worse failure mode than this one call
+// simply not happening at all.
+func (c *Client) DeleteTracked(ctx context.Context, itemID int) error {
+	path := fmt.Sprintf("/api/v3/%s/%d?deleteFiles=true", c.itemResource(), itemID)
+	return c.do(ctx, http.MethodDelete, path, nil, nil)
+}
+
+// Tag is one of the app's native organizational tags — the same Tags
+// resource Sonarr, Radarr, and Whisparr V3 all expose identically (a stable,
+// long-documented part of the Servarr API, not something that varies by
+// app the way movie/series-shaped fields do).
+type Tag struct {
+	ID    int    `json:"id"`
+	Label string `json:"label"`
+}
+
+// Tags returns every tag currently defined in the app. A TrackedItem only
+// carries tag IDs (see TrackedItem.TagIDs) — resolve them against this list
+// to get human-readable labels.
+func (c *Client) Tags(ctx context.Context) ([]Tag, error) {
+	var out []Tag
+	if err := c.do(ctx, http.MethodGet, "/api/v3/tag", nil, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // QualityProfile is one of the app's configured quality profiles — needed to
 // register a new series/movie (Add requires a valid qualityProfileId).
 type QualityProfile struct {
@@ -340,6 +371,10 @@ type TrackedItem struct {
 	Certification    string   `json:"certification"`
 	QualityProfileID int      `json:"qualityProfileId"`
 	Overview         string   `json:"overview"`
+	// TagIDs are this item's native organizational tag IDs — resolve against
+	// Tags to get labels. Named TagIDs, not Tags, to stay unambiguous next to
+	// the servarr.Tag type.
+	TagIDs []int `json:"tags"`
 }
 
 // AllTracked returns every series/movie the app currently tracks.

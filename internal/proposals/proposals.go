@@ -20,6 +20,7 @@ type Workflow string
 
 const (
 	Rename Workflow = "rename"
+	Purge  Workflow = "purge"
 )
 
 // Status is where a proposal currently sits in its review lifecycle.
@@ -92,11 +93,11 @@ func (s *Store) ReplacePending(ctx context.Context, m mode.Mode, wf Workflow, fr
 		row := tx.QueryRowContext(ctx, `
 			INSERT INTO proposals (
 				mode, workflow, status, source_name, source_path, root_folder_path,
-				title, tvdb_id, tmdb_id, quality_profile_id, reason
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				title, tvdb_id, tmdb_id, quality_profile_id, reason, tracked_id
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			RETURNING id, created_at
 		`, string(p.Mode), string(p.Workflow), string(p.Status), p.SourceName, p.SourcePath, p.RootFolderPath,
-			p.Title, p.TVDBID, p.TMDBID, p.QualityProfileID, p.Reason)
+			p.Title, p.TVDBID, p.TMDBID, p.QualityProfileID, p.Reason, p.TrackedID)
 		if err := row.Scan(&p.ID, &p.CreatedAt); err != nil {
 			return nil, fmt.Errorf("inserting proposal for %q: %w", p.SourceName, err)
 		}

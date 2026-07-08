@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/curtiswtaylorjr/tidyarr/internal/allowlist"
 	"github.com/curtiswtaylorjr/tidyarr/internal/api"
 	"github.com/curtiswtaylorjr/tidyarr/internal/config"
 	"github.com/curtiswtaylorjr/tidyarr/internal/connections"
@@ -52,8 +53,9 @@ func run() error {
 	}
 	connStore := connections.New(sqlDB, secretStore)
 	propStore := proposals.New(sqlDB)
+	allowStore := allowlist.New(sqlDB)
 
-	mux := api.NewMux(&http.Client{Timeout: outboundTimeout}, connStore, propStore)
+	mux := api.NewMux(&http.Client{Timeout: outboundTimeout}, connStore, propStore, allowStore)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("ok"))
 	})

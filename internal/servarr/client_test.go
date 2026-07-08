@@ -186,6 +186,47 @@ func TestDeleteTrackedFile_204NoContentIsNotAnError(t *testing.T) {
 	}
 }
 
+func TestDeleteTracked_UsesCorrectResourcePerAppAndDeletesFiles(t *testing.T) {
+	var gotPath, gotMethod string
+	sonarrClient := newTestClient(t, Sonarr, func(w http.ResponseWriter, r *http.Request) {
+		gotPath, gotMethod = r.URL.String(), r.Method
+		w.WriteHeader(http.StatusOK)
+	})
+	if err := sonarrClient.DeleteTracked(context.Background(), 7); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if gotPath != "/api/v3/series/7?deleteFiles=true" || gotMethod != http.MethodDelete {
+		t.Errorf("unexpected request: %s %s", gotMethod, gotPath)
+	}
+
+	radarrClient := newTestClient(t, Radarr, func(w http.ResponseWriter, r *http.Request) {
+		gotPath, gotMethod = r.URL.String(), r.Method
+	})
+	if err := radarrClient.DeleteTracked(context.Background(), 7); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if gotPath != "/api/v3/movie/7?deleteFiles=true" {
+		t.Errorf("unexpected Radarr path: %s", gotPath)
+	}
+}
+
+func TestTags_ParsesRealFixture(t *testing.T) {
+	c := newTestClient(t, Radarr, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v3/tag" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		w.Write([]byte(`[{"id":1,"label":"kids"},{"id":2,"label":"low-quality-flag"}]`))
+	})
+
+	tags, err := c.Tags(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(tags) != 2 || tags[0].Label != "kids" || tags[1].ID != 2 {
+		t.Errorf("unexpected tags: %+v", tags)
+	}
+}
+
 func TestQualityProfiles_ParsesRealFixture(t *testing.T) {
 	// Fixture matches the actual live /api/v3/qualityprofile response.
 	c := newTestClient(t, Radarr, func(w http.ResponseWriter, r *http.Request) {
@@ -272,7 +313,7 @@ func TestAllTracked_ParsesList(t *testing.T) {
 		if r.URL.Path != "/api/v3/movie" {
 			t.Errorf("unexpected path: %s", r.URL.Path)
 		}
-		w.Write([]byte(`[{"id":1,"title":"Barnyard","path":"/media/Media Library/Movies/Barnyard (2006)","rootFolderPath":"/media/Media Library/Movies","monitored":true,"tmdbId":9907,"certification":"PG","genres":["Animation","Comedy","Family"]}]`))
+		w.Write([]byte(`[{"id":1,"title":"Barnyard","path":"/media/Media Library/Movies/Barnyard (2006)","rootFolderPath":"/media/Media Library/Movies","monitored":true,"tmdbId":9907,"certification":"PG","genres":["Animation","Comedy","Family"],"tags":[1,2]}]`))
 	})
 
 	items, err := c.AllTracked(context.Background())
@@ -284,6 +325,9 @@ func TestAllTracked_ParsesList(t *testing.T) {
 	}
 	if items[0].TMDBID != 9907 || items[0].Certification != "PG" || len(items[0].Genres) != 3 {
 		t.Errorf("unexpected classification-relevant fields: %+v", items[0])
+	}
+	if len(items[0].TagIDs) != 2 || items[0].TagIDs[0] != 1 || items[0].TagIDs[1] != 2 {
+		t.Errorf("unexpected tag ids: %+v", items[0].TagIDs)
 	}
 }
 
