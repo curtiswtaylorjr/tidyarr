@@ -15,6 +15,7 @@ import (
 	"github.com/curtiswtaylorjr/tidyarr/internal/proposals"
 	"github.com/curtiswtaylorjr/tidyarr/internal/purge"
 	"github.com/curtiswtaylorjr/tidyarr/internal/rename"
+	"github.com/curtiswtaylorjr/tidyarr/internal/settings"
 )
 
 // listProposalsHandler returns {mode}'s review queue for wf, most recently
@@ -54,7 +55,7 @@ type applyProposalRequest struct {
 // proposal's own Workflow field (set at Scan time) decides which package's
 // Apply actually runs — the URL doesn't need to say which, since a proposal
 // ID alone is already unambiguous.
-func applyProposalHandler(httpClient *http.Client, connStore *connections.Store, propStore *proposals.Store) http.HandlerFunc {
+func applyProposalHandler(httpClient *http.Client, connStore *connections.Store, settingsStore *settings.Store, propStore *proposals.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id, ok := parseProposalID(w, r)
 		if !ok {
@@ -74,7 +75,7 @@ func applyProposalHandler(httpClient *http.Client, connStore *connections.Store,
 			return
 		}
 
-		sess, err := mode.Build(ctx, connStore, httpClient, p.Mode)
+		sess, err := mode.Build(ctx, connStore, settingsStore, httpClient, p.Mode)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return

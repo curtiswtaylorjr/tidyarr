@@ -7,18 +7,19 @@ import (
 
 	"github.com/curtiswtaylorjr/tidyarr/internal/connections"
 	"github.com/curtiswtaylorjr/tidyarr/internal/mode"
+	"github.com/curtiswtaylorjr/tidyarr/internal/settings"
 	"github.com/curtiswtaylorjr/tidyarr/internal/tag"
 )
 
 // listTagsHandler returns {mode}'s current tag vocabulary, straight from
 // the live app — the same import-not-duplicate principle Naming already
 // follows.
-func listTagsHandler(httpClient *http.Client, connStore *connections.Store) http.HandlerFunc {
+func listTagsHandler(httpClient *http.Client, connStore *connections.Store, settingsStore *settings.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		m := mode.Mode(r.PathValue("mode"))
 		ctx := r.Context()
 
-		sess, err := mode.Build(ctx, connStore, httpClient, m)
+		sess, err := mode.Build(ctx, connStore, settingsStore, httpClient, m)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -43,7 +44,7 @@ type addItemTagRequest struct {
 // committed action, not staged through the proposals queue (see
 // internal/tag's doc comment for why Tag doesn't follow the Scan/Apply
 // shape the other three workflows do).
-func addItemTagHandler(httpClient *http.Client, connStore *connections.Store) http.HandlerFunc {
+func addItemTagHandler(httpClient *http.Client, connStore *connections.Store, settingsStore *settings.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		m := mode.Mode(r.PathValue("mode"))
 		itemID, ok := parseIntPathValue(w, r, "itemId")
@@ -61,7 +62,7 @@ func addItemTagHandler(httpClient *http.Client, connStore *connections.Store) ht
 		}
 		ctx := r.Context()
 
-		sess, err := mode.Build(ctx, connStore, httpClient, m)
+		sess, err := mode.Build(ctx, connStore, settingsStore, httpClient, m)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -75,7 +76,7 @@ func addItemTagHandler(httpClient *http.Client, connStore *connections.Store) ht
 }
 
 // removeItemTagHandler unassigns a tag from one tracked item.
-func removeItemTagHandler(httpClient *http.Client, connStore *connections.Store) http.HandlerFunc {
+func removeItemTagHandler(httpClient *http.Client, connStore *connections.Store, settingsStore *settings.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		m := mode.Mode(r.PathValue("mode"))
 		itemID, ok := parseIntPathValue(w, r, "itemId")
@@ -88,7 +89,7 @@ func removeItemTagHandler(httpClient *http.Client, connStore *connections.Store)
 		}
 		ctx := r.Context()
 
-		sess, err := mode.Build(ctx, connStore, httpClient, m)
+		sess, err := mode.Build(ctx, connStore, settingsStore, httpClient, m)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return

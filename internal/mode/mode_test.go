@@ -2,8 +2,10 @@ package mode
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -13,9 +15,13 @@ import (
 	"github.com/curtiswtaylorjr/tidyarr/internal/db"
 	"github.com/curtiswtaylorjr/tidyarr/internal/secrets"
 	"github.com/curtiswtaylorjr/tidyarr/internal/servarr"
+	"github.com/curtiswtaylorjr/tidyarr/internal/settings"
 )
 
-func newTestConnStore(t *testing.T) *connections.Store {
+// newTestStores opens one fresh db and returns a connections store and a
+// settings store backed by it, so a test can configure both the connections
+// and the Ollama-model setting that Build reads.
+func newTestStores(t *testing.T) (*connections.Store, *settings.Store) {
 	t.Helper()
 	sqlDB, err := db.Open(filepath.Join(t.TempDir(), "tidyarr.db"))
 	if err != nil {
@@ -26,17 +32,17 @@ func newTestConnStore(t *testing.T) *connections.Store {
 	if err != nil {
 		t.Fatalf("building secret store: %v", err)
 	}
-	return connections.New(sqlDB, secretStore)
+	return connections.New(sqlDB, secretStore), settings.New(sqlDB)
 }
 
 func TestBuild_MoviesUsesRadarrConnection(t *testing.T) {
-	store := newTestConnStore(t)
+	store, settingsStore := newTestStores(t)
 	ctx := context.Background()
 	if err := store.Upsert(ctx, "radarr", "http://radarr.local:7878", "radarr-key"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	sess, err := Build(ctx, store, &http.Client{Timeout: time.Second}, Movies)
+	sess, err := Build(ctx, store, settingsStore, &http.Client{Timeout: time.Second}, Movies)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -46,39 +52,45 @@ func TestBuild_MoviesUsesRadarrConnection(t *testing.T) {
 	if sess.Servarr.AppType() != servarr.Radarr {
 		t.Errorf("expected the Radarr app type, got %v", sess.Servarr.AppType())
 	}
+	if sess.Identify != nil {
+		t.Error("expected Identify to be nil for a Movies session")
+	}
 }
 
 func TestBuild_SeriesUsesSonarrConnection(t *testing.T) {
-	store := newTestConnStore(t)
+	store, settingsStore := newTestStores(t)
 	ctx := context.Background()
 	if err := store.Upsert(ctx, "sonarr", "http://sonarr.local:8989", "sonarr-key"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	sess, err := Build(ctx, store, &http.Client{Timeout: time.Second}, Series)
+	sess, err := Build(ctx, store, settingsStore, &http.Client{Timeout: time.Second}, Series)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if sess.Servarr.AppType() != servarr.Sonarr {
 		t.Errorf("expected the Sonarr app type, got %v", sess.Servarr.AppType())
 	}
+	if sess.Identify != nil {
+		t.Error("expected Identify to be nil for a Series session")
+	}
 }
 
 func TestBuild_MissingConnection(t *testing.T) {
-	store := newTestConnStore(t)
-	if _, err := Build(context.Background(), store, &http.Client{}, Movies); err == nil {
+	store, settingsStore := newTestStores(t)
+	if _, err := Build(context.Background(), store, settingsStore, &http.Client{}, Movies); err == nil {
 		t.Fatal("expected an error when radarr isn't configured yet")
 	}
 }
 
 func TestBuild_AdultUsesWhisparrConnection(t *testing.T) {
-	store := newTestConnStore(t)
+	store, settingsStore := newTestStores(t)
 	ctx := context.Background()
 	if err := store.Upsert(ctx, "whisparr", "http://whisparr.local:6969", "whisparr-key"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	sess, err := Build(ctx, store, &http.Client{Timeout: time.Second}, Adult)
+	sess, err := Build(ctx, store, settingsStore, &http.Client{Timeout: time.Second}, Adult)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -91,8 +103,8 @@ func TestBuild_AdultUsesWhisparrConnection(t *testing.T) {
 }
 
 func TestBuild_AdultMissingConnection(t *testing.T) {
-	store := newTestConnStore(t)
-	_, err := Build(context.Background(), store, &http.Client{}, Adult)
+	store, settingsStore := newTestStores(t)
+	_, err := Build(context.Background(), store, settingsStore, &http.Client{}, Adult)
 	if err == nil {
 		t.Fatal("expected an error when whisparr isn't configured yet")
 	}
@@ -105,12 +117,191 @@ func TestBuild_AdultMissingConnection(t *testing.T) {
 }
 
 func TestBuild_UnknownMode(t *testing.T) {
-	store := newTestConnStore(t)
-	_, err := Build(context.Background(), store, &http.Client{}, Mode("bogus"))
+	store, settingsStore := newTestStores(t)
+	_, err := Build(context.Background(), store, settingsStore, &http.Client{}, Mode("bogus"))
 	if err == nil {
 		t.Fatal("expected an error for an unknown mode")
 	}
 	if errors.Is(err, connections.ErrNotFound) {
 		t.Error("an unknown mode should fail before ever touching the connections store")
+	}
+}
+
+// TestBuild_AdultOnlyWhisparr_IdentifyNil confirms the Tag-preservation
+// constraint: an Adult session with only whisparr configured builds
+// successfully with a nil Identify (no identification backbone), so Tag —
+// which never reads Identify — is unaffected.
+func TestBuild_AdultOnlyWhisparr_IdentifyNil(t *testing.T) {
+	store, settingsStore := newTestStores(t)
+	ctx := context.Background()
+	if err := store.Upsert(ctx, "whisparr", "http://whisparr.local:6969", "whisparr-key"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	sess, err := Build(ctx, store, settingsStore, &http.Client{Timeout: time.Second}, Adult)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if sess.Identify != nil {
+		t.Error("expected Identify to be nil when only whisparr is configured")
+	}
+}
+
+// TestBuild_AdultOllamaConnButNoModelSetting_IdentifyNil pins the §2
+// anti-pattern guard: an Ollama connection with NO model setting must leave
+// Identify nil (no guessed model) and must not panic.
+func TestBuild_AdultOllamaConnButNoModelSetting_IdentifyNil(t *testing.T) {
+	store, settingsStore := newTestStores(t)
+	ctx := context.Background()
+	if err := store.Upsert(ctx, "whisparr", "http://whisparr.local:6969", "whisparr-key"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if err := store.Upsert(ctx, "ollama", "http://ollama.local:11434", ""); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	sess, err := Build(ctx, store, settingsStore, &http.Client{Timeout: time.Second}, Adult)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if sess.Identify != nil {
+		t.Error("expected Identify to be nil when the Ollama model setting is unset (no guessed fallback)")
+	}
+}
+
+// TestBuild_AdultWithIdentificationConnections_PopulatesIdentify confirms that
+// with whisparr + ollama + model + a stash-box connection configured, Build
+// produces a non-nil Identifier with a non-nil Boxes searcher. Box-map
+// internals are unexported, so behavior is proven in the functional test
+// below; here we assert the pipeline is assembled at all.
+func TestBuild_AdultWithIdentificationConnections_PopulatesIdentify(t *testing.T) {
+	store, settingsStore := newTestStores(t)
+	ctx := context.Background()
+	for _, c := range []struct{ service, url, key string }{
+		{"whisparr", "http://whisparr.local:6969", "whisparr-key"},
+		{"stashdb", "http://stashdb.local/graphql", "stashdb-key"},
+		{"tpdb", "http://tpdb.local", "tpdb-key"},
+		{"ollama", "http://ollama.local:11434", ""},
+	} {
+		if err := store.Upsert(ctx, c.service, c.url, c.key); err != nil {
+			t.Fatalf("unexpected error upserting %s: %v", c.service, err)
+		}
+	}
+	if err := settingsStore.Set(ctx, AdultOllamaModelKey, "qwen2.5vl:7b"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	sess, err := Build(ctx, store, settingsStore, &http.Client{Timeout: time.Second}, Adult)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if sess.Identify == nil {
+		t.Fatal("expected a non-nil Identify with ollama+model+stashdb configured")
+	}
+	if sess.Identify.Boxes == nil {
+		t.Error("expected the Identifier's Boxes searcher to be non-nil")
+	}
+	if sess.Identify.Ollama == nil {
+		t.Error("expected the Identifier's Ollama client to be non-nil")
+	}
+}
+
+// TestBuild_AdultIdentifierIsFunctional is the teeth of this slice: it proves
+// stored connections + the model setting actually become a WORKING identifier,
+// not just a non-nil struct. It stands up httptest fakes for Ollama (returns a
+// parsed filename) and a stash-box (returns one matching scene), builds an
+// Adult Session pointed at them, then drives sess.Identify.Identify end-to-end
+// and asserts a real MatchResult comes back from the fakes. No proposal is
+// persisted, no Apply runs, and Whisparr is never called (a placeholder URL is
+// enough — Build constructs but never calls the servarr client before the
+// Adult branch).
+func TestBuild_AdultIdentifierIsFunctional(t *testing.T) {
+	const (
+		wantTitle  = "Some Scene"
+		wantStudio = "Tushy"
+		wantScene  = "scene-abc-123"
+	)
+
+	// Fake Ollama: parses the filename into a title/studio JSON payload.
+	ollamaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeTestJSON(t, w, map[string]any{
+			"message": map[string]any{
+				"content": `{"studio":"Tushy","title":"Some Scene","year":"2019","performers":null}`,
+			},
+		})
+	}))
+	defer ollamaSrv.Close()
+
+	// Fake stash-box (StashDB): a searchScene GraphQL query returns one scene
+	// whose title/studio match what Ollama parsed.
+	stashSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Variables struct {
+				Term string `json:"term"`
+				ID   string `json:"id"`
+			} `json:"variables"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if req.Variables.ID != "" {
+			writeTestJSON(t, w, map[string]any{"data": map[string]any{"findScene": nil}})
+			return
+		}
+		writeTestJSON(t, w, map[string]any{"data": map[string]any{"searchScene": []map[string]any{
+			{
+				"id": wantScene, "title": wantTitle, "release_date": "2019-05-01",
+				"studio": map[string]any{"name": wantStudio, "parent": nil},
+			},
+		}}})
+	}))
+	defer stashSrv.Close()
+
+	store, settingsStore := newTestStores(t)
+	ctx := context.Background()
+	// Placeholder whisparr — Build constructs a servarr client but never calls
+	// it before the Adult identifier branch.
+	if err := store.Upsert(ctx, "whisparr", "http://whisparr.invalid", "k"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if err := store.Upsert(ctx, "ollama", ollamaSrv.URL, ""); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if err := store.Upsert(ctx, "stashdb", stashSrv.URL, "k"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if err := settingsStore.Set(ctx, AdultOllamaModelKey, "test-model"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	sess, err := Build(ctx, store, settingsStore, &http.Client{Timeout: 5 * time.Second}, Adult)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if sess.Identify == nil {
+		t.Fatal("expected a functioning Identify from stored connections + model")
+	}
+
+	res, err := sess.Identify.Identify(ctx, "tushy-some-scene", "scenes")
+	if err != nil {
+		t.Fatalf("Identify returned an error: %v", err)
+	}
+	if res == nil {
+		t.Fatal("expected a real MatchResult from the fake stash-box, got nil")
+	}
+	if res.SceneID != wantScene {
+		t.Errorf("expected SceneID %q, got %q", wantScene, res.SceneID)
+	}
+	if res.Type != "scene" {
+		t.Errorf("expected Type \"scene\", got %q", res.Type)
+	}
+	if res.Box != "stashdb" {
+		t.Errorf("expected Box \"stashdb\", got %q", res.Box)
+	}
+}
+
+func writeTestJSON(t *testing.T, w http.ResponseWriter, v any) {
+	t.Helper()
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		t.Errorf("encoding test response: %v", err)
 	}
 }

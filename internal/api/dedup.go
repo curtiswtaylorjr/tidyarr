@@ -8,6 +8,7 @@ import (
 	"github.com/curtiswtaylorjr/tidyarr/internal/dedup"
 	"github.com/curtiswtaylorjr/tidyarr/internal/mode"
 	"github.com/curtiswtaylorjr/tidyarr/internal/proposals"
+	"github.com/curtiswtaylorjr/tidyarr/internal/settings"
 )
 
 // dedupScanHandler runs the Dedup workflow's propose-phase for {mode}:
@@ -16,12 +17,12 @@ import (
 // Dedup queue with whatever duplicate groups it found. prober takes
 // dedup.Prober's interface, not the concrete *mediainfo.Prober, so tests can
 // inject a fake instead of depending on a real ffprobe binary.
-func dedupScanHandler(httpClient *http.Client, connStore *connections.Store, propStore *proposals.Store, prober dedup.Prober) http.HandlerFunc {
+func dedupScanHandler(httpClient *http.Client, connStore *connections.Store, settingsStore *settings.Store, propStore *proposals.Store, prober dedup.Prober) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		m := mode.Mode(r.PathValue("mode"))
 		ctx := r.Context()
 
-		sess, err := mode.Build(ctx, connStore, httpClient, m)
+		sess, err := mode.Build(ctx, connStore, settingsStore, httpClient, m)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return

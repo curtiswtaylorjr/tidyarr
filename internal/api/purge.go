@@ -9,17 +9,18 @@ import (
 	"github.com/curtiswtaylorjr/tidyarr/internal/mode"
 	"github.com/curtiswtaylorjr/tidyarr/internal/proposals"
 	"github.com/curtiswtaylorjr/tidyarr/internal/purge"
+	"github.com/curtiswtaylorjr/tidyarr/internal/settings"
 )
 
 // purgeScanHandler runs the Purge workflow's propose-phase for {mode}:
 // fetches that mode's current allowlist, matches it against every tracked
 // item's tags, and replaces the live Purge queue with whatever matched.
-func purgeScanHandler(httpClient *http.Client, connStore *connections.Store, propStore *proposals.Store, allowStore *allowlist.Store) http.HandlerFunc {
+func purgeScanHandler(httpClient *http.Client, connStore *connections.Store, settingsStore *settings.Store, propStore *proposals.Store, allowStore *allowlist.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		m := mode.Mode(r.PathValue("mode"))
 		ctx := r.Context()
 
-		sess, err := mode.Build(ctx, connStore, httpClient, m)
+		sess, err := mode.Build(ctx, connStore, settingsStore, httpClient, m)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
