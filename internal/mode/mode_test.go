@@ -147,6 +147,48 @@ func TestBuild_AdultOnlyWhisparr_IdentifyNil(t *testing.T) {
 	}
 }
 
+// TestBuild_AdultSettingsStoreError_Propagates guards against buildIdentifier
+// collapsing a REAL settings-store failure into the same "not configured, no
+// error" outcome as an unset model. A real error must propagate (per
+// buildIdentifier's own doc comment), not be silently swallowed as nil,nil —
+// swallowing it would look identical to "identification not configured" from
+// the caller's side, hiding an actual outage behind a misleading success.
+func TestBuild_AdultSettingsStoreError_Propagates(t *testing.T) {
+	sqlDB, err := db.Open(filepath.Join(t.TempDir(), "tidyarr.db"))
+	if err != nil {
+		t.Fatalf("opening db: %v", err)
+	}
+	t.Cleanup(func() { sqlDB.Close() })
+	secretStore, err := secrets.New(make([]byte, 32))
+	if err != nil {
+		t.Fatalf("building secret store: %v", err)
+	}
+	store := connections.New(sqlDB, secretStore)
+	settingsStore := settings.New(sqlDB)
+	ctx := context.Background()
+
+	if err := store.Upsert(ctx, "whisparr", "http://whisparr.local:6969", "whisparr-key"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if err := store.Upsert(ctx, "ollama", "http://ollama.local:11434", ""); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Force a real (non-ErrNotFound) failure on the settings.Get call inside
+	// buildIdentifier, without touching the connections table it already read.
+	if _, err := sqlDB.Exec(`DROP TABLE settings`); err != nil {
+		t.Fatalf("dropping settings table: %v", err)
+	}
+
+	_, err = Build(ctx, store, settingsStore, &http.Client{Timeout: time.Second}, Adult)
+	if err == nil {
+		t.Fatal("expected a real settings-store error to propagate, got nil")
+	}
+	if strings.Contains(err.Error(), "not configured") {
+		t.Errorf("a real store error must not be reported as merely unconfigured, got: %v", err)
+	}
+}
+
 // TestBuild_AdultOllamaConnButNoModelSetting_IdentifyNil pins the §2
 // anti-pattern guard: an Ollama connection with NO model setting must leave
 // Identify nil (no guessed model) and must not panic.

@@ -124,11 +124,14 @@ func buildIdentifier(ctx context.Context, store *connections.Store, settingsStor
 		return nil, nil // no Ollama backbone → identification not configured
 	}
 	model, err := settingsStore.Get(ctx, AdultOllamaModelKey)
-	if errors.Is(err, settings.ErrNotFound) || model == "" {
+	if errors.Is(err, settings.ErrNotFound) {
 		return nil, nil // no model → do NOT guess one
 	}
 	if err != nil {
 		return nil, err
+	}
+	if model == "" {
+		return nil, nil // stored but blank → same as unconfigured
 	}
 
 	boxes := map[string]*stashbox.Client{}
