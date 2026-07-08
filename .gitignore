@@ -1,0 +1,11 @@
+/data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+/web/node_modules/
+/web/dist/
+
+/tidyarr
+/bin/
