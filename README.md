@@ -12,21 +12,27 @@ Early scaffolding. What's real so far: a Go server with a SQLite-backed
 migration runner, the Sonarr/Radarr/Whisparr client and the full
 StashDB/FansDB/TPDB/Brave/Ollama identification pipeline (ported from the
 CLIs this project grew out of), a `/api/connections` endpoint to test and
-persist service credentials (encrypted at rest — see below), and three full
-review workflows: **Rename** (`POST /api/modes/{movies,series}/rename/scan`
-finds orphaned files, identifies them, and stages one proposal per item),
-**Purge** (`POST /api/modes/{movies,series}/purge/scan` matches a per-mode
-tag allowlist, managed via `/api/modes/{mode}/purge/allowlist`, against
-every tracked item's native tags), and **Dedup**, Movies only for now
-(`POST /api/modes/movies/dedup/scan` groups unmapped files with any
-already-tracked item sharing the same TMDB ID, ffprobes every candidate
-directly, and stages a proposal per duplicate group with a precomputed
-quality winner). All three stage proposals in one shared, persisted review
-queue; `POST /api/proposals/{id}/apply` commits exactly the one a human
-approved — Dedup's apply optionally takes `{"keepIndex": n}` or
-`{"keepAll": true}` to override the auto-computed winner. Nothing is ever
-applied in bulk. Tag, Series Dedup, Adult mode, and the React frontend
-don't exist yet. Not ready to run as a media tool.
+persist service credentials (encrypted at rest — see below), and all four
+review workflows the design calls for, three of them for Movies/Series:
+**Rename** (`POST /api/modes/{movies,series}/rename/scan` finds orphaned
+files, identifies them, and stages one proposal per item), **Purge** (`POST
+/api/modes/{movies,series}/purge/scan` matches a per-mode tag allowlist,
+managed via `/api/modes/{mode}/purge/allowlist`, against every tracked
+item's native tags), and **Dedup**, Movies only for now (`POST
+/api/modes/movies/dedup/scan` groups unmapped files with any already-tracked
+item sharing the same TMDB ID, ffprobes every candidate directly, and
+stages a proposal per duplicate group with a precomputed quality winner).
+These three stage proposals in one shared, persisted review queue; `POST
+/api/proposals/{id}/apply` commits exactly the one a human approved —
+Dedup's apply optionally takes `{"keepIndex": n}` or `{"keepAll": true}` to
+override the auto-computed winner. Nothing is ever applied in bulk.
+**Tag** is the fourth: `GET /api/modes/{mode}/tags` for the live vocabulary
+and `POST`/`DELETE /api/modes/{mode}/items/{itemId}/tags[/{tagId}]` to
+assign or remove one, creating a genuinely new tag upstream automatically —
+this one isn't staged through the review queue, since assigning a tag is
+already a single deliberate action, not an automatic decision needing
+approval. Series Dedup, AI-suggested tags, Adult mode, and the React
+frontend don't exist yet. Not ready to run as a media tool.
 
 Secrets are encrypted at rest with a locally generated key
 (`<data-dir>/secret.key`, mode 0600) rather than an OS keychain — the
