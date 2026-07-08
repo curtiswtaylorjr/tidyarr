@@ -41,6 +41,15 @@ type webResults struct {
 	} `json:"web"`
 }
 
+// Ping confirms the API key works by performing one real, minimal search —
+// Brave's API has no separate lightweight "verify key" endpoint, so this is
+// the only honest check available. It costs one query against the account's
+// quota, same as any other call this client makes.
+func (c *Client) Ping(ctx context.Context) error {
+	_, err := c.Search(ctx, "test", 1)
+	return err
+}
+
 // Search performs a web search and returns up to count results.
 func (c *Client) Search(ctx context.Context, query string, count int) ([]Result, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL, nil)

@@ -72,6 +72,17 @@ func (c *Client) get(ctx context.Context, params url.Values) ([]Scene, error) {
 	return out, nil
 }
 
+// Ping confirms the base URL/key work by making one real, minimal request
+// against the same /scenes endpoint SearchByHash and SearchByTitle use —
+// ThePornDB's REST API has no separate lightweight "verify key" endpoint, so
+// a trivially-scoped real call (per_page=1, no search term) is the honest
+// check: it 401s on a bad key exactly like a real search would, without
+// asserting anything about the result content.
+func (c *Client) Ping(ctx context.Context) error {
+	_, err := c.get(ctx, url.Values{"per_page": {"1"}})
+	return err
+}
+
 // SearchByHash looks up scenes by perceptual hash (TPDB's GraphQL fingerprint
 // lookup is tried first by callers; this REST fallback covers what it misses).
 func (c *Client) SearchByHash(ctx context.Context, phash string) ([]Scene, error) {

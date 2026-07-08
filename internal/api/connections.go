@@ -6,16 +6,19 @@ import (
 	"fmt"
 	"net/http"
 
+	"github.com/curtiswtaylorjr/tidyarr/internal/bravesearch"
 	"github.com/curtiswtaylorjr/tidyarr/internal/ollama"
 	"github.com/curtiswtaylorjr/tidyarr/internal/servarr"
 	"github.com/curtiswtaylorjr/tidyarr/internal/stashapi"
+	"github.com/curtiswtaylorjr/tidyarr/internal/stashbox"
+	"github.com/curtiswtaylorjr/tidyarr/internal/tpdbrest"
 )
 
 // ConnectionTestRequest is enough to construct a client and make one real,
 // read-only call against it — the same thing Settings' "Test connection"
 // button does. Nothing here is persisted.
 type ConnectionTestRequest struct {
-	Service string `json:"service"` // "radarr" | "sonarr" | "ollama" | "stash"
+	Service string `json:"service"` // "radarr" | "sonarr" | "ollama" | "stash" | "stashdb" | "fansdb" | "tpdb" | "brave"
 	URL     string `json:"url"`
 	APIKey  string `json:"apiKey,omitempty"`
 }
@@ -29,14 +32,11 @@ type ConnectionTestResult struct {
 }
 
 // TestConnection dispatches req to the client for its Service and makes one
-// lightweight, argument-free call to confirm the URL/key actually work.
-//
-// Only services with an existing, argument-free read call are supported so
-// far (Radarr/Sonarr's root-folder list, Ollama's model list, Stash's tag
-// list). StashDB/FansDB, TPDB, and Brave don't have one in their ported
-// clients yet — their public methods all require real search terms — so
-// testing those needs a small new query added to each client first, not
-// just wiring here.
+// lightweight call to confirm the URL/key actually work. Every branch uses a
+// real, already-existing endpoint — StashDB/FansDB's protocol-level "me"
+// query, TPDB's own /scenes endpoint with minimal params, and Brave's actual
+// search endpoint (it has no separate lightweight check, so this is a real,
+// billable query, same as any other Brave call) — never a guessed one.
 func TestConnection(ctx context.Context, httpClient *http.Client, req ConnectionTestRequest) ConnectionTestResult {
 	switch req.Service {
 	case "radarr":
@@ -47,6 +47,12 @@ func TestConnection(ctx context.Context, httpClient *http.Client, req Connection
 		return testOllama(ctx, httpClient, req)
 	case "stash":
 		return testStash(ctx, httpClient, req)
+	case "stashdb", "fansdb":
+		return testStashBox(ctx, httpClient, req)
+	case "tpdb":
+		return testTPDB(ctx, httpClient, req)
+	case "brave":
+		return testBrave(ctx, httpClient, req)
 	default:
 		return ConnectionTestResult{Error: fmt.Sprintf("unsupported service %q", req.Service)}
 	}
@@ -73,6 +79,42 @@ func testOllama(ctx context.Context, httpClient *http.Client, req ConnectionTest
 func testStash(ctx context.Context, httpClient *http.Client, req ConnectionTestRequest) ConnectionTestResult {
 	c := stashapi.New(stashapi.Config{URL: req.URL, APIKey: req.APIKey}, httpClient)
 	if _, err := c.AllTags(ctx); err != nil {
+		return ConnectionTestResult{Error: err.Error()}
+	}
+	return ConnectionTestResult{OK: true}
+}
+
+// testStashBox covers both StashDB and FansDB — same stash-box protocol,
+// ApiKey-header auth (as opposed to TPDB's GraphQL endpoint, which is
+// Bearer-authed and reached separately via testTPDB). req.URL must already
+// point at the GraphQL endpoint (e.g. "https://stashdb.org/graphql").
+func testStashBox(ctx context.Context, httpClient *http.Client, req ConnectionTestRequest) ConnectionTestResult {
+	c := stashbox.New(stashbox.Config{Endpoint: req.URL, APIKey: req.APIKey, IsBearer: false, HasVoteField: true}, httpClient)
+	if _, err := c.Me(ctx); err != nil {
+		return ConnectionTestResult{Error: err.Error()}
+	}
+	return ConnectionTestResult{OK: true}
+}
+
+// testTPDB uses TPDB's REST endpoint (req.URL is the REST base, e.g.
+// "https://api.theporndb.net") rather than its GraphQL endpoint — REST is
+// what identify's actual text-search fallback uses day to day, so that's
+// the connection worth confirming here.
+func testTPDB(ctx context.Context, httpClient *http.Client, req ConnectionTestRequest) ConnectionTestResult {
+	c := tpdbrest.New(req.URL, req.APIKey, httpClient)
+	if err := c.Ping(ctx); err != nil {
+		return ConnectionTestResult{Error: err.Error()}
+	}
+	return ConnectionTestResult{OK: true}
+}
+
+// testBrave costs one real query against the account's search quota — Brave
+// has no free lightweight way to verify a key, and pretending otherwise
+// would be misleading (see the Settings design's cost-visibility note for
+// Brave specifically).
+func testBrave(ctx context.Context, httpClient *http.Client, req ConnectionTestRequest) ConnectionTestResult {
+	c := bravesearch.New(req.URL, req.APIKey, httpClient)
+	if err := c.Ping(ctx); err != nil {
 		return ConnectionTestResult{Error: err.Error()}
 	}
 	return ConnectionTestResult{OK: true}

@@ -69,6 +69,38 @@ func TestSearchByTitle_IncludesSiteWhenSet(t *testing.T) {
 	}
 }
 
+func TestPing_Success(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		if q.Get("per_page") != "1" {
+			t.Errorf("expected per_page=1, got %q", q.Get("per_page"))
+		}
+		if _, hasQ := q["q"]; hasQ {
+			t.Errorf("expected no search term on a ping, got %v", q)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[]}`))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "testkey", &http.Client{Timeout: 5 * time.Second})
+	if err := c.Ping(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestPing_UnauthorizedKey(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "badkey", &http.Client{Timeout: 5 * time.Second})
+	if err := c.Ping(context.Background()); err == nil {
+		t.Fatal("expected an error for a bad key")
+	}
+}
+
 func TestGet_NonOKStatus(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)

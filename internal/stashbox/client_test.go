@@ -202,3 +202,39 @@ func TestIsNotAuthorized_FalseForNonGraphQLError(t *testing.T) {
 		t.Fatal("expected IsNotAuthorized(err) to be false for a plain HTTP error")
 	}
 }
+
+func TestMe_ReturnsAuthenticatedUser(t *testing.T) {
+	c, closeSrv := newTestClient(t, Config{APIKey: "k"}, func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Query string `json:"query"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if req.Query != meQuery {
+			t.Errorf("unexpected query: %s", req.Query)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"me":{"id":"42","name":"curtis"}}}`))
+	})
+	defer closeSrv()
+
+	me, err := c.Me(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if me == nil || me.ID != "42" || me.Name != "curtis" {
+		t.Errorf("unexpected result: %+v", me)
+	}
+}
+
+func TestMe_UnauthorizedKey(t *testing.T) {
+	c, closeSrv := newTestClient(t, Config{APIKey: "bad-key"}, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"errors":[{"message":"not authorized"}]}`))
+	})
+	defer closeSrv()
+
+	_, err := c.Me(context.Background())
+	if err == nil {
+		t.Fatal("expected an error for an unauthorized key")
+	}
+}

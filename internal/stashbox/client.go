@@ -242,6 +242,28 @@ func (c *Client) SubmitSceneDraft(ctx context.Context, title, studio, date strin
 	return data.SubmitSceneDraft.ID, nil
 }
 
+const meQuery = `{ me { id name } }`
+
+// Me is the authenticated user stash-box's own "me" query returns — real per
+// the stash-box GraphQL schema (StashDB, FansDB, and TPDB's GraphQL endpoint
+// all implement it), and the protocol's own argument-free way to confirm an
+// endpoint/key actually work without a search or fingerprint lookup.
+type Me struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+// Me queries the currently authenticated user, for connection testing.
+func (c *Client) Me(ctx context.Context) (*Me, error) {
+	var data struct {
+		Me *Me `json:"me"`
+	}
+	if err := c.do(ctx, meQuery, nil, &data); err != nil {
+		return nil, err
+	}
+	return data.Me, nil
+}
+
 // IsNotAuthorized reports whether err represents a stash-box "not authorized"
 // rejection (e.g. an account lacking draft-submission privilege).
 func IsNotAuthorized(err error) bool {

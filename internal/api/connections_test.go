@@ -110,6 +110,68 @@ func TestTestConnection_Stash_GraphQLError(t *testing.T) {
 	}
 }
 
+func TestTestConnection_StashDB_Success(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("ApiKey") != "stashdb-key" {
+			t.Error("expected ApiKey header for stashdb")
+		}
+		w.Write([]byte(`{"data":{"me":{"id":"1","name":"curtis"}}}`))
+	}))
+	defer srv.Close()
+
+	result := TestConnection(context.Background(), testHTTPClient(), ConnectionTestRequest{
+		Service: "stashdb", URL: srv.URL, APIKey: "stashdb-key",
+	})
+	if !result.OK || result.Error != "" {
+		t.Fatalf("expected success, got %+v", result)
+	}
+}
+
+func TestTestConnection_FansDB_NotAuthorized(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"errors":[{"message":"not authorized"}]}`))
+	}))
+	defer srv.Close()
+
+	result := TestConnection(context.Background(), testHTTPClient(), ConnectionTestRequest{
+		Service: "fansdb", URL: srv.URL, APIKey: "bad-key",
+	})
+	if result.OK {
+		t.Fatal("expected failure on a not-authorized response")
+	}
+}
+
+func TestTestConnection_TPDB_Success(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer tpdb-key" {
+			t.Error("expected Bearer auth for tpdb")
+		}
+		w.Write([]byte(`{"data":[]}`))
+	}))
+	defer srv.Close()
+
+	result := TestConnection(context.Background(), testHTTPClient(), ConnectionTestRequest{
+		Service: "tpdb", URL: srv.URL, APIKey: "tpdb-key",
+	})
+	if !result.OK || result.Error != "" {
+		t.Fatalf("expected success, got %+v", result)
+	}
+}
+
+func TestTestConnection_Brave_BadKey(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	result := TestConnection(context.Background(), testHTTPClient(), ConnectionTestRequest{
+		Service: "brave", URL: srv.URL, APIKey: "bad-key",
+	})
+	if result.OK {
+		t.Fatal("expected failure on 401")
+	}
+}
+
 func TestTestConnection_UnsupportedService(t *testing.T) {
 	result := TestConnection(context.Background(), testHTTPClient(), ConnectionTestRequest{
 		Service: "plex", URL: "http://example.com",
