@@ -101,6 +101,19 @@ func (c *Client) ChatJSON(ctx context.Context, prompt string) (map[string]any, e
 	return result, nil
 }
 
+// Ping checks that a server is actually reachable and speaks Ollama's API,
+// without invoking any model — a lightweight alternative to ChatJSON for
+// connection-testing purposes (a real chat call would incur an inference
+// cost just to check a URL/key).
+func (c *Client) Ping(ctx context.Context) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/api/tags", nil)
+	if err != nil {
+		return fmt.Errorf("building ollama ping request: %w", err)
+	}
+	var discard json.RawMessage
+	return httpx.DoJSON(c.http, req, httpx.MaxResponseBodySize, &discard)
+}
+
 // NormalizeField cleans a value extracted from an Ollama JSON response.
 //
 // Qwen's format=json mode sometimes returns the literal STRING "null" (or

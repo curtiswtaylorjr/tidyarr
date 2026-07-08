@@ -131,6 +131,34 @@ func TestChatJSON_ContextTimeout(t *testing.T) {
 	}
 }
 
+func TestPing_Success(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/tags" || r.Method != http.MethodGet {
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"models":[]}`))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "", &http.Client{Timeout: 5 * time.Second})
+	if err := c.Ping(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestPing_UnreachableOrNonOKStatus(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "", &http.Client{Timeout: 5 * time.Second})
+	if err := c.Ping(context.Background()); err == nil {
+		t.Fatal("expected an error on non-200 status")
+	}
+}
+
 func TestChatJSON_ConcurrencyLimit(t *testing.T) {
 	var mu sync.Mutex
 	inFlight := 0

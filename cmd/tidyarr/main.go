@@ -11,9 +11,15 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/curtiswtaylorjr/tidyarr/internal/api"
 	"github.com/curtiswtaylorjr/tidyarr/internal/config"
 	"github.com/curtiswtaylorjr/tidyarr/internal/db"
 )
+
+// outboundTimeout bounds every call Tidyarr makes to a configured service
+// (Radarr/Sonarr/Ollama/Stash/...) — a Test Connection click against a dead
+// URL should fail in seconds, not hang the request indefinitely.
+const outboundTimeout = 15 * time.Second
 
 func main() {
 	if err := run(); err != nil {
@@ -33,7 +39,7 @@ func run() error {
 	}
 	defer sqlDB.Close()
 
-	mux := http.NewServeMux()
+	mux := api.NewMux(&http.Client{Timeout: outboundTimeout})
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("ok"))
 	})
