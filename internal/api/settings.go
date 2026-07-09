@@ -5,36 +5,38 @@ import (
 	"errors"
 	"net/http"
 
-	"github.com/curtiswtaylorjr/tidyarr/internal/mode"
 	"github.com/curtiswtaylorjr/tidyarr/internal/settings"
 )
 
-type adultOllamaModelResponse struct {
+type ollamaModelResponse struct {
 	Model string `json:"model"`
 }
 
-type adultOllamaModelRequest struct {
+type ollamaModelRequest struct {
 	Model string `json:"model"`
 }
 
-// getAdultOllamaModelHandler returns the configured Adult Ollama model, or an
-// empty string if none is set yet (unset is a normal state, not an error).
-func getAdultOllamaModelHandler(settingsStore *settings.Store) http.HandlerFunc {
+// getOllamaModelHandler returns the configured Ollama model stored under
+// settingsKey, or an empty string if none is set yet (unset is a normal
+// state, not an error). Shared by every settings-backed Ollama model
+// endpoint — Adult's and Mainstream's alike, since both are the same "one
+// scalar string" shape.
+func getOllamaModelHandler(settingsStore *settings.Store, settingsKey string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		model, err := settingsStore.Get(r.Context(), mode.AdultOllamaModelKey)
+		model, err := settingsStore.Get(r.Context(), settingsKey)
 		if err != nil && !errors.Is(err, settings.ErrNotFound) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(adultOllamaModelResponse{Model: model})
+		json.NewEncoder(w).Encode(ollamaModelResponse{Model: model})
 	}
 }
 
-// putAdultOllamaModelHandler stores the Adult Ollama model name.
-func putAdultOllamaModelHandler(settingsStore *settings.Store) http.HandlerFunc {
+// putOllamaModelHandler stores the Ollama model name under settingsKey.
+func putOllamaModelHandler(settingsStore *settings.Store, settingsKey string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		var req adultOllamaModelRequest
+		var req ollamaModelRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, "invalid request body", http.StatusBadRequest)
 			return
@@ -43,7 +45,7 @@ func putAdultOllamaModelHandler(settingsStore *settings.Store) http.HandlerFunc 
 			http.Error(w, "model is required", http.StatusBadRequest)
 			return
 		}
-		if err := settingsStore.Set(r.Context(), mode.AdultOllamaModelKey, req.Model); err != nil {
+		if err := settingsStore.Set(r.Context(), settingsKey, req.Model); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}

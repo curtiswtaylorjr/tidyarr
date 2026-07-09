@@ -18,6 +18,7 @@ import (
 	"github.com/curtiswtaylorjr/tidyarr/internal/config"
 	"github.com/curtiswtaylorjr/tidyarr/internal/identify"
 	"github.com/curtiswtaylorjr/tidyarr/internal/mode"
+	"github.com/curtiswtaylorjr/tidyarr/internal/ollama"
 	"github.com/curtiswtaylorjr/tidyarr/internal/proposals"
 	"github.com/curtiswtaylorjr/tidyarr/internal/searchterm"
 	"github.com/curtiswtaylorjr/tidyarr/internal/servarr"
@@ -60,7 +61,7 @@ func Scan(ctx context.Context, sess *mode.Session) ([]proposals.Proposal, error)
 			if sess.Mode == mode.Adult {
 				out = append(out, proposeOneAdult(ctx, sess.Identify, sess.Mode, root, uf, tracked, profiles))
 			} else {
-				out = append(out, proposeOne(ctx, client, sess.Mode, root, uf, tracked, profiles))
+				out = append(out, proposeOne(ctx, client, sess.Mode, sess.MainstreamAI, root, uf, tracked, profiles))
 			}
 		}
 	}
@@ -68,7 +69,7 @@ func Scan(ctx context.Context, sess *mode.Session) ([]proposals.Proposal, error)
 }
 
 func proposeOne(
-	ctx context.Context, client *servarr.Client, m mode.Mode,
+	ctx context.Context, client *servarr.Client, m mode.Mode, mainstreamAI *ollama.Client,
 	root servarr.RootFolder, uf servarr.UnmappedFolder,
 	tracked []servarr.TrackedItem, profiles []servarr.QualityProfile,
 ) proposals.Proposal {
@@ -78,18 +79,15 @@ func proposeOne(
 	}
 
 	term := searchterm.FromName(uf.Name)
-	results, err := client.Lookup(ctx, term)
-	if err != nil {
+	lr, ok, reason := lookupFirst(ctx, client, term)
+	if !ok && mainstreamAI != nil {
+		lr, ok, reason = lookupWithAIFallback(ctx, client, mainstreamAI, uf.Name, reason)
+	}
+	if !ok {
 		p.Status = proposals.Unmatched
-		p.Reason = fmt.Sprintf("lookup failed for search term %q: %v", term, err)
+		p.Reason = reason
 		return p
 	}
-	if len(results) == 0 {
-		p.Status = proposals.Unmatched
-		p.Reason = fmt.Sprintf("no match for search term %q", term)
-		return p
-	}
-	lr := results[0]
 
 	if dup := findTrackedDuplicate(tracked, client.AppType(), lr); dup != nil {
 		p.Status = proposals.Unmatched
@@ -103,6 +101,40 @@ func proposeOne(
 	p.TMDBID = lr.TMDBID
 	p.QualityProfileID = servarr.DefaultQualityProfileID(tracked, root.Path, profiles)
 	return p
+}
+
+// lookupFirst runs client.Lookup for term and reports its first result.
+// ok=false covers both a lookup error and an empty result set — both route to
+// the same "try the AI fallback next" branch in proposeOne.
+func lookupFirst(ctx context.Context, client *servarr.Client, term string) (lr servarr.LookupResult, ok bool, reason string) {
+	results, err := client.Lookup(ctx, term)
+	if err != nil {
+		return servarr.LookupResult{}, false, fmt.Sprintf("lookup failed for search term %q: %v", term, err)
+	}
+	if len(results) == 0 {
+		return servarr.LookupResult{}, false, fmt.Sprintf("no match for search term %q", term)
+	}
+	return results[0], true, ""
+}
+
+// lookupWithAIFallback asks Ollama to guess the real title from name, then
+// retries Lookup with that guess — Rename's fallback for names the *arr
+// app's own search term couldn't resolve. firstReason (from the failed
+// lookupFirst attempt) is folded into the result so a final Unmatched
+// proposal explains both attempts, not just the last one.
+func lookupWithAIFallback(ctx context.Context, client *servarr.Client, ai *ollama.Client, name, firstReason string) (lr servarr.LookupResult, ok bool, reason string) {
+	guessed, err := identify.GuessTitle(ctx, ai, name)
+	if err != nil {
+		return servarr.LookupResult{}, false, fmt.Sprintf("%s, and AI title guess failed: %v", firstReason, err)
+	}
+	results, err := client.Lookup(ctx, guessed)
+	if err != nil {
+		return servarr.LookupResult{}, false, fmt.Sprintf("%s, and lookup failed for AI-guessed title %q: %v", firstReason, guessed, err)
+	}
+	if len(results) == 0 {
+		return servarr.LookupResult{}, false, fmt.Sprintf("%s, and no match even for AI-guessed title %q", firstReason, guessed)
+	}
+	return results[0], true, ""
 }
 
 // findTrackedDuplicate reports whether lr's identified TVDB/TMDB ID already

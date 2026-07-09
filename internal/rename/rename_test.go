@@ -10,6 +10,7 @@ import (
 
 	"github.com/curtiswtaylorjr/tidyarr/internal/identify"
 	"github.com/curtiswtaylorjr/tidyarr/internal/mode"
+	"github.com/curtiswtaylorjr/tidyarr/internal/ollama"
 	"github.com/curtiswtaylorjr/tidyarr/internal/proposals"
 	"github.com/curtiswtaylorjr/tidyarr/internal/servarr"
 	"github.com/curtiswtaylorjr/tidyarr/internal/stashbox"
@@ -97,6 +98,111 @@ func TestScan_ProducesPendingProposalForNewItem(t *testing.T) {
 	}
 	if p.RootFolderPath != "/media/Movies" || p.SourcePath != "/media/Movies/A.Beautiful.Mind.2001.1080p.BluRay.x264-GROUP" {
 		t.Errorf("unexpected paths: %+v", p)
+	}
+}
+
+// fakeMainstreamAI returns an *ollama.Client whose /api/chat always responds
+// with responseContent, regardless of the prompt — enough for tests that
+// only care about the AI-guessed title Rename's fallback goes on to use.
+func fakeMainstreamAI(t *testing.T, responseContent string) *ollama.Client {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"message": map[string]any{"content": responseContent},
+		})
+	}))
+	t.Cleanup(srv.Close)
+	return ollama.New(srv.URL, "test-model", srv.Client())
+}
+
+// TestScan_FallsBackToAIWhenLookupFindsNothing proves Rename's mainstream AI
+// fallback: an opaque name that Radarr's own lookup can't resolve gets a
+// second chance via an Ollama-guessed title.
+func TestScan_FallsBackToAIWhenLookupFindsNothing(t *testing.T) {
+	f := &fakeRadarr{
+		rootFolders: `[{"id":1,"path":"/media/Movies","accessible":true,"freeSpace":1,"unmappedFolders":[
+			{"name":"xyz123.mkv","path":"/media/Movies/xyz123.mkv","relativePath":"xyz123.mkv"}
+		]}]`,
+		tracked:  `[]`,
+		profiles: `[{"id":4,"name":"HD-1080p"}]`,
+		lookups: map[string]string{
+			"xyz123 mkv":      `[]`,
+			"Some Movie 2020": `[{"title":"Some Movie","year":2020,"tmdbId":999,"genres":[],"overview":"...","certification":"PG"}]`,
+		},
+	}
+	sess := newTestSession(t, servarr.Radarr, f.handler(t))
+	sess.MainstreamAI = fakeMainstreamAI(t, `{"title":"Some Movie 2020"}`)
+
+	got, err := Scan(context.Background(), sess)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected 1 proposal, got %d: %+v", len(got), got)
+	}
+	p := got[0]
+	if p.Status != proposals.Pending || p.Title != "Some Movie" || p.TMDBID != 999 {
+		t.Fatalf("expected the AI-guessed title's lookup to resolve the proposal, got %+v", p)
+	}
+}
+
+// TestScan_UnmatchedWhenAIDeclines confirms the "I don't know" escape valve
+// is honored: a decline surfaces as Unmatched, not a crash or a bogus match.
+func TestScan_UnmatchedWhenAIDeclines(t *testing.T) {
+	f := &fakeRadarr{
+		rootFolders: `[{"id":1,"path":"/media/Movies","accessible":true,"freeSpace":1,"unmappedFolders":[
+			{"name":"xyz123.mkv","path":"/media/Movies/xyz123.mkv","relativePath":"xyz123.mkv"}
+		]}]`,
+		tracked:  `[]`,
+		profiles: `[]`,
+		lookups: map[string]string{
+			"xyz123 mkv": `[]`,
+		},
+	}
+	sess := newTestSession(t, servarr.Radarr, f.handler(t))
+	sess.MainstreamAI = fakeMainstreamAI(t, `{"title":null}`)
+
+	got, err := Scan(context.Background(), sess)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 1 || got[0].Status != proposals.Unmatched {
+		t.Fatalf("expected an Unmatched proposal when AI declines, got %+v", got)
+	}
+	if !strings.Contains(got[0].Reason, "AI title guess failed") {
+		t.Errorf("expected the reason to mention the AI decline, got %q", got[0].Reason)
+	}
+}
+
+// TestScan_NoAIFallbackWhenUnconfigured confirms existing behavior is
+// unchanged when MainstreamAI is nil (the default, pre-existing case) — no
+// regression for installs without an Ollama connection configured.
+func TestScan_NoAIFallbackWhenUnconfigured(t *testing.T) {
+	f := &fakeRadarr{
+		rootFolders: `[{"id":1,"path":"/media/Movies","accessible":true,"freeSpace":1,"unmappedFolders":[
+			{"name":"xyz123.mkv","path":"/media/Movies/xyz123.mkv","relativePath":"xyz123.mkv"}
+		]}]`,
+		tracked:  `[]`,
+		profiles: `[]`,
+		lookups: map[string]string{
+			"xyz123 mkv": `[]`,
+		},
+	}
+	sess := newTestSession(t, servarr.Radarr, f.handler(t))
+	if sess.MainstreamAI != nil {
+		t.Fatal("precondition: expected a nil MainstreamAI for this test")
+	}
+
+	got, err := Scan(context.Background(), sess)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 1 || got[0].Status != proposals.Unmatched {
+		t.Fatalf("expected an Unmatched proposal, got %+v", got)
+	}
+	if strings.Contains(got[0].Reason, "AI") {
+		t.Errorf("expected no AI mention when MainstreamAI is unconfigured, got %q", got[0].Reason)
 	}
 }
 

@@ -34,13 +34,26 @@ const (
 	Adult  Mode = "adult"
 )
 
-// AdultOllamaModelKey is the settings key holding the Ollama model name the
-// Adult identification pipeline runs against. Stored in settings (not a
-// connections column) because it's a non-secret scalar with no schema of its
-// own. Empty/unset means "identification not configured": Build leaves
-// sess.Identify nil rather than guessing a model. Exported so internal/api can
-// read/write the same key without duplicating the string literal.
-const AdultOllamaModelKey = "adult_ollama_model"
+// OllamaModelKey is the settings key holding the Ollama model name every AI-
+// assisted feature runs against — Adult identification (filename parsing +
+// web-grounding, internal/identify's ParseFilename/ExtractFromSearch) AND
+// Movies/Series Rename's AI title-guess fallback (internal/identify's
+// GuessTitle) share this ONE setting; Tidyarr never asks which mode's model
+// to configure, since a single local Ollama install typically runs one
+// model. Stored in settings (not a connections column) because it's a
+// non-secret scalar with no schema of its own. Empty/unset means "AI
+// features not configured": Build leaves sess.Identify/sess.MainstreamAI nil
+// rather than guessing a model. Exported so internal/api can read/write the
+// same key without duplicating the string literal.
+//
+// Whatever model is configured here MUST support Ollama's structured JSON
+// output mode (format=json — see internal/ollama.Client.ChatJSON) — every
+// prompt in internal/identify asks for a specific JSON shape and parses the
+// response accordingly. Swapping in a different/alternate model works as
+// long as it honors format=json and follows each prompt's own explicit
+// instructions (schema, the "respond with null if unsure" escape valves);
+// nothing here is tuned to one specific model's quirks.
+const OllamaModelKey = "ollama_model"
 
 // adultThrottleInterval is the per-host minimum call spacing for the Adult
 // identification pipeline's external services — technical call-spacing
@@ -84,9 +97,18 @@ type Session struct {
 
 	// Identify is the AI-assisted content-identification pipeline, populated
 	// ONLY for Adult mode and ONLY when its backbone (an Ollama connection AND
-	// the adult_ollama_model setting) is configured; nil otherwise — including
-	// for every Movies/Series session. Consumers must nil-check before use.
+	// the OllamaModelKey setting) is configured; nil otherwise — including for
+	// every Movies/Series session. Consumers must nil-check before use.
 	Identify *identify.Identifier
+
+	// MainstreamAI is Movies/Series Rename's AI title-guess fallback client —
+	// populated for every mode (cheap, harmless if unused) when an Ollama
+	// connection AND the OllamaModelKey setting are both configured (the SAME
+	// setting Identify's Ollama client uses — one shared model, not a
+	// per-mode choice); nil otherwise. Adult mode doesn't use this field (its
+	// own Identify covers all of its AI needs) but nothing stops it from
+	// being populated too. Consumers must nil-check before use.
+	MainstreamAI *ollama.Client
 }
 
 // Build constructs a Session for m using the connection currently configured
@@ -114,12 +136,45 @@ func Build(ctx context.Context, store *connections.Store, settingsStore *setting
 		}
 		sess.Identify = id
 	}
+	mainstreamAI, err := buildMainstreamAI(ctx, store, settingsStore, httpClient)
+	if err != nil {
+		return nil, fmt.Errorf("mode %q: building mainstream AI fallback: %w", m, err)
+	}
+	sess.MainstreamAI = mainstreamAI
 	return sess, nil
+}
+
+// buildMainstreamAI assembles Movies/Series Rename's AI title-guess fallback
+// client, from the SAME OllamaModelKey setting buildIdentifier uses for
+// Adult. Tolerant by design, same shape as buildIdentifier's Ollama check:
+// without BOTH an Ollama connection and the OllamaModelKey setting, returns
+// (nil, nil) rather than guessing a model — Rename simply skips the fallback
+// in that case. A real store error (anything other than "not configured")
+// propagates.
+func buildMainstreamAI(ctx context.Context, store *connections.Store, settingsStore *settings.Store, httpClient *http.Client) (*ollama.Client, error) {
+	ollamaConn, err := optionalConn(ctx, store, "ollama")
+	if err != nil {
+		return nil, err
+	}
+	if ollamaConn == nil {
+		return nil, nil
+	}
+	model, err := settingsStore.Get(ctx, OllamaModelKey)
+	if errors.Is(err, settings.ErrNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if model == "" {
+		return nil, nil
+	}
+	return ollama.New(ollamaConn.URL, model, httpClient), nil
 }
 
 // buildIdentifier assembles the Adult identification pipeline from whatever is
 // configured. Tolerant by design: the Ollama connection AND the
-// adult_ollama_model setting are the backbone — without either, there is no
+// OllamaModelKey setting are the backbone — without either, there is no
 // identifier at all (returns nil, nil), because ParseFilename would nil-panic
 // on a missing Ollama client. Every other client (stashdb/fansdb/tpdb/brave)
 // is optional: a missing connection yields a nil client, which BoxSearcher and
@@ -133,7 +188,7 @@ func buildIdentifier(ctx context.Context, store *connections.Store, settingsStor
 	if ollamaConn == nil {
 		return nil, nil // no Ollama backbone → identification not configured
 	}
-	model, err := settingsStore.Get(ctx, AdultOllamaModelKey)
+	model, err := settingsStore.Get(ctx, OllamaModelKey)
 	if errors.Is(err, settings.ErrNotFound) {
 		return nil, nil // no model → do NOT guess one
 	}

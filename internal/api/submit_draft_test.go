@@ -58,7 +58,7 @@ func TestSubmitDraftHandler_GivesUnmatchedProposalBackToTPDB(t *testing.T) {
 			t.Fatalf("seeding %s connection: %v", c.service, err)
 		}
 	}
-	if err := settingsStore.Set(ctx, mode.AdultOllamaModelKey, "test-model"); err != nil {
+	if err := settingsStore.Set(ctx, mode.OllamaModelKey, "test-model"); err != nil {
 		t.Fatalf("seeding ollama model: %v", err)
 	}
 	// buildIdentifier requires an Ollama connection as its backbone, even

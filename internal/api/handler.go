@@ -7,6 +7,7 @@ import (
 	"github.com/curtiswtaylorjr/tidyarr/internal/allowlist"
 	"github.com/curtiswtaylorjr/tidyarr/internal/connections"
 	"github.com/curtiswtaylorjr/tidyarr/internal/dedup"
+	"github.com/curtiswtaylorjr/tidyarr/internal/mode"
 	"github.com/curtiswtaylorjr/tidyarr/internal/proposals"
 	"github.com/curtiswtaylorjr/tidyarr/internal/settings"
 )
@@ -47,8 +48,11 @@ func NewMux(httpClient *http.Client, connStore *connections.Store, propStore *pr
 	mux.HandleFunc("GET /api/setup/status", setupStatusHandler(connStore, allowStore, settingsStore))
 	mux.HandleFunc("PUT /api/setup/dismissed", dismissSetupHandler(settingsStore))
 
-	mux.HandleFunc("GET /api/settings/adult-ollama-model", getAdultOllamaModelHandler(settingsStore))
-	mux.HandleFunc("PUT /api/settings/adult-ollama-model", putAdultOllamaModelHandler(settingsStore))
+	// One shared Ollama model setting for every AI-assisted feature (Adult
+	// identification AND Movies/Series Rename's AI fallback) — see
+	// mode.OllamaModelKey's doc comment for why this isn't split per mode.
+	mux.HandleFunc("GET /api/settings/ollama-model", getOllamaModelHandler(settingsStore, mode.OllamaModelKey))
+	mux.HandleFunc("PUT /api/settings/ollama-model", putOllamaModelHandler(settingsStore, mode.OllamaModelKey))
 
 	mux.HandleFunc("POST /api/proposals/{id}/apply", applyProposalHandler(httpClient, connStore, settingsStore, propStore))
 	mux.HandleFunc("POST /api/proposals/{id}/submit-draft", submitDraftHandler(httpClient, connStore, settingsStore, propStore))

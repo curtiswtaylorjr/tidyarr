@@ -16,10 +16,14 @@ persist service credentials (encrypted at rest — see below), and all four
 review workflows the design calls for, three of them queue-staged:
 **Rename** (`POST /api/modes/{movies,series,adult}/rename/scan` finds orphaned
 files, identifies them, and stages one proposal per item — Movies/Series via
-the *arr app's own TVDB/TMDB lookup, Adult via the StashDB/FansDB/TPDB/Ollama
-identification pipeline, with Apply carrying the resolved scene identifier
-through to Whisparr V3. When Adult identification confidently identifies a
-file via web search but it matches no existing scene anywhere, the resulting
+the *arr app's own TVDB/TMDB lookup, falling back to an AI-guessed title (via
+Ollama, `GET`/`PUT /api/settings/ollama-model`) when that lookup finds
+nothing, Adult via the StashDB/FansDB/TPDB/Ollama identification pipeline,
+with Apply carrying the resolved scene identifier through to Whisparr V3. Both
+Movies/Series' AI fallback and Adult's identification pipeline share the same
+configured Ollama model — one local Ollama install, one model setting, no
+per-mode duplication. When Adult identification confidently identifies a file
+via web search but it matches no existing scene anywhere, the resulting
 Unmatched proposal can be given back to the community databases as a new
 scene draft — `POST /api/proposals/{id}/submit-draft`, preferring TPDB when
 configured and falling back to StashDB — a separate, explicitly
@@ -45,7 +49,8 @@ the live vocabulary and `POST`/`DELETE
 creating a genuinely new tag upstream automatically — this one isn't staged
 through the review queue, since assigning a tag is already a single
 deliberate action, not an automatic decision needing approval. Series Dedup,
-AI-suggested tags, and the React frontend don't exist yet. All three Adult
+AI-suggested tags, Kids/general classification for Movies/Series, and the
+React frontend don't exist yet. All three Adult
 workflows (Rename, Purge, Dedup) are now live, though tracked-vs-orphan Adult
 Dedup rests on an unverified assumption about Whisparr's API response shape
 (see the commit history) — not yet run against a real Whisparr instance.

@@ -229,7 +229,7 @@ func TestBuild_AdultWithIdentificationConnections_PopulatesIdentify(t *testing.T
 			t.Fatalf("unexpected error upserting %s: %v", c.service, err)
 		}
 	}
-	if err := settingsStore.Set(ctx, AdultOllamaModelKey, "qwen2.5vl:7b"); err != nil {
+	if err := settingsStore.Set(ctx, OllamaModelKey, "qwen2.5vl:7b"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -310,7 +310,7 @@ func TestBuild_AdultIdentifierIsFunctional(t *testing.T) {
 	if err := store.Upsert(ctx, "stashdb", stashSrv.URL, "k"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if err := settingsStore.Set(ctx, AdultOllamaModelKey, "test-model"); err != nil {
+	if err := settingsStore.Set(ctx, OllamaModelKey, "test-model"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -337,6 +337,80 @@ func TestBuild_AdultIdentifierIsFunctional(t *testing.T) {
 	}
 	if res.Box != "stashdb" {
 		t.Errorf("expected Box \"stashdb\", got %q", res.Box)
+	}
+}
+
+// TestBuild_MainstreamAI_NilWithoutOllamaConnection confirms Movies/Series
+// sessions get a nil MainstreamAI when no Ollama connection is configured at
+// all — Rename's AI fallback is simply skipped, matching Identify's own
+// "absent = not configured, never guess" rule.
+func TestBuild_MainstreamAI_NilWithoutOllamaConnection(t *testing.T) {
+	store, settingsStore := newTestStores(t)
+	ctx := context.Background()
+	if err := store.Upsert(ctx, "radarr", "http://radarr.local:7878", "radarr-key"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	sess, err := Build(ctx, store, settingsStore, &http.Client{Timeout: time.Second}, Movies)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if sess.MainstreamAI != nil {
+		t.Error("expected MainstreamAI to be nil without an Ollama connection")
+	}
+}
+
+// TestBuild_MainstreamAI_NilWithoutModelSetting confirms an Ollama connection
+// alone isn't enough — the OllamaModelKey setting must also be set, same
+// two-part gate as Adult's Identify.
+func TestBuild_MainstreamAI_NilWithoutModelSetting(t *testing.T) {
+	store, settingsStore := newTestStores(t)
+	ctx := context.Background()
+	if err := store.Upsert(ctx, "radarr", "http://radarr.local:7878", "radarr-key"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if err := store.Upsert(ctx, "ollama", "http://ollama.local:11434", ""); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	sess, err := Build(ctx, store, settingsStore, &http.Client{Timeout: time.Second}, Movies)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if sess.MainstreamAI != nil {
+		t.Error("expected MainstreamAI to be nil without the OllamaModelKey setting")
+	}
+}
+
+// TestBuild_MainstreamAI_PopulatedWhenConfigured proves the happy path for
+// every mode Rename actually applies this to.
+func TestBuild_MainstreamAI_PopulatedWhenConfigured(t *testing.T) {
+	for _, m := range []Mode{Movies, Series} {
+		t.Run(string(m), func(t *testing.T) {
+			store, settingsStore := newTestStores(t)
+			ctx := context.Background()
+			service := "radarr"
+			if m == Series {
+				service = "sonarr"
+			}
+			if err := store.Upsert(ctx, service, "http://app.local", "key"); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if err := store.Upsert(ctx, "ollama", "http://ollama.local:11434", ""); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if err := settingsStore.Set(ctx, OllamaModelKey, "qwen2.5:7b"); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			sess, err := Build(ctx, store, settingsStore, &http.Client{Timeout: time.Second}, m)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if sess.MainstreamAI == nil {
+				t.Fatal("expected a non-nil MainstreamAI with ollama+model configured")
+			}
+		})
 	}
 }
 
