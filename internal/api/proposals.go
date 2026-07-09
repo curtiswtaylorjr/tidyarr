@@ -161,12 +161,19 @@ func applyByWorkflow(ctx context.Context, propStore *proposals.Store, libStore *
 		}
 		return propStore.MarkApplied(ctx, p.ID, p.TrackedID)
 	case proposals.Dedup:
-		if p.Mode == mode.Movies {
+		switch p.Mode {
+		case mode.Movies:
 			itemID, err := dedup.ApplyLibrary(ctx, libStore, p, req.KeepIndex, req.KeepAll)
 			if err != nil {
 				return err
 			}
 			return propStore.MarkApplied(ctx, p.ID, int(itemID))
+		case mode.Series:
+			episodeID, err := dedup.ApplyLibrarySeries(ctx, libStore, p, req.KeepIndex, req.KeepAll)
+			if err != nil {
+				return err
+			}
+			return propStore.MarkApplied(ctx, p.ID, int(episodeID))
 		}
 		trackedID, err := dedup.Apply(ctx, sess, p, req.KeepIndex, req.KeepAll)
 		if err != nil {

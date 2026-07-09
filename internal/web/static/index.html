@@ -82,14 +82,14 @@
 const MODES = ["movies", "series", "adult"];
 const MODE_LABELS = { movies: "Movies", series: "Series", adult: "Adult" };
 // Which workflows apply to which mode — matches the backend's own wiring
-// (Series Dedup is deferred to a later stage — grouping duplicates by
-// show+season+episode is undecided design work, see internal/dedup's
+// (Dedup groups duplicates by TMDB id for Movies, by (show, season,
+// episode) for Series, by foreignID for Adult — see internal/dedup's
 // package doc; Tag is live for all three; Search/Discover is Movies/Series
 // only — Prowlarr/qBittorrent/NZBGet/TMDB replace Radarr/Sonarr's own
 // acquisition loop, not Whisparr's).
 const MODE_WORKFLOWS = {
   movies: ["search", "rename", "purge", "dedup", "tag", "settings"],
-  series: ["search", "rename", "purge", "tag", "settings"],
+  series: ["search", "rename", "purge", "dedup", "tag", "settings"],
   adult:  ["rename", "purge", "dedup", "tag", "settings"],
 };
 const VIEW_LABELS = { search: "Search", rename: "Rename", purge: "Purge", dedup: "Dedup", tag: "Tag", settings: "Settings" };

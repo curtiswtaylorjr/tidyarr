@@ -54,13 +54,17 @@ already-tracked items on every Scan), **Purge** (`POST
 allowlist, managed via `/api/modes/{mode}/purge/allowlist`, against every
 tracked item's tags — Movies/Series against their own local library tags,
 Adult against Whisparr's native tag resource), and **Dedup** (`POST
-/api/modes/{movies,adult}/dedup/scan` groups unmapped files with any
-already-tracked item sharing the same identifier — TMDB ID for Movies, the
-resolved scene's foreignID for Adult — ffprobes every candidate directly,
-and stages a proposal per duplicate group with a precomputed quality
-winner; Series isn't wired up — grouping duplicates by show+season+episode
-instead of a single id is real, deliberately deferred design work, not a
-missing port, now that Series has its own library too).
+/api/modes/{movies,series,adult}/dedup/scan` groups unmapped files with any
+already-tracked item sharing the same identifier — TMDB ID for Movies,
+`(show TMDB id, season, episode)` for Series, the resolved scene's
+foreignID for Adult — ffprobes every candidate directly, and stages a
+proposal per duplicate group with a precomputed quality winner. For
+Series, "the tracked copy" for a duplicate group is simply the one
+`library.Episode` row for that exact season/episode — the schema's own
+uniqueness constraint on that triple rules out ambiguity — and a
+duplicate file inside a season-pack folder groups with a duplicate loose
+single-episode file naturally, since a pack is broken into individual
+files before grouping happens).
 These three stage proposals in one shared, persisted review queue; `POST
 /api/proposals/{id}/apply` commits exactly the one a human approved —
 Dedup's apply optionally takes `{"keepIndex": n}` or `{"keepAll": true}` to
@@ -73,9 +77,9 @@ Movies/Series both use local string-label tags (no numeric id — `id` and
 `label` are the same string), Adult still creates a genuinely new tag
 upstream on Whisparr automatically. Not staged through the review queue,
 since assigning a tag is already a single deliberate action, not an
-automatic decision needing approval. Series Dedup and AI-suggested tags
-don't exist yet. All three Adult workflows (Rename, Purge, Dedup) are now
-live, though tracked-vs-orphan Adult Dedup rests on an unverified
+automatic decision needing approval. AI-suggested tags don't exist yet.
+All three Adult workflows (Rename, Purge, Dedup) are now live, though
+tracked-vs-orphan Adult Dedup rests on an unverified
 assumption about Whisparr's API response shape (see the commit history) —
 not yet run against a real Whisparr instance.
 
@@ -112,8 +116,7 @@ without a click" rule. A **Discover** browse view sits in front of Search:
 title auto-fills Search's query. None of this touches Adult/Whisparr
 search, or Jellyfin — Jellyfin integration is a distinct, not-yet-started
 piece of the roadmap, kept deliberately separate. Also out of scope for
-now: RSS/automatic search, a calendar, blocklist/retry-on-failure, and
-Series Dedup.
+now: RSS/automatic search, a calendar, and blocklist/retry-on-failure.
 
 **Neither Movies nor Series uses a *arr app at all anymore** — each owns
 its own library directly (`internal/library`): Movies' flat `Item`

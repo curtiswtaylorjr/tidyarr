@@ -1,18 +1,23 @@
-// Package dedup implements SAK's Dedup workflow for Movies: find
-// content that's been identified twice — once as an already-tracked item,
-// once (or more) as an orphaned file that resolves to the same TMDB ID — and
-// stage a proposal to keep the better-quality copy instead of leaving both
-// silently in place (today's behavior in both source CLIs).
+// Package dedup implements SAK's Dedup workflow: find content that's been
+// identified twice — once as an already-tracked item, once (or more) as an
+// orphaned file that resolves to the same identity — and stage a proposal
+// to keep the better-quality copy instead of leaving both silently in
+// place (today's behavior in both source CLIs).
 //
-// Series isn't implemented yet, even though it now owns its own library
-// (internal/library's Series/Episode tables — Sonarr is no longer the
-// blocker): grouping duplicates by show+season+episode instead of by a
-// single TMDB id is a real, undecided design (what "the tracked copy" even
-// means for an episode, how a duplicate season-pack file groups against a
-// duplicate single-episode file), deliberately deferred to a later stage
-// rather than rushed in alongside the rest of Series' Sonarr elimination.
-// Scan refuses Series sessions with a clear error rather than silently
-// doing the wrong thing.
+// Movies groups by TMDB id (scanMovies/ScanLibrary); Adult groups by the
+// resolved scene's foreignID (scanAdult); Series groups by
+// (show TMDB id, season, episode) — see ScanLibrarySeries, whose grouping
+// resolves both questions an earlier version of this comment used to flag
+// as undecided: "the tracked copy" is just the one library.Episode row for
+// that exact key (the schema's own UNIQUE constraint rules out ambiguity),
+// and a duplicate season-pack file groups with a duplicate single-episode
+// file naturally, since a season pack is broken into individual files
+// (library.ResolveEpisodeVideoFiles) before grouping ever happens. Scan/
+// Apply are the generic Servarr-backed pair, serving only Adult now
+// (Movies/Series both moved to their own libStore-backed
+// ScanLibrary*/ApplyLibrary* siblings, dispatched at the API layer); Scan
+// still refuses a Series session (Sonarr-backed or not) since that
+// dispatch never routes here for Series.
 //
 // Quality comparison never trusts a *arr app's own reported file quality —
 // every candidate, tracked or not, gets ffprobed directly by SAK itself
@@ -24,6 +29,7 @@ package dedup
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -596,4 +602,205 @@ func removeLibraryCandidate(ctx context.Context, libStore *library.Store, c prop
 		}
 	}
 	return libStore.Delete(ctx, int64(c.TrackedID))
+}
+
+// episodeDedupKey groups Series duplicates at the episode level — the
+// answer to "what does a duplicate mean for Series": two files are
+// duplicates of each other only if they resolve to the same show AND the
+// same season/episode. A season-pack orphan is broken into individual
+// files (library.ResolveEpisodeVideoFiles) before this key is ever
+// computed, so a duplicate episode inside a pack groups naturally with a
+// duplicate loose file for that same episode.
+type episodeDedupKey struct {
+	tmdbID, season, episode int
+}
+
+// ScanLibrarySeries is Dedup's Series-library counterpart to ScanLibrary —
+// identifies every unmapped file (or file inside an unmapped season-pack
+// directory) via TMDB TV search, and groups it, and any already-tracked
+// episode, by episodeDedupKey. "The tracked copy" for a key is simply the
+// one library.Episode row for that exact (series, season, episode) —
+// the schema's own UNIQUE(series_id, season_number, episode_number)
+// constraint already rules out there ever being more than one, unlike
+// Adult's string-matched foreignID grouping.
+func ScanLibrarySeries(ctx context.Context, sess *mode.Session, libStore *library.Store, rootFolderPath string, prober Prober) ([]proposals.Proposal, error) {
+	if sess.TMDB == nil {
+		return nil, fmt.Errorf("tmdb isn't configured yet — add it in Settings first")
+	}
+	if rootFolderPath == "" {
+		return nil, fmt.Errorf("no Series library root folder configured yet — add one in Settings first")
+	}
+
+	allSeries, err := libStore.ListSeries(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("loading series: %w", err)
+	}
+
+	trackedByKey := make(map[episodeDedupKey]library.Episode)
+	seriesByID := make(map[int64]library.Series, len(allSeries))
+	known := map[string]bool{}
+	for _, s := range allSeries {
+		seriesByID[s.ID] = s
+		episodes, err := libStore.ListEpisodes(ctx, s.ID)
+		if err != nil {
+			return nil, fmt.Errorf("loading episodes for %q: %w", s.Title, err)
+		}
+		for _, ep := range episodes {
+			if ep.FilePath == "" {
+				continue // known from TMDB but not on disk — not a duplicate target
+			}
+			// An organized episode lives two levels below root
+			// (root/Series Title/Season NN/file.ext) — mark the file itself
+			// plus both containing directories known, so ScanRootFolder's
+			// one-level view of root doesn't re-report the series' own
+			// top-level folder as unmapped (same three-level marking
+			// rename.ScanLibrarySeries already does).
+			known[ep.FilePath] = true
+			known[filepath.Dir(ep.FilePath)] = true
+			known[filepath.Dir(filepath.Dir(ep.FilePath))] = true
+			trackedByKey[episodeDedupKey{tmdbID: s.TMDBID, season: ep.SeasonNumber, episode: ep.EpisodeNumber}] = ep
+		}
+	}
+
+	type orphanHit struct {
+		name, path, title string
+	}
+	orphansByKey := make(map[episodeDedupKey][]orphanHit)
+
+	entries, err := library.ScanRootFolder(rootFolderPath, known)
+	if err != nil {
+		return nil, fmt.Errorf("scanning %s: %w", rootFolderPath, err)
+	}
+	for _, entry := range entries {
+		if config.SidecarExts[strings.ToLower(filepath.Ext(entry.Name))] {
+			continue
+		}
+		videoFiles, err := library.ResolveEpisodeVideoFiles(entry.Path)
+		if err != nil {
+			continue // not Dedup's concern — Rename's own ScanLibrarySeries surfaces unmatched items
+		}
+		for _, videoPath := range videoFiles {
+			name := filepath.Base(videoPath)
+			season, episode, ok := library.ParseEpisodeFilename(name)
+			if !ok {
+				continue
+			}
+			items, err := sess.TMDB.SearchTV(ctx, searchterm.FromName(library.StripEpisodeMarker(name)))
+			if err != nil || len(items) == 0 {
+				continue
+			}
+			match := items[0]
+			key := episodeDedupKey{tmdbID: match.ID, season: season, episode: episode}
+			orphansByKey[key] = append(orphansByKey[key], orphanHit{name: name, path: videoPath, title: match.Title})
+		}
+	}
+
+	var out []proposals.Proposal
+	for key, orphans := range orphansByKey {
+		trackedEp, isTracked := trackedByKey[key]
+		if !isTracked && len(orphans) < 2 {
+			continue // a single new, untracked episode — nothing to dedup
+		}
+
+		title := orphans[0].title
+		rootPath := ""
+		var candidates []proposals.Candidate
+		if isTracked {
+			if c := probeCandidate(ctx, prober, "tracked", trackedEp.FilePath, int(trackedEp.ID)); c != nil {
+				candidates = append(candidates, *c)
+			}
+			if s, ok := seriesByID[trackedEp.SeriesID]; ok {
+				title, rootPath = s.Title, s.RootFolderPath
+			}
+		}
+		for _, o := range orphans {
+			if c := probeCandidate(ctx, prober, o.name, o.path, 0); c != nil {
+				candidates = append(candidates, *c)
+				if rootPath == "" {
+					rootPath = filepath.Dir(o.path)
+				}
+			}
+		}
+		if len(candidates) < 2 {
+			continue // couldn't probe enough of the group to compare
+		}
+		markWinner(candidates)
+
+		out = append(out, proposals.Proposal{
+			Mode: mode.Series, Workflow: proposals.Dedup, Status: proposals.Pending,
+			SourceName: title, Title: title, TMDBID: key.tmdbID,
+			SeasonNumber: key.season, EpisodeNumber: key.episode, RootFolderPath: rootPath,
+			Candidates: candidates,
+			Reason:     fmt.Sprintf("%d copies identified as %q S%02dE%02d", len(candidates), title, key.season, key.episode),
+		})
+	}
+	return out, nil
+}
+
+// ApplyLibrarySeries is Dedup's Series-library counterpart to ApplyLibrary.
+// Unlike Movies, a losing tracked candidate never needs an explicit row
+// delete: the (series, season, episode) row the tracked loser occupied is
+// simply overwritten by the winner's file path via UpsertEpisode — there's
+// nothing else that could ever point at that exact slot.
+func ApplyLibrarySeries(ctx context.Context, libStore *library.Store, p proposals.Proposal, keepIndex *int, keepAll bool) (episodeID int64, err error) {
+	if p.Status != proposals.Pending {
+		return 0, fmt.Errorf("proposal %d is %q, not pending — nothing to apply", p.ID, p.Status)
+	}
+	if len(p.Candidates) < 2 {
+		return 0, fmt.Errorf("proposal %d has fewer than 2 candidates to resolve", p.ID)
+	}
+
+	if keepAll {
+		for _, c := range p.Candidates {
+			if c.TrackedID != 0 {
+				return int64(c.TrackedID), nil
+			}
+		}
+		return 0, nil
+	}
+
+	idx := winnerIndex(p.Candidates)
+	if keepIndex != nil {
+		if *keepIndex < 0 || *keepIndex >= len(p.Candidates) {
+			return 0, fmt.Errorf("proposal %d: keepIndex %d out of range", p.ID, *keepIndex)
+		}
+		idx = *keepIndex
+	}
+	winner := p.Candidates[idx]
+
+	for i, c := range p.Candidates {
+		if i == idx {
+			continue
+		}
+		if err := os.Remove(c.Path); err != nil && !os.IsNotExist(err) {
+			return 0, fmt.Errorf("removing %s: %w", c.Path, err)
+		}
+	}
+
+	if winner.TrackedID != 0 {
+		return int64(winner.TrackedID), nil
+	}
+
+	series, err := libStore.UpsertSeries(ctx, library.Series{
+		TMDBID: p.TMDBID, Title: p.Title, RootFolderPath: p.RootFolderPath,
+	})
+	if err != nil {
+		return 0, fmt.Errorf("recording series %q: %w", p.Title, err)
+	}
+
+	title, airDate := "", ""
+	if existing, err := libStore.GetEpisode(ctx, series.ID, p.SeasonNumber, p.EpisodeNumber); err == nil {
+		title, airDate = existing.Title, existing.AirDate
+	} else if !errors.Is(err, library.ErrNotFound) {
+		return 0, fmt.Errorf("checking existing episode metadata: %w", err)
+	}
+
+	ep, err := libStore.UpsertEpisode(ctx, library.Episode{
+		SeriesID: series.ID, SeasonNumber: p.SeasonNumber, EpisodeNumber: p.EpisodeNumber,
+		Title: title, AirDate: airDate, FilePath: winner.Path,
+	})
+	if err != nil {
+		return 0, fmt.Errorf("registering surviving copy %q: %w", p.Title, err)
+	}
+	return ep.ID, nil
 }

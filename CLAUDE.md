@@ -29,15 +29,13 @@ of.
 ## Scope: opportunistic, not a fixed roadmap
 
 There is **no committed target list** of what SAK will eventually absorb.
-Radarr is eliminated for Movies (done); Sonarr is eliminated for Series
-(done). Series Dedup (grouping duplicate episode files by show+season+
-episode) is a known, deliberately deferred gap — see Current state.
-Whether Jellyfin, Stash, Bazarr, Tdarr, or anything else ever gets
-absorbed is an open question, decided app-by-app as the pain of running
-it separately becomes concrete — not decided in advance by a roadmap.
-When a new consolidation opportunity comes up, engage with it on its own
-merits; don't cite (or invent) a fixed end-state that includes or
-excludes it a priori.
+Radarr is eliminated for Movies (done); Sonarr is eliminated for Series,
+including Series Dedup (done). Whether Jellyfin, Stash, Bazarr, Tdarr, or
+anything else ever gets absorbed is an open question, decided app-by-app
+as the pain of running it separately becomes concrete — not decided in
+advance by a roadmap. When a new consolidation opportunity comes up,
+engage with it on its own merits; don't cite (or invent) a fixed
+end-state that includes or excludes it a priori.
 
 ## Automation: manual by default, scheduling earns its way back in
 
@@ -111,14 +109,15 @@ above, so don't drop them for convenience:
   ids via TMDB's `/find` endpoint — read-only against Sonarr, safe to
   re-run. `internal/servarr`'s Sonarr support is kept (still a valid
   generic capability, same precedent as Radarr) even though nothing in
-  `mode.Build` constructs one anymore.
-  - **Known gap, deliberately deferred**: Series Dedup isn't built.
-    Grouping duplicate episode files by show+season+episode (not a single
-    TMDB id, the way Movies' Dedup works) is genuinely undecided design
-    work — what "the tracked copy" even means for an episode, how a
-    duplicate season-pack file groups against a duplicate single-episode
-    file — not a mechanical port of something that already existed.
-    `dedup.Scan` refuses Series with a clear error rather than guessing.
+  `mode.Build` constructs one anymore. Series Dedup is built too
+  (`dedup.ScanLibrarySeries`/`ApplyLibrarySeries`): duplicates group by
+  `(show TMDB id, season, episode)` rather than a single id — "the tracked
+  copy" for a key is just the one `library.Episode` row for that exact
+  slot (the schema's own `UNIQUE(series_id, season_number,
+  episode_number)` constraint rules out ambiguity), and a season-pack
+  duplicate groups with a loose single-episode duplicate naturally, since
+  a pack is broken into individual files
+  (`library.ResolveEpisodeVideoFiles`) before grouping happens.
 - **Adult (Whisparr)**: untouched, not in any near-term plan.
 - **Jellyfin**: not integrated at all yet. Whether it's ever absorbed vs.
   stays a permanent separate playback layer is genuinely undecided (see
