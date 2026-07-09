@@ -64,12 +64,19 @@ the live vocabulary and `POST`/`DELETE
 /api/modes/{mode}/items/{itemId}/tags[/{tagId}]` to assign or remove one,
 creating a genuinely new tag upstream automatically — this one isn't staged
 through the review queue, since assigning a tag is already a single
-deliberate action, not an automatic decision needing approval. Series Dedup,
-AI-suggested tags, and the React frontend don't exist yet. All three Adult
-workflows (Rename, Purge, Dedup) are now live, though tracked-vs-orphan Adult
-Dedup rests on an unverified assumption about Whisparr's API response shape
-(see the commit history) — not yet run against a real Whisparr instance.
-Not ready to run as a media tool.
+deliberate action, not an automatic decision needing approval. Series Dedup
+and AI-suggested tags don't exist yet. All three Adult workflows (Rename,
+Purge, Dedup) are now live, though tracked-vs-orphan Adult Dedup rests on an
+unverified assumption about Whisparr's API response shape (see the commit
+history) — not yet run against a real Whisparr instance.
+
+A working frontend now exists: a single dependency-free HTML/JS page (no
+build step, no framework) embedded into the Go binary and served at `/` —
+Settings (connections, AI provider/model, per-mode Kids root path, per-mode
+Purge allowlist) plus all four workflow views (Rename/Purge/Dedup/Tag) for
+each mode, driving the exact same API a script would. Functional, not
+polished — it's for exercising the real workflows against a real Radarr/
+Sonarr/Whisparr instance, not a finished design.
 
 Secrets are encrypted at rest with a locally generated key
 (`<data-dir>/secret.key`, mode 0600) rather than an OS keychain — the
@@ -100,6 +107,9 @@ workflow runs without it.
 ```sh
 go run ./cmd/tidyarr
 ```
+
+Then open `http://localhost:8080/` for the UI (the API itself lives under
+`/api/...`, same port).
 
 Configuration is via environment variables for now:
 

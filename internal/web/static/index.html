@@ -1,0 +1,523 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tidyarr</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #ffffff; --fg: #1a1a1a; --muted: #6b7280; --border: #e2e2e2;
+    --card: #f7f7f8; --accent: #2563eb; --accent-fg: #ffffff;
+    --danger: #dc2626; --ok: #16a34a; --warn: #d97706;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #15161a; --fg: #e8e8ea; --muted: #9a9aa2; --border: #2c2d33; --card: #1d1e23; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: var(--bg); color: var(--fg); }
+  a { color: var(--accent); }
+  header { display: flex; align-items: center; gap: 1rem; padding: 0.75rem 1rem; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+  header h1 { font-size: 1.1rem; margin: 0; margin-right: 0.5rem; }
+  .tabs { display: flex; gap: 0.25rem; flex-wrap: wrap; }
+  .tabs button { background: none; border: 1px solid transparent; color: var(--muted); padding: 0.4rem 0.75rem; border-radius: 6px; cursor: pointer; font-size: 0.9rem; }
+  .tabs button.active { background: var(--accent); color: var(--accent-fg); }
+  .tabs button:not(.active):hover { border-color: var(--border); color: var(--fg); }
+  main { padding: 1rem; max-width: 1100px; margin: 0 auto; }
+  .banner { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 0.75rem 1rem; margin-bottom: 1rem; display: flex; justify-content: space-between; align-items: center; gap: 1rem; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 1rem; margin-bottom: 1rem; }
+  .card h2 { margin-top: 0; font-size: 1rem; }
+  .card h3 { font-size: 0.9rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.03em; margin: 1.25rem 0 0.5rem; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+  th, td { text-align: left; padding: 0.4rem 0.5rem; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; font-size: 0.8rem; }
+  input[type=text], input[type=password], select { background: var(--bg); color: var(--fg); border: 1px solid var(--border); border-radius: 6px; padding: 0.35rem 0.5rem; font-size: 0.9rem; width: 100%; }
+  button { background: var(--card); color: var(--fg); border: 1px solid var(--border); border-radius: 6px; padding: 0.35rem 0.7rem; cursor: pointer; font-size: 0.85rem; }
+  button:hover { border-color: var(--accent); }
+  button.primary { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
+  button.danger { color: var(--danger); border-color: var(--danger); }
+  button:disabled { opacity: 0.5; cursor: default; }
+  button + button { margin-left: 0.35rem; }
+  .row { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
+  .muted { color: var(--muted); font-size: 0.85rem; }
+  .pill { display: inline-block; padding: 0.1rem 0.5rem; border-radius: 999px; font-size: 0.75rem; font-weight: 600; }
+  .pill.pending { background: #fef3c7; color: #92400e; }
+  .pill.unmatched { background: #fee2e2; color: #991b1b; }
+  .pill.applied { background: #dcfce7; color: #166534; }
+  .pill.dismissed { background: #e5e7eb; color: #374151; }
+  .chip { display: inline-flex; align-items: center; gap: 0.3rem; background: var(--bg); border: 1px solid var(--border); border-radius: 999px; padding: 0.1rem 0.5rem; font-size: 0.8rem; margin: 0.1rem; }
+  .chip button { border: none; background: none; padding: 0; margin: 0; line-height: 1; color: var(--muted); font-size: 0.85rem; }
+  .error { color: var(--danger); font-size: 0.85rem; }
+  .empty { color: var(--muted); font-style: italic; padding: 1rem 0; }
+  fieldset { border: 1px solid var(--border); border-radius: 8px; margin: 0 0 1rem; }
+  legend { color: var(--muted); font-size: 0.85rem; padding: 0 0.4rem; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem; align-items: end; }
+  code { background: var(--bg); padding: 0.1rem 0.3rem; border-radius: 4px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Tidyarr</h1>
+  <div class="tabs" id="mode-tabs"></div>
+  <div class="tabs" id="view-tabs" style="margin-left:auto"></div>
+</header>
+<main>
+  <div id="banner-slot"></div>
+  <div id="view"></div>
+</main>
+<script>
+"use strict";
+
+const MODES = ["movies", "series", "adult"];
+const MODE_LABELS = { movies: "Movies", series: "Series", adult: "Adult" };
+// Which workflows apply to which mode — matches the backend's own wiring
+// (Series Dedup isn't built; Tag is live for all three).
+const MODE_WORKFLOWS = {
+  movies: ["rename", "purge", "dedup", "tag", "settings"],
+  series: ["rename", "purge", "tag", "settings"],
+  adult:  ["rename", "purge", "dedup", "tag", "settings"],
+};
+const VIEW_LABELS = { rename: "Rename", purge: "Purge", dedup: "Dedup", tag: "Tag", settings: "Settings" };
+
+const state = {
+  mode: MODES[0],
+  view: "rename",
+};
+
+async function api(path, opts) {
+  const res = await fetch(path, Object.assign({ headers: { "Content-Type": "application/json" } }, opts));
+  if (res.status === 204) return null;
+  const isJSON = (res.headers.get("Content-Type") || "").includes("application/json");
+  const body = isJSON ? await res.json() : await res.text();
+  if (!res.ok) {
+    const msg = typeof body === "string" ? body : (body && body.error) || JSON.stringify(body);
+    throw new Error(msg || ("HTTP " + res.status));
+  }
+  return body;
+}
+
+function el(tag, attrs, children) {
+  const node = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (v === null || v === undefined || v === false) continue;
+    if (k === "text") node.textContent = v;
+    else if (k === "html") node.innerHTML = v;
+    else if (k === "disabled") node.disabled = true;
+    else if (k.startsWith("on")) node.addEventListener(k.slice(2), v);
+    else node.setAttribute(k, v);
+  }
+  for (const c of children || []) node.appendChild(c);
+  return node;
+}
+
+function fmtErr(err) {
+  return el("div", { class: "error", text: "Error: " + err.message });
+}
+
+// ---- Nav ----
+
+function renderNav() {
+  const modeTabs = document.getElementById("mode-tabs");
+  modeTabs.innerHTML = "";
+  for (const m of MODES) {
+    modeTabs.appendChild(el("button", {
+      class: m === state.mode ? "active" : "",
+      text: MODE_LABELS[m],
+      onclick: () => { state.mode = m; const wf = MODE_WORKFLOWS[m]; if (!wf.includes(state.view)) state.view = wf[0]; render(); },
+    }));
+  }
+  const viewTabs = document.getElementById("view-tabs");
+  viewTabs.innerHTML = "";
+  for (const v of MODE_WORKFLOWS[state.mode]) {
+    viewTabs.appendChild(el("button", {
+      class: v === state.view ? "active" : "",
+      text: VIEW_LABELS[v],
+      onclick: () => { state.view = v; render(); },
+    }));
+  }
+}
+
+// ---- Setup banner ----
+
+async function renderBanner() {
+  const slot = document.getElementById("banner-slot");
+  slot.innerHTML = "";
+  try {
+    const status = await api("/api/setup/status");
+    if (status.dismissed || status.anyConfigured) return;
+    slot.appendChild(el("div", { class: "banner" }, [
+      el("span", { text: "Welcome to Tidyarr — head to Settings to connect Radarr, Sonarr, or Whisparr to get started." }),
+      el("button", { text: "Dismiss", onclick: async () => { await api("/api/setup/dismissed", { method: "PUT", body: JSON.stringify({ dismissed: true }) }); slot.innerHTML = ""; } }),
+    ]));
+  } catch (e) { /* non-critical */ }
+}
+
+// ---- Proposal helpers ----
+
+function statusPill(status) {
+  return el("span", { class: "pill " + status, text: status });
+}
+
+async function applyProposal(id, body) {
+  return api("/api/proposals/" + id + "/apply", { method: "POST", body: JSON.stringify(body || {}) });
+}
+async function dismissProposal(id) {
+  return api("/api/proposals/" + id + "/dismiss", { method: "POST" });
+}
+async function submitDraft(id) {
+  return api("/api/proposals/" + id + "/submit-draft", { method: "POST" });
+}
+
+// ---- Rename view ----
+
+async function renderRename(container) {
+  const m = state.mode;
+  const bar = el("div", { class: "row" }, [
+    el("button", { class: "primary", text: "Scan", onclick: async () => { bar.querySelector("button").disabled = true; try { await api("/api/modes/" + m + "/rename/scan", { method: "POST" }); } catch (e) { container.appendChild(fmtErr(e)); } await renderRename(container); } }),
+  ]);
+  container.innerHTML = "";
+  container.appendChild(el("h2", { text: "Rename" }));
+  container.appendChild(bar);
+
+  let proposals;
+  try { proposals = await api("/api/modes/" + m + "/rename/proposals"); }
+  catch (e) { container.appendChild(fmtErr(e)); return; }
+
+  if (!proposals.length) { container.appendChild(el("div", { class: "empty", text: "No proposals yet — click Scan." })); return; }
+
+  const table = el("table", {}, [
+    el("thead", {}, [el("tr", {}, ["Source", "Title", "Status", "Root Folder", "Reason", "Actions"].map(h => el("th", { text: h })))]),
+  ]);
+  const tbody = el("tbody");
+  for (const p of proposals) {
+    const actions = el("td");
+    if (p.status === "pending") {
+      actions.appendChild(el("button", { class: "primary", text: "Apply", onclick: async () => { try { await applyProposal(p.id); } catch (e) { container.appendChild(fmtErr(e)); } await renderRename(container); } }));
+    }
+    if (p.status === "unmatched") {
+      actions.appendChild(el("button", { text: "Give back" + (p.draftId ? "ed" : ""), disabled: !!p.draftId, onclick: async () => { try { await submitDraft(p.id); } catch (e) { container.appendChild(fmtErr(e)); } await renderRename(container); } }));
+    }
+    if (p.status === "pending" || p.status === "unmatched") {
+      actions.appendChild(el("button", { class: "danger", text: "Dismiss", onclick: async () => { try { await dismissProposal(p.id); } catch (e) { container.appendChild(fmtErr(e)); } await renderRename(container); } }));
+    }
+    tbody.appendChild(el("tr", {}, [
+      el("td", { text: p.sourceName || "" }),
+      el("td", { text: p.title || "" }),
+      el("td", {}, [statusPill(p.status)]),
+      el("td", { text: p.rootFolderPath || "" }),
+      el("td", { text: p.reason || "" }),
+      actions,
+    ]));
+  }
+  table.appendChild(tbody);
+  container.appendChild(table);
+}
+
+// ---- Purge view ----
+
+async function renderPurge(container) {
+  const m = state.mode;
+  container.innerHTML = "";
+  container.appendChild(el("h2", { text: "Purge" }));
+
+  const bar = el("div", { class: "row" }, [
+    el("button", { class: "primary", text: "Scan", onclick: async () => { try { await api("/api/modes/" + m + "/purge/scan", { method: "POST" }); } catch (e) { container.appendChild(fmtErr(e)); } await renderPurge(container); } }),
+  ]);
+  container.appendChild(bar);
+
+  container.appendChild(el("h3", { text: "Allowlist" }));
+  const allowRow = el("div", { class: "row" });
+  try {
+    const tags = await api("/api/modes/" + m + "/purge/allowlist");
+    for (const tag of tags) {
+      allowRow.appendChild(el("span", { class: "chip" }, [
+        document.createTextNode(tag),
+        el("button", { text: "×", onclick: async () => { await api("/api/modes/" + m + "/purge/allowlist/" + encodeURIComponent(tag), { method: "DELETE" }); await renderPurge(container); } }),
+      ]));
+    }
+  } catch (e) { container.appendChild(fmtErr(e)); }
+  const newTag = el("input", { type: "text", placeholder: "tag name", style: "width:10rem" });
+  allowRow.appendChild(newTag);
+  allowRow.appendChild(el("button", { text: "Add", onclick: async () => { if (!newTag.value) return; try { await api("/api/modes/" + m + "/purge/allowlist", { method: "POST", body: JSON.stringify({ tag: newTag.value }) }); } catch (e) { container.appendChild(fmtErr(e)); } await renderPurge(container); } }));
+  container.appendChild(allowRow);
+
+  container.appendChild(el("h3", { text: "Proposals" }));
+  let proposals;
+  try { proposals = await api("/api/modes/" + m + "/purge/proposals"); }
+  catch (e) { container.appendChild(fmtErr(e)); return; }
+  if (!proposals.length) { container.appendChild(el("div", { class: "empty", text: "No proposals yet — click Scan." })); return; }
+
+  const table = el("table", {}, [
+    el("thead", {}, [el("tr", {}, ["Title", "Status", "Root Folder", "Reason", "Actions"].map(h => el("th", { text: h })))]),
+  ]);
+  const tbody = el("tbody");
+  for (const p of proposals) {
+    const actions = el("td");
+    if (p.status === "pending") {
+      actions.appendChild(el("button", { class: "danger", text: "Apply (Delete)", onclick: async () => { if (!confirm("Delete \"" + p.title + "\" from " + m + "?")) return; try { await applyProposal(p.id); } catch (e) { container.appendChild(fmtErr(e)); } await renderPurge(container); } }));
+      actions.appendChild(el("button", { text: "Dismiss", onclick: async () => { try { await dismissProposal(p.id); } catch (e) { container.appendChild(fmtErr(e)); } await renderPurge(container); } }));
+    }
+    tbody.appendChild(el("tr", {}, [
+      el("td", { text: p.title || p.sourceName || "" }),
+      el("td", {}, [statusPill(p.status)]),
+      el("td", { text: p.rootFolderPath || "" }),
+      el("td", { text: p.reason || "" }),
+      actions,
+    ]));
+  }
+  table.appendChild(tbody);
+  container.appendChild(table);
+}
+
+// ---- Dedup view ----
+
+function fmtBytes(bitRate) {
+  if (!bitRate) return "";
+  return Math.round(bitRate / 1000) + " kbps";
+}
+
+async function renderDedup(container) {
+  const m = state.mode;
+  container.innerHTML = "";
+  container.appendChild(el("h2", { text: "Dedup" }));
+
+  container.appendChild(el("div", { class: "row" }, [
+    el("button", { class: "primary", text: "Scan", onclick: async () => { try { await api("/api/modes/" + m + "/dedup/scan", { method: "POST" }); } catch (e) { container.appendChild(fmtErr(e)); } await renderDedup(container); } }),
+  ]));
+
+  let proposals;
+  try { proposals = await api("/api/modes/" + m + "/dedup/proposals"); }
+  catch (e) { container.appendChild(fmtErr(e)); return; }
+  if (!proposals.length) { container.appendChild(el("div", { class: "empty", text: "No duplicate groups yet — click Scan." })); return; }
+
+  for (const p of proposals) {
+    const card = el("div", { class: "card" });
+    card.appendChild(el("div", { class: "row" }, [
+      el("strong", { text: p.title || p.sourceName }),
+      statusPill(p.status),
+    ]));
+    const table = el("table", {}, [
+      el("thead", {}, [el("tr", {}, ["Keep", "Label", "Path", "Resolution", "Codec", "Bitrate"].map(h => el("th", { text: h })))]),
+    ]);
+    const tbody = el("tbody");
+    const radioName = "keep-" + p.id;
+    (p.candidates || []).forEach((c, i) => {
+      const radio = el("input", { type: "radio", name: radioName, value: String(i) });
+      if (c.winner) radio.checked = true;
+      tbody.appendChild(el("tr", {}, [
+        el("td", {}, [radio]),
+        el("td", { text: c.label }),
+        el("td", { text: c.path }),
+        el("td", { text: c.resolution ? c.resolution + "p" : "" }),
+        el("td", { text: c.codec || "" }),
+        el("td", { text: fmtBytes(c.bitRate) }),
+      ]));
+    });
+    table.appendChild(tbody);
+    card.appendChild(table);
+
+    if (p.status === "pending") {
+      const actions = el("div", { class: "row" });
+      actions.appendChild(el("button", { class: "primary", text: "Apply", onclick: async () => {
+        const checked = card.querySelector("input[name='" + radioName + "']:checked");
+        const keepIndex = checked ? parseInt(checked.value, 10) : undefined;
+        try { await applyProposal(p.id, { keepIndex }); } catch (e) { container.appendChild(fmtErr(e)); }
+        await renderDedup(container);
+      } }));
+      actions.appendChild(el("button", { text: "Keep All", onclick: async () => { try { await applyProposal(p.id, { keepAll: true }); } catch (e) { container.appendChild(fmtErr(e)); } await renderDedup(container); } }));
+      actions.appendChild(el("button", { class: "danger", text: "Dismiss", onclick: async () => { try { await dismissProposal(p.id); } catch (e) { container.appendChild(fmtErr(e)); } await renderDedup(container); } }));
+      card.appendChild(actions);
+    }
+    container.appendChild(card);
+  }
+}
+
+// ---- Tag view ----
+
+async function renderTag(container) {
+  const m = state.mode;
+  container.innerHTML = "";
+  container.appendChild(el("h2", { text: "Tag" }));
+
+  let vocab, tracked;
+  try {
+    [vocab, tracked] = await Promise.all([
+      api("/api/modes/" + m + "/tags"),
+      api("/api/modes/" + m + "/tracked"),
+    ]);
+  } catch (e) { container.appendChild(fmtErr(e)); return; }
+
+  const labelById = {};
+  for (const t of vocab) labelById[t.id] = t.label;
+
+  const datalistId = "tag-vocab-" + m;
+  const datalist = el("datalist", { id: datalistId });
+  for (const t of vocab) datalist.appendChild(el("option", { value: t.label }));
+  container.appendChild(datalist);
+
+  if (!tracked.length) { container.appendChild(el("div", { class: "empty", text: "Nothing tracked yet." })); return; }
+
+  const table = el("table", {}, [
+    el("thead", {}, [el("tr", {}, ["Title", "Tags", "Add tag"].map(h => el("th", { text: h })))]),
+  ]);
+  const tbody = el("tbody");
+  for (const item of tracked) {
+    const tagsCell = el("td");
+    for (const tagId of (item.tags || [])) {
+      tagsCell.appendChild(el("span", { class: "chip" }, [
+        document.createTextNode(labelById[tagId] || ("#" + tagId)),
+        el("button", { text: "×", onclick: async () => { try { await api("/api/modes/" + m + "/items/" + item.id + "/tags/" + tagId, { method: "DELETE" }); } catch (e) { container.appendChild(fmtErr(e)); } await renderTag(container); } }),
+      ]));
+    }
+    const addInput = el("input", { type: "text", list: datalistId, placeholder: "tag label", style: "width:10rem" });
+    const addCell = el("td", { class: "row" }, [addInput, el("button", { text: "Add", onclick: async () => { if (!addInput.value) return; try { await api("/api/modes/" + m + "/items/" + item.id + "/tags", { method: "POST", body: JSON.stringify({ label: addInput.value }) }); } catch (e) { container.appendChild(fmtErr(e)); } await renderTag(container); } })]);
+    tbody.appendChild(el("tr", {}, [el("td", { text: item.title }), tagsCell, addCell]));
+  }
+  table.appendChild(tbody);
+  container.appendChild(table);
+}
+
+// ---- Settings view ----
+
+const CONNECTION_SERVICES = ["radarr", "sonarr", "whisparr", "ollama", "openai", "gemini", "anthropic", "stashdb", "fansdb", "tpdb", "brave", "stash"];
+const AI_PROVIDERS = ["ollama", "openai", "gemini", "anthropic"];
+
+async function renderSettings(container) {
+  container.innerHTML = "";
+  container.appendChild(el("h2", { text: "Settings" }));
+  await renderConnections(container);
+  await renderAISettings(container);
+  await renderKidsRootPath(container);
+}
+
+async function renderConnections(container) {
+  const fs = el("fieldset", {}, [el("legend", { text: "Connections" })]);
+  let existing = [];
+  try { existing = await api("/api/connections"); } catch (e) { fs.appendChild(fmtErr(e)); }
+  const byService = {};
+  for (const c of existing) byService[c.service] = c;
+
+  const table = el("table", {}, [
+    el("thead", {}, [el("tr", {}, ["Service", "URL", "API Key", "", ""].map(h => el("th", { text: h })))]),
+  ]);
+  const tbody = el("tbody");
+  for (const service of CONNECTION_SERVICES) {
+    const existingConn = byService[service];
+    const urlInput = el("input", { type: "text", value: existingConn ? existingConn.url : "", placeholder: "https://..." });
+    const keyPlaceholder = existingConn && existingConn.hasApiKey ? "unchanged (••••" + existingConn.keySuffix + ")" : "api key (if needed)";
+    const keyInput = el("input", { type: "password", placeholder: keyPlaceholder });
+    const status = el("span", { class: "muted" });
+
+    const testBtn = el("button", { text: "Test", onclick: async () => {
+      status.textContent = "testing…";
+      try {
+        const result = await api("/api/connections/test", { method: "POST", body: JSON.stringify({ service, url: urlInput.value, apiKey: keyInput.value }) });
+        status.textContent = result.ok ? "✓ ok" : ("✗ " + result.error);
+        status.className = result.ok ? "muted" : "error";
+      } catch (e) { status.textContent = "✗ " + e.message; status.className = "error"; }
+    } });
+    const saveBtn = el("button", { class: "primary", text: "Save", onclick: async () => {
+      try {
+        await api("/api/connections/" + service, { method: "PUT", body: JSON.stringify({ url: urlInput.value, apiKey: keyInput.value }) });
+        await renderSettings(container);
+      } catch (e) { status.textContent = "✗ " + e.message; status.className = "error"; }
+    } });
+    const deleteBtn = el("button", { class: "danger", text: "Delete", disabled: !existingConn, onclick: async () => {
+      if (!confirm("Remove the " + service + " connection?")) return;
+      try { await api("/api/connections/" + service, { method: "DELETE" }); await renderSettings(container); }
+      catch (e) { status.textContent = "✗ " + e.message; status.className = "error"; }
+    } });
+
+    tbody.appendChild(el("tr", {}, [
+      el("td", { text: service }),
+      el("td", {}, [urlInput]),
+      el("td", {}, [keyInput]),
+      el("td", {}, [testBtn, saveBtn, deleteBtn]),
+      el("td", {}, [status]),
+    ]));
+  }
+  table.appendChild(tbody);
+  fs.appendChild(table);
+  container.appendChild(fs);
+}
+
+async function renderAISettings(container) {
+  const fs = el("fieldset", {}, [el("legend", { text: "AI (shared by Adult identification and the Movies/Series title-guess fallback)" })]);
+  let provider = "ollama", model = "";
+  try { provider = (await api("/api/settings/ai-provider")).provider; } catch (e) {}
+  try { model = (await api("/api/settings/ai-model")).model; } catch (e) {}
+
+  const providerSelect = el("select", {});
+  for (const p of AI_PROVIDERS) providerSelect.appendChild(el("option", { value: p, text: p, selected: p === provider ? "selected" : null }));
+  const modelInput = el("input", { type: "text", value: model, placeholder: "e.g. qwen2.5vl:7b, gpt-4o-mini, gemini-2.5-flash, claude-haiku-4-5" });
+  const status = el("span", { class: "muted" });
+
+  const saveBtn = el("button", { class: "primary", text: "Save", onclick: async () => {
+    try {
+      await api("/api/settings/ai-provider", { method: "PUT", body: JSON.stringify({ provider: providerSelect.value }) });
+      await api("/api/settings/ai-model", { method: "PUT", body: JSON.stringify({ model: modelInput.value }) });
+      status.textContent = "saved"; status.className = "muted";
+    } catch (e) { status.textContent = "✗ " + e.message; status.className = "error"; }
+  } });
+
+  const grid = el("div", { class: "grid2" }, [
+    el("label", {}, [document.createTextNode("Provider"), el("div", {}, [providerSelect])]),
+    el("label", {}, [document.createTextNode("Model"), el("div", {}, [modelInput])]),
+  ]);
+  fs.appendChild(grid);
+  fs.appendChild(el("div", { class: "row", style: "margin-top:0.5rem" }, [saveBtn, status]));
+  fs.appendChild(el("div", { class: "muted", text: "Configure a connection for whichever provider you pick above (same Connections table) — the model must be able to return structured JSON." }));
+  container.appendChild(fs);
+}
+
+async function renderKidsRootPath(container) {
+  const modesWithKids = ["movies", "series"];
+  if (!modesWithKids.includes(state.mode)) return;
+  const m = state.mode;
+
+  const fs = el("fieldset", {}, [el("legend", { text: "Kids classification (" + MODE_LABELS[m] + ")" })]);
+  let current = "";
+  try { current = (await api("/api/modes/" + m + "/rename/kids-root-path")).path; } catch (e) {}
+  let folders = [];
+  try { folders = await api("/api/modes/" + m + "/root-folders"); } catch (e) { fs.appendChild(fmtErr(e)); }
+
+  const enabled = el("input", { type: "checkbox" });
+  enabled.checked = !!current;
+  const select = el("select", {});
+  select.appendChild(el("option", { value: "", text: "— pick a root folder —" }));
+  for (const f of folders) select.appendChild(el("option", { value: f.path, text: f.path + (f.accessible ? "" : " (inaccessible)"), selected: f.path === current ? "selected" : null }));
+  select.disabled = !enabled.checked;
+  enabled.addEventListener("change", () => { select.disabled = !enabled.checked; if (!enabled.checked) select.value = ""; });
+
+  const status = el("span", { class: "muted" });
+  const saveBtn = el("button", { class: "primary", text: "Save", onclick: async () => {
+    const path = enabled.checked ? select.value : "";
+    try {
+      await api("/api/modes/" + m + "/rename/kids-root-path", { method: "PUT", body: JSON.stringify({ path }) });
+      status.textContent = "saved"; status.className = "muted";
+    } catch (e) { status.textContent = "✗ " + e.message; status.className = "error"; }
+  } });
+
+  fs.appendChild(el("label", { class: "row" }, [enabled, document.createTextNode("Route kids-appropriate content to a separate root folder"), select]));
+  fs.appendChild(el("div", { class: "row", style: "margin-top:0.5rem" }, [saveBtn, status]));
+  fs.appendChild(el("div", { class: "muted", text: "Applies to both newly-found files and already-tracked items whose classification has drifted." }));
+  container.appendChild(fs);
+}
+
+// ---- Router ----
+
+const RENDERERS = { rename: renderRename, purge: renderPurge, dedup: renderDedup, tag: renderTag, settings: renderSettings };
+
+async function render() {
+  renderNav();
+  const view = document.getElementById("view");
+  view.innerHTML = "";
+  const renderer = RENDERERS[state.view];
+  if (renderer) await renderer(view);
+}
+
+renderBanner();
+render();
+</script>
+</body>
+</html>

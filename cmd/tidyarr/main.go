@@ -20,6 +20,7 @@ import (
 	"github.com/curtiswtaylorjr/tidyarr/internal/proposals"
 	"github.com/curtiswtaylorjr/tidyarr/internal/secrets"
 	"github.com/curtiswtaylorjr/tidyarr/internal/settings"
+	"github.com/curtiswtaylorjr/tidyarr/internal/web"
 )
 
 // outboundTimeout bounds every call Tidyarr makes to a configured service
@@ -63,6 +64,10 @@ func run() error {
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("ok"))
 	})
+	// The frontend is mounted last and matches only what no /api/... route
+	// already claimed — Go's ServeMux picks the most specific pattern, so
+	// this never shadows a real API route.
+	mux.Handle("/", web.Handler())
 
 	srv := &http.Server{Addr: cfg.Addr, Handler: mux}
 

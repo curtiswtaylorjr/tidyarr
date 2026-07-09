@@ -162,7 +162,11 @@ func (s *Store) List(ctx context.Context, m mode.Mode, wf Workflow) ([]Proposal,
 	}
 	defer rows.Close()
 
-	var out []Proposal
+	// []Proposal{}, not var out []Proposal — an empty queue should serialize
+	// as [] over the API, not null, so a frontend never needs a special case
+	// for "nothing yet" versus "some proposals" (see allowlist.Store.List's
+	// identical convention).
+	out := []Proposal{}
 	for rows.Next() {
 		p, err := scanProposal(rows)
 		if err != nil {

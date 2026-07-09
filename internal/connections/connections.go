@@ -112,7 +112,10 @@ func (s *Store) List(ctx context.Context) ([]Summary, error) {
 	}
 	defer rows.Close()
 
-	var out []Summary
+	// []Summary{}, not var out []Summary — a blank install's "no connections
+	// yet" should serialize as [] over the API, not null (see
+	// allowlist.Store.List's identical convention).
+	out := []Summary{}
 	for rows.Next() {
 		var sum Summary
 		var encrypted string
