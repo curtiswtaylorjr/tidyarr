@@ -29,6 +29,8 @@ func NewMux(httpClient *http.Client, connStore *connections.Store, propStore *pr
 	mux.HandleFunc("PUT /api/connections/{service}", upsertConnectionHandler(connStore))
 	mux.HandleFunc("DELETE /api/connections/{service}", deleteConnectionHandler(connStore))
 
+	mux.HandleFunc("GET /api/modes/{mode}/root-folders", listRootFoldersHandler(httpClient, connStore, settingsStore))
+
 	mux.HandleFunc("POST /api/modes/{mode}/rename/scan", renameScanHandler(httpClient, connStore, settingsStore, propStore))
 	mux.HandleFunc("GET /api/modes/{mode}/rename/proposals", listProposalsHandler(propStore, proposals.Rename))
 	mux.HandleFunc("GET /api/modes/{mode}/rename/kids-root-path", getKidsRootPathHandler(settingsStore))

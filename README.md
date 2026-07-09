@@ -33,9 +33,11 @@ explicitly human-triggered action, unlike the original CLIs' automatic
 submission during scan. Movies/Series Rename also classifies matched content
 as kids-appropriate or not (certification/genre first, the same shared AI as
 a fallback when that signal is weak) and routes it to a per-mode Kids root
-folder — `GET`/`PUT /api/modes/{movies,series}/rename/kids-root-path`, picked
-explicitly from the mode's own real root folders rather than guessed from a
-naming convention; Apply physically relocates the file into that root before
+folder — `GET`/`PUT /api/modes/{movies,series}/rename/kids-root-path`
+(`{"path": "..."}`; an empty path is the "off" state, not an error), picked
+explicitly from `GET /api/modes/{mode}/root-folders` (the same root folders
+Rename's Scan itself sees) rather than free-typed or guessed from a naming
+convention; Apply physically relocates the file into that root before
 registering it, since Sonarr/Radarr can only import from where it's actually
 sitting. Classification isn't only applied to new orphans: Scan also audits
 every ALREADY-TRACKED item under the general or Kids root and stages a
