@@ -1,0 +1,15 @@
+.git
+.gitignore
+.omc/
+.dockerdata/
+data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+/bin/
+/tidyarr
+web/node_modules/
+web/dist/
+*.png
+*.log

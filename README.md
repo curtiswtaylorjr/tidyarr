@@ -137,6 +137,35 @@ Configuration is via environment variables for now:
 | `TIDYARR_ADDR`      | `:8080`   | HTTP listen address               |
 | `TIDYARR_DATA_DIR`  | `./data`  | Where `tidyarr.db` and `secret.key` live — back both up together, or a backup of one without the other is useless |
 
+### Docker
+
+A `Dockerfile` builds a Debian-based image (multi-stage: `golang:bookworm` to
+compile, `debian:bookworm-slim` plus `ffmpeg` to run — `ffprobe` needs a real
+build, not Alpine's, and there's no CGO to make musl-vs-glibc a tradeoff
+either way). The container starts as root only long enough for
+`docker-entrypoint.sh` to `chown` a bind-mounted `/data` to the image's
+non-root `tidyarr` user, then drops to it via `gosu` — without that, a plain
+`docker run -v host/path:/data` fails on first boot, since sqlite can't
+create `tidyarr.db` in a directory owned by whatever host user made the
+mount point.
+
+`scripts/docker-dev.sh` wraps the build-run-check loop into one command for
+iterating on the image itself (not a deployment tool — a `docker-compose.yml`
+for real use, with the volume mounts Rename's file moves need to match
+Radarr/Sonarr's own paths, is still to come). Default (no args) rebuilds,
+restarts, and polls `/healthz`, printing the container's own logs
+automatically on failure instead of requiring a second command:
+
+```sh
+./scripts/docker-dev.sh          # build + restart + health-check (the default)
+./scripts/docker-dev.sh logs     # follow the running container's logs
+./scripts/docker-dev.sh shell    # a shell in the built image, server not started
+./scripts/docker-dev.sh clean    # stop the container and wipe its dev data dir
+```
+
+Env overrides: `IMAGE_TAG`, `CONTAINER_NAME`, `HOST_PORT`, `DATA_DIR`,
+`HEALTH_TIMEOUT` — see the script's `--help`.
+
 ## License
 
 AGPL-3.0 — see [LICENSE](LICENSE). Once vendored, the perceptual-hash code
