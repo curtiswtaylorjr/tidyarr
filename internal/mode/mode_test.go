@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -13,9 +14,11 @@ import (
 
 	"github.com/curtiswtaylorjr/sakms/internal/connections"
 	"github.com/curtiswtaylorjr/sakms/internal/db"
+	"github.com/curtiswtaylorjr/sakms/internal/jellyfin"
 	"github.com/curtiswtaylorjr/sakms/internal/secrets"
 	"github.com/curtiswtaylorjr/sakms/internal/servarr"
 	"github.com/curtiswtaylorjr/sakms/internal/settings"
+	"github.com/curtiswtaylorjr/sakms/internal/stashapi"
 )
 
 // newTestStores opens one fresh db and returns a connections store and a
@@ -789,5 +792,258 @@ func writeTestJSON(t *testing.T, w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(v); err != nil {
 		t.Errorf("encoding test response: %v", err)
+	}
+}
+
+// --- Session.NotifyPlayers (Slice 2 of player-rescan-notify) ---
+
+// TestNotifyPlayers_JellyfinPOSTShape confirms a session with only
+// sess.Jellyfin set sends exactly one POST to /Library/Media/Updated with
+// the MediaBrowser auth header and the two updates translated verbatim
+// (Acceptance #1).
+func TestNotifyPlayers_JellyfinPOSTShape(t *testing.T) {
+	var calls int
+	var gotPath, gotAuth string
+	var gotBody struct {
+		Updates []jellyfin.MediaUpdate `json:"Updates"`
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		gotPath = r.URL.Path
+		gotAuth = r.Header.Get("Authorization")
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	sess := &Session{Jellyfin: jellyfin.New(jellyfin.Config{URL: srv.URL, APIKey: "jf-key"}, &http.Client{Timeout: time.Second})}
+	sess.NotifyPlayers(context.Background(), []PathChange{
+		{Path: "/media/old.mkv", Kind: Deleted},
+		{Path: "/media/new.mkv", Kind: Created},
+	})
+
+	if calls != 1 {
+		t.Fatalf("expected exactly 1 POST, got %d", calls)
+	}
+	if gotPath != "/Library/Media/Updated" {
+		t.Errorf("expected path /Library/Media/Updated, got %q", gotPath)
+	}
+	if gotAuth != `MediaBrowser Token="jf-key"` {
+		t.Errorf("expected MediaBrowser auth header, got %q", gotAuth)
+	}
+	want := []jellyfin.MediaUpdate{
+		{Path: "/media/old.mkv", UpdateType: "Deleted"},
+		{Path: "/media/new.mkv", UpdateType: "Created"},
+	}
+	if len(gotBody.Updates) != len(want) || gotBody.Updates[0] != want[0] || gotBody.Updates[1] != want[1] {
+		t.Errorf("expected updates %+v, got %+v", want, gotBody.Updates)
+	}
+}
+
+// stashRecorder is a fake local-Stash GraphQL server that records which
+// mutation (metadataScan vs metadataClean) each request invoked, along with
+// its decoded input — used to prove NotifyPlayers routes Deleted paths to
+// CleanMetadata and Created/Modified paths to the phash-free RescanPaths,
+// never crossed.
+type stashRecorder struct {
+	scanCalls  []map[string]any
+	cleanCalls []map[string]any
+}
+
+func newStashRecorderClient(t *testing.T, rec *stashRecorder) *stashapi.Client {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Query     string `json:"query"`
+			Variables struct {
+				Input map[string]any `json:"input"`
+			} `json:"variables"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.Contains(req.Query, "metadataClean"):
+			rec.cleanCalls = append(rec.cleanCalls, req.Variables.Input)
+			_, _ = w.Write([]byte(`{"data":{"metadataClean":"clean-job"}}`))
+		case strings.Contains(req.Query, "metadataScan"):
+			rec.scanCalls = append(rec.scanCalls, req.Variables.Input)
+			_, _ = w.Write([]byte(`{"data":{"metadataScan":"scan-job"}}`))
+		default:
+			t.Fatalf("unexpected stash mutation query: %s", req.Query)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return stashapi.New(stashapi.Config{URL: srv.URL, APIKey: "stash-key"}, &http.Client{Timeout: time.Second})
+}
+
+// TestNotifyPlayers_StashSplit_PurgeShapedBatchProducesCleanOnly is the single
+// most important correctness guardrail in the whole feature (Recommendation
+// #1 / Guardrail #4): a purge-shaped (Deleted-only) batch must produce ONLY
+// a metadataClean call, and NEVER a metadataScan call.
+func TestNotifyPlayers_StashSplit_PurgeShapedBatchProducesCleanOnly(t *testing.T) {
+	rec := &stashRecorder{}
+	sess := &Session{Stash: newStashRecorderClient(t, rec)}
+
+	sess.NotifyPlayers(context.Background(), []PathChange{
+		{Path: "/media/gone1.mkv", Kind: Deleted},
+		{Path: "/media/gone2.mkv", Kind: Deleted},
+	})
+
+	if len(rec.scanCalls) != 0 {
+		t.Fatalf("expected NO metadataScan calls for a purge-shaped batch, got %d: %+v", len(rec.scanCalls), rec.scanCalls)
+	}
+	if len(rec.cleanCalls) != 1 {
+		t.Fatalf("expected exactly 1 metadataClean call, got %d", len(rec.cleanCalls))
+	}
+	gotPaths, _ := rec.cleanCalls[0]["paths"].([]any)
+	if len(gotPaths) != 2 || gotPaths[0] != "/media/gone1.mkv" || gotPaths[1] != "/media/gone2.mkv" {
+		t.Errorf("expected clean paths [gone1,gone2], got %+v", rec.cleanCalls[0]["paths"])
+	}
+	if rec.cleanCalls[0]["dryRun"] != false {
+		t.Errorf("expected dryRun=false, got %v", rec.cleanCalls[0]["dryRun"])
+	}
+}
+
+// TestNotifyPlayers_StashSplit_RenameShapedBatchScansNewAndCleansOld confirms
+// a rename-shaped batch (one Created, one Deleted) produces a phash-free
+// RescanPaths on the new path AND a CleanMetadata on the old path
+// (Acceptance #3), asserting scanGeneratePhashes:false is exactly what
+// proves the call went through RescanPaths and not ScanPaths.
+func TestNotifyPlayers_StashSplit_RenameShapedBatchScansNewAndCleansOld(t *testing.T) {
+	rec := &stashRecorder{}
+	sess := &Session{Stash: newStashRecorderClient(t, rec)}
+
+	sess.NotifyPlayers(context.Background(), []PathChange{
+		{Path: "/media/old.mkv", Kind: Deleted},
+		{Path: "/media/new.mkv", Kind: Created},
+	})
+
+	if len(rec.scanCalls) != 1 {
+		t.Fatalf("expected exactly 1 metadataScan call, got %d", len(rec.scanCalls))
+	}
+	if len(rec.cleanCalls) != 1 {
+		t.Fatalf("expected exactly 1 metadataClean call, got %d", len(rec.cleanCalls))
+	}
+	scanPaths, _ := rec.scanCalls[0]["paths"].([]any)
+	if len(scanPaths) != 1 || scanPaths[0] != "/media/new.mkv" {
+		t.Errorf("expected scan of [new.mkv], got %+v", rec.scanCalls[0]["paths"])
+	}
+	if rec.scanCalls[0]["scanGeneratePhashes"] != false {
+		t.Errorf("expected phash-free scan (scanGeneratePhashes=false, proving RescanPaths not ScanPaths was used), got %v", rec.scanCalls[0]["scanGeneratePhashes"])
+	}
+	if rec.scanCalls[0]["rescan"] != false {
+		t.Errorf("expected rescan=false, got %v", rec.scanCalls[0]["rescan"])
+	}
+	cleanPaths, _ := rec.cleanCalls[0]["paths"].([]any)
+	if len(cleanPaths) != 1 || cleanPaths[0] != "/media/old.mkv" {
+		t.Errorf("expected clean of [old.mkv], got %+v", rec.cleanCalls[0]["paths"])
+	}
+}
+
+// TestNotifyPlayers_BothClientsNil_NoOp confirms a session with neither
+// Jellyfin nor Stash configured is a safe no-op — no panic, no outbound
+// calls possible since neither client exists (Acceptance #4, Edge #6).
+func TestNotifyPlayers_BothClientsNil_NoOp(t *testing.T) {
+	sess := &Session{}
+	sess.NotifyPlayers(context.Background(), []PathChange{{Path: "/media/f.mkv", Kind: Created}})
+}
+
+// TestNotifyPlayers_EmptyChanges_NoOutboundCalls confirms an empty changes
+// slice short-circuits before touching either client — fake servers here
+// fail the test if they ever receive a request, proving the early return
+// fires before any client is called.
+func TestNotifyPlayers_EmptyChanges_NoOutboundCalls(t *testing.T) {
+	jfSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("jellyfin should not be called for an empty changes slice")
+	}))
+	defer jfSrv.Close()
+	stashSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("stash should not be called for an empty changes slice")
+	}))
+	defer stashSrv.Close()
+
+	sess := &Session{
+		Jellyfin: jellyfin.New(jellyfin.Config{URL: jfSrv.URL, APIKey: "k"}, &http.Client{Timeout: time.Second}),
+		Stash:    stashapi.New(stashapi.Config{URL: stashSrv.URL, APIKey: "k"}, &http.Client{Timeout: time.Second}),
+	}
+	sess.NotifyPlayers(context.Background(), nil)
+	sess.NotifyPlayers(context.Background(), []PathChange{})
+}
+
+// TestNotifyPlayers_ExactPath_NeverRootFolderPath confirms NotifyPlayers
+// forwards only the exact file paths it was given — the fake server never
+// sees a RootFolderPath-shaped key anywhere in the request (Guardrail #3,
+// Acceptance #7).
+func TestNotifyPlayers_ExactPath_NeverRootFolderPath(t *testing.T) {
+	var rawBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		rawBody = string(body)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	sess := &Session{Jellyfin: jellyfin.New(jellyfin.Config{URL: srv.URL, APIKey: "k"}, &http.Client{Timeout: time.Second})}
+	sess.NotifyPlayers(context.Background(), []PathChange{{Path: "/media/Movies/Some Movie (2020)/movie.mkv", Kind: Created}})
+
+	if strings.Contains(rawBody, "RootFolderPath") {
+		t.Errorf("expected the request to never mention RootFolderPath, got body: %s", rawBody)
+	}
+	if !strings.Contains(rawBody, "/media/Movies/Some Movie (2020)/movie.mkv") {
+		t.Errorf("expected the exact file path in the request body, got: %s", rawBody)
+	}
+}
+
+// TestNotifyPlayers_BestEffort_JellyfinFailureLogsAndReturns confirms a
+// downstream player error never surfaces to the caller — NotifyPlayers
+// still returns normally (void) when the fake player answers 500
+// (Acceptance #5, Guardrail #1).
+func TestNotifyPlayers_BestEffort_JellyfinFailureLogsAndReturns(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "boom", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	sess := &Session{Jellyfin: jellyfin.New(jellyfin.Config{URL: srv.URL, APIKey: "k"}, &http.Client{Timeout: time.Second})}
+	// Reaching the end of this call without panicking/blocking IS the
+	// assertion: NotifyPlayers never returns an error and never propagates
+	// the player's failure to the caller.
+	sess.NotifyPlayers(context.Background(), []PathChange{{Path: "/media/f.mkv", Kind: Created}})
+}
+
+// TestNotifyPlayers_BestEffort_StashScanFailureStillCleans is the meaty
+// best-effort test: a rename-shaped batch (Created+Deleted) where Stash's
+// metadataScan fails must NOT skip metadataClean — the two arms are
+// independent `if` blocks, so a scan failure on the new path never causes
+// the old path's DB row to go un-cleaned (the phantom-scene bug the plan
+// warns about).
+func TestNotifyPlayers_BestEffort_StashScanFailureStillCleans(t *testing.T) {
+	var cleanCalls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Query string `json:"query"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		switch {
+		case strings.Contains(req.Query, "metadataScan"):
+			http.Error(w, "boom", http.StatusInternalServerError)
+		case strings.Contains(req.Query, "metadataClean"):
+			cleanCalls++
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"data":{"metadataClean":"clean-job"}}`))
+		default:
+			t.Fatalf("unexpected stash mutation query: %s", req.Query)
+		}
+	}))
+	defer srv.Close()
+
+	sess := &Session{Stash: stashapi.New(stashapi.Config{URL: srv.URL, APIKey: "k"}, &http.Client{Timeout: time.Second})}
+	sess.NotifyPlayers(context.Background(), []PathChange{
+		{Path: "/media/old.mkv", Kind: Deleted},
+		{Path: "/media/new.mkv", Kind: Created},
+	})
+
+	if cleanCalls != 1 {
+		t.Fatalf("expected metadataClean to still fire even though metadataScan failed, got %d clean calls", cleanCalls)
 	}
 }

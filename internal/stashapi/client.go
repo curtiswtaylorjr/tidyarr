@@ -386,13 +386,32 @@ mutation ScanPaths($input: ScanMetadataInput!) {
   metadataScan(input: $input)
 }`
 
-// ScanPaths triggers a targeted Stash scan and returns the job ID.
+// ScanPaths triggers a targeted Stash scan (with phash generation) and
+// returns the job ID.
 func (c *Client) ScanPaths(ctx context.Context, paths []string, rescan bool) (string, error) {
+	return c.scanPaths(ctx, paths, rescan, true)
+}
+
+// RescanPaths triggers a phash-free add/update sweep (rescan:false) — used by
+// the player-notify path (internal/mode.Session.NotifyPlayers), where the
+// goal is "notice a file changed" for Stash's own index, not compute a
+// phash: SAK computes its own StashDB-compatible phash now
+// (internal/videophash), so asking Stash to also generate one here would be
+// redundant work on every rename/move.
+func (c *Client) RescanPaths(ctx context.Context, paths []string) (string, error) {
+	return c.scanPaths(ctx, paths, false, false)
+}
+
+// scanPaths is the shared core behind ScanPaths/RescanPaths — a sibling pair
+// rather than a bool param on ScanPaths, to keep ScanPaths's existing public
+// contract (and its existing test) untouched, and to avoid a two-adjacent-
+// bool "boolean trap" at call sites.
+func (c *Client) scanPaths(ctx context.Context, paths []string, rescan, generatePhashes bool) (string, error) {
 	var data struct {
 		MetadataScan string `json:"metadataScan"`
 	}
 	input := map[string]any{
-		"paths": paths, "rescan": rescan, "scanGeneratePhashes": true,
+		"paths": paths, "rescan": rescan, "scanGeneratePhashes": generatePhashes,
 	}
 	if err := c.do(ctx, scanMutation, map[string]any{"input": input}, &data); err != nil {
 		return "", err

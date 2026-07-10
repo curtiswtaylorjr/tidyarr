@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"time"
 
@@ -18,6 +19,7 @@ import (
 	"github.com/curtiswtaylorjr/sakms/internal/connections"
 	"github.com/curtiswtaylorjr/sakms/internal/gemini"
 	"github.com/curtiswtaylorjr/sakms/internal/identify"
+	"github.com/curtiswtaylorjr/sakms/internal/jellyfin"
 	"github.com/curtiswtaylorjr/sakms/internal/nzbget"
 	"github.com/curtiswtaylorjr/sakms/internal/ollama"
 	"github.com/curtiswtaylorjr/sakms/internal/openai"
@@ -134,6 +136,24 @@ func (m Mode) service() (service string, app servarr.App, err error) {
 	}
 }
 
+// ChangeKind classifies a PathChange (see PathChange).
+type ChangeKind int
+
+const (
+	Created ChangeKind = iota
+	Modified
+	Deleted
+)
+
+// PathChange is one file-level change a workflow's Apply committed to disk
+// — the exact path SAK just created, modified, or deleted, destined for
+// Session.NotifyPlayers. Always an exact file path, never a root/library
+// folder (see NotifyPlayers).
+type PathChange struct {
+	Path string
+	Kind ChangeKind
+}
+
 // Session holds the live client(s) for one mode.
 type Session struct {
 	Mode Mode
@@ -188,6 +208,16 @@ type Session struct {
 	// additive: Rename's Adult Scan falls back to the AI/text pipeline
 	// unchanged when this is nil. Consumers must nil-check before use.
 	Stash *stashapi.Client
+
+	// Jellyfin is a Jellyfin instance's targeted media-refresh client
+	// (internal/jellyfin), populated ONLY for Movies/Series mode and ONLY
+	// when a "jellyfin" connection is configured; nil otherwise — including
+	// for every Adult session, which notifies Stash instead (see Stash
+	// above). Used by NotifyPlayers to poke Jellyfin's library index after a
+	// file op. Purely additive: nothing in Movies/Series' existing
+	// workflows requires this to be non-nil. Consumers must nil-check
+	// before use.
+	Jellyfin *jellyfin.Client
 }
 
 // Build constructs a Session for m using the connection currently configured
@@ -241,6 +271,14 @@ func Build(ctx context.Context, store *connections.Store, settingsStore *setting
 			return nil, fmt.Errorf("mode %q: building stash client: %w", m, err)
 		}
 		sess.Stash = stash
+	}
+
+	if m != Adult {
+		jf, err := buildJellyfinClient(ctx, store, httpClient)
+		if err != nil {
+			return nil, fmt.Errorf("mode %q: building jellyfin client: %w", m, err)
+		}
+		sess.Jellyfin = jf
 	}
 
 	if err := buildSearchPipeline(ctx, store, httpClient, sess); err != nil {
@@ -298,6 +336,22 @@ func buildStashClient(ctx context.Context, store *connections.Store, httpClient 
 		return nil, nil
 	}
 	return stashapi.New(stashapi.Config{URL: conn.URL, APIKey: conn.APIKey}, httpClient), nil
+}
+
+// buildJellyfinClient wires the Jellyfin targeted-rescan client from the
+// "jellyfin" connection. Tolerant: nil, nil if unconfigured. Built only for
+// Movies/Series — Adult notifies Stash instead (see buildStashClient), a
+// hardcoded per-mode scoping (CLAUDE.md Mission / the player-rescan-notify
+// design note), not a user-facing toggle.
+func buildJellyfinClient(ctx context.Context, store *connections.Store, httpClient *http.Client) (*jellyfin.Client, error) {
+	conn, err := optionalConn(ctx, store, "jellyfin")
+	if err != nil {
+		return nil, err
+	}
+	if conn == nil {
+		return nil, nil
+	}
+	return jellyfin.New(jellyfin.Config{URL: conn.URL, APIKey: conn.APIKey}, httpClient), nil
 }
 
 // buildAIClient assembles the one AI client every AI-assisted feature shares
@@ -406,6 +460,91 @@ func buildIdentifier(ctx context.Context, store *connections.Store, settingsStor
 		Throttle: throttle.New(adultThrottleInterval),
 		GiveBack: identify.NewGiveBack(giveBackBoxes),
 	}, nil
+}
+
+// playerNotifyTimeout bounds how long NotifyPlayers waits on its downstream
+// player POSTs — a hard ceiling on how much latency notify can add to an
+// Apply request, not a correctness knob.
+const playerNotifyTimeout = 8 * time.Second
+
+// NotifyPlayers tells s's configured downstream player (exactly one of
+// s.Jellyfin/s.Stash is ever non-nil for a given mode — see Build's
+// hardcoded per-mode scoping) that changes just committed to disk. NEVER
+// returns an error: a player being unreachable must not fail SAK's own
+// Apply, which has already fully committed by the time this is called —
+// every failure path here is log-only, best-effort.
+//
+// Deletes route to Stash's CleanMetadata (never ScanPaths/RescanPaths) and
+// Created/Modified route to the phash-free RescanPaths — this split is the
+// single most important correctness guardrail in the whole feature: mixing
+// them up would make a purge look like a scan to Stash.
+//
+// Uses context.WithoutCancel so a committed change still gets notified even
+// if the HTTP request that triggered the Apply disconnects before
+// NotifyPlayers finishes — this is inside the best-effort envelope (updating
+// a player's own index, not one of SAK's records), so decoupling from
+// request cancellation is cheap insurance, not a correctness requirement.
+func (s *Session) NotifyPlayers(ctx context.Context, changes []PathChange) {
+	if len(changes) == 0 {
+		return
+	}
+	nctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), playerNotifyTimeout)
+	defer cancel()
+
+	if s.Jellyfin != nil {
+		if err := s.Jellyfin.NotifyMediaUpdated(nctx, toJellyfinUpdates(changes)); err != nil {
+			log.Printf("jellyfin rescan notify (best-effort) failed: %v", err)
+		}
+	}
+	if s.Stash != nil {
+		scan := pathsWhere(changes, Created, Modified)
+		clean := pathsWhere(changes, Deleted)
+		if len(scan) > 0 {
+			if _, err := s.Stash.RescanPaths(nctx, scan); err != nil { // phash-free, no WaitJob
+				log.Printf("stash rescan notify (best-effort) failed: %v", err)
+			}
+		}
+		if len(clean) > 0 {
+			if _, err := s.Stash.CleanMetadata(nctx, clean, false); err != nil { // dryRun=false, no WaitJob
+				log.Printf("stash clean notify (best-effort) failed: %v", err)
+			}
+		}
+	}
+}
+
+// toJellyfinUpdates maps PathChanges to Jellyfin's MediaUpdate request shape.
+func toJellyfinUpdates(changes []PathChange) []jellyfin.MediaUpdate {
+	updates := make([]jellyfin.MediaUpdate, len(changes))
+	for i, c := range changes {
+		updates[i] = jellyfin.MediaUpdate{Path: c.Path, UpdateType: changeKindString(c.Kind)}
+	}
+	return updates
+}
+
+// changeKindString maps a ChangeKind to Jellyfin's UpdateType string.
+func changeKindString(k ChangeKind) string {
+	switch k {
+	case Created:
+		return "Created"
+	case Deleted:
+		return "Deleted"
+	default:
+		return "Modified"
+	}
+}
+
+// pathsWhere returns the Path of every change whose Kind is one of kinds.
+func pathsWhere(changes []PathChange, kinds ...ChangeKind) []string {
+	var paths []string
+	for _, c := range changes {
+		for _, k := range kinds {
+			if c.Kind == k {
+				paths = append(paths, c.Path)
+				break
+			}
+		}
+	}
+	return paths
 }
 
 // optionalConn returns the connection for service, or (nil, nil) if it simply

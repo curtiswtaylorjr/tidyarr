@@ -153,11 +153,17 @@ above, so don't drop them for convenience:
   (superseded recommendation, kept for its StashDB-algorithm research) for
   detail. Whisparr elimination itself (Adult owning its own library the way
   Movies/Series do) has no design yet.
-- **Jellyfin**: not integrated as a service — no live connection exists or
-  is planned, and per the Mission section above this is now settled, not
-  "genuinely undecided": Jellyfin stays a downstream player. Its documented
-  naming convention is adopted as SAK's own default preset (see below)
-  precisely because that's a convention, not a dependency.
+- **Jellyfin**: a live connection now exists (`internal/jellyfin`, the
+  "jellyfin" connection type), but for ONE narrow purpose — receiving
+  targeted rescan notifications (`mode.Session.NotifyPlayers`, Movies/Series
+  only) so its library index stays fresh after SAK's own file ops, the same
+  information-flow direction as Radarr/Sonarr/Whisparr's own rescan
+  commands. This grants Jellyfin NO organizational authority — SAK still
+  owns tracking, placement, naming, and dedup — consistent with the Mission
+  section above: Jellyfin stays a downstream player, not an absorbed
+  service. Its documented naming convention is separately adopted as SAK's
+  own default preset (see below) precisely because that's a convention, not
+  a dependency.
 - **Naming, scanning, and Season-0 (Stage 2c)**:
   - `library.ScanRootFolder` is now recursive (`filepath.WalkDir`,
     `internal/library/library.go`) — a directory is reported whole only if

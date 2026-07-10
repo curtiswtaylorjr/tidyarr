@@ -781,3 +781,57 @@ slices of the same feature.
 
 Verified via `go build/vet/test -race` across the whole module (all green)
 and `-tags integration` (compiles clean).
+
+## 2026-07-10 — Add player-notify foundation: PathChange, Session.NotifyPlayers, phash-free RescanPaths (Slice 2 of player-rescan-notify)
+
+`internal/mode` gains the contract every later slice of this feature builds
+on: `ChangeKind` (`Created`/`Modified`/`Deleted`) and `PathChange{Path,
+Kind}` — one file-level change a workflow's Apply committed to disk — plus
+`Session.Jellyfin *jellyfin.Client`, populated ONLY for Movies/Series (a new
+`buildJellyfinClient`, symmetric to the existing Adult-only
+`buildStashClient`, wired into `Build` in a new `if m != Adult` block).
+`buildStashClient`'s existing Adult-only scoping is untouched — this is the
+hardcoded per-mode scoping confirmed in `CLAUDE.md`'s Mission section: Stash
+is notified only for Adult, Jellyfin only for Movies/Series, via which
+client field is non-nil, no cross-notification, no toggle.
+
+`internal/stashapi.ScanPaths` is refactored into a shared private
+`scanPaths(ctx, paths, rescan, generatePhashes bool)` core, with `ScanPaths`
+unchanged (`generatePhashes:true`, same public signature, same test) and a
+new sibling `RescanPaths(ctx, paths)` (`rescan:false, generatePhashes:false`)
+for the player-notify path, which only needs Stash to notice a file changed
+— SAK computes its own StashDB-compatible phash now, so asking Stash to also
+generate one on every notify would be redundant work. Sibling function over
+a bool param on `ScanPaths`, per house "no premature abstraction" — zero
+production callers meant the refactor was free.
+
+`Session.NotifyPlayers(ctx, changes []mode.PathChange)` is nil-safe and
+NEVER returns an error — every failure path is log-only, since a player
+being unreachable must not fail SAK's own Apply, which has already
+committed by the time this runs. It routes Stash `Deleted` paths to
+`CleanMetadata(ctx, paths, false)` and `Created`/`Modified` paths to the new
+phash-free `RescanPaths` — **never crossed**, the single most important
+correctness guardrail in the whole feature (a purge-shaped batch must never
+look like a scan to Stash) — and fires Jellyfin's `NotifyMediaUpdated` for
+all kinds in one POST. No `WaitJob` either way: fire-and-forget. Derives its
+8-second timeout from `context.WithoutCancel(ctx)` rather than `ctx`
+directly, so a committed change still gets notified even if the HTTP request
+that triggered the Apply disconnects mid-request — cheap insurance inside
+the best-effort envelope, not a correctness requirement.
+
+Tests (`internal/mode`, httptest fakes): Jellyfin POST shape (path, auth
+header, decoded body); the Stash scan-vs-clean split, explicitly asserting a
+Deleted-only batch produces zero `metadataScan` calls; a rename-shaped batch
+scans the new path (`scanGeneratePhashes:false`, proving `RescanPaths` and
+not `ScanPaths` fired) and cleans the old one; both-clients-nil and
+empty-changes no-ops; an exact-path assertion that the fake never receives a
+`RootFolderPath`-shaped key; best-effort — a 500 from the fake Jellyfin
+still returns (void) and logs; and the cross-arm independence guard — a
+rename-shaped batch whose `metadataScan` 500s still fires `metadataClean`,
+so a scan failure on the new path never leaves the old path's Stash record
+uncleaned.
+
+This slice is still inert in practice — nothing calls `NotifyPlayers` yet.
+The Movies/Series and Adult Apply call sites land in the next two slices.
+
+Verified via `go build/vet/test -race` across the whole module (all green).
