@@ -281,6 +281,80 @@ type phashThresholdRequest struct {
 	Threshold int `json:"threshold"`
 }
 
+// adultIdentifyEnabledKey gates Adult phash-first identification. Unlike the
+// per-mode naming-preset/phash-threshold keys, this is a fixed const, not
+// string(m)+"...": only Adult ever reaches rename.Scan (Movies/Series dispatch
+// to ScanLibrary*), so the toggle is Adult-only. Stored as "true"/"false".
+const adultIdentifyEnabledKey = "adult_identify_enabled"
+
+// resolveAdultIdentifyEnabled loads Adult's identify-enabled toggle, defaulting
+// to true (phash-first is the intended default now that it no longer needs a
+// live Stash). Returns true both when unset AND on any parse error — never fail
+// a scan over a malformed setting, the same tolerance resolvePHashThreshold has.
+func resolveAdultIdentifyEnabled(ctx context.Context, settingsStore *settings.Store) (bool, error) {
+	raw, err := settingsStore.Get(ctx, adultIdentifyEnabledKey)
+	if err != nil && !errors.Is(err, settings.ErrNotFound) {
+		return false, err
+	}
+	if raw == "" {
+		return true, nil // default ON
+	}
+	v, err := strconv.ParseBool(raw)
+	if err != nil {
+		return true, nil // tolerate garbage -> default ON
+	}
+	return v, nil
+}
+
+type identifyEnabledResponse struct {
+	Enabled bool `json:"enabled"`
+}
+
+type identifyEnabledRequest struct {
+	Enabled bool `json:"enabled"`
+}
+
+// getIdentifyEnabledHandler returns Adult's phash-first identify toggle
+// (default true). 400s for any non-Adult mode — identification is Adult-only
+// (Movies/Series don't run rename.Scan), mirroring the kids-root-path guard.
+func getIdentifyEnabledHandler(settingsStore *settings.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if mode.Mode(r.PathValue("mode")) != mode.Adult {
+			http.Error(w, "the identification toggle only applies to adult", http.StatusBadRequest)
+			return
+		}
+		enabled, err := resolveAdultIdentifyEnabled(r.Context(), settingsStore)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(identifyEnabledResponse{Enabled: enabled})
+	}
+}
+
+// putIdentifyEnabledHandler stores Adult's phash-first identify toggle. 400s
+// for any non-Adult mode. A bool needs no range validation (unlike the
+// threshold's 0-64).
+func putIdentifyEnabledHandler(settingsStore *settings.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if mode.Mode(r.PathValue("mode")) != mode.Adult {
+			http.Error(w, "the identification toggle only applies to adult", http.StatusBadRequest)
+			return
+		}
+		var req identifyEnabledRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+		if err := settingsStore.Set(r.Context(), adultIdentifyEnabledKey, strconv.FormatBool(req.Enabled)); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
 // getPHashThresholdHandler returns {mode}'s Dedup perceptual-hash similarity
 // threshold (per-frame average Hamming bits) — defaults to
 // phash.DefaultThreshold when unset.

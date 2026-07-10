@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"github.com/curtiswtaylorjr/sakms/internal/connections"
+	"github.com/curtiswtaylorjr/sakms/internal/dedup"
 	"github.com/curtiswtaylorjr/sakms/internal/library"
 	"github.com/curtiswtaylorjr/sakms/internal/mode"
 	"github.com/curtiswtaylorjr/sakms/internal/proposals"
@@ -69,8 +70,11 @@ func putKidsRootPathHandler(settingsStore *settings.Store) http.HandlerFunc {
 // replaces that mode's live Rename queue with the result — the HTTP
 // equivalent of the top bar's Scan button. Movies/Series dispatch to
 // rename.ScanLibrary/ScanLibrarySeries (libStore, no *arr app involved);
-// Adult uses the existing Servarr-backed rename.Scan, unchanged.
-func renameScanHandler(httpClient *http.Client, connStore *connections.Store, settingsStore *settings.Store, propStore *proposals.Store, libStore *library.Store) http.HandlerFunc {
+// Adult uses the Servarr-backed rename.Scan, threading in the videophash
+// hasher and the mediainfo prober for phash-first identification and resolving
+// the per-mode identify-enabled toggle as Scan's sole dispatch gate. prober is
+// the mux's shared *mediainfo.Prober (its method set satisfies rename.Prober).
+func renameScanHandler(httpClient *http.Client, connStore *connections.Store, settingsStore *settings.Store, propStore *proposals.Store, libStore *library.Store, prober dedup.Prober, videoHasher rename.PHasher) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		m := mode.Mode(r.PathValue("mode"))
 		ctx := r.Context()
@@ -99,7 +103,12 @@ func renameScanHandler(httpClient *http.Client, connStore *connections.Store, se
 				found, err = rename.ScanLibrarySeries(ctx, sess, libStore, rootPath, preset)
 			}
 		} else {
-			found, err = rename.Scan(ctx, sess)
+			enabled, enErr := resolveAdultIdentifyEnabled(ctx, settingsStore)
+			if enErr != nil {
+				http.Error(w, enErr.Error(), http.StatusInternalServerError)
+				return
+			}
+			found, err = rename.Scan(ctx, sess, videoHasher, prober, enabled)
 		}
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadGateway)

@@ -647,3 +647,60 @@ each other rather than silently matching everything.
 Adult identification (replacing `rename.scanAdultPhashFirst`'s Stash-read
 dependency with `internal/videophash`) remains a separate, not-yet-started
 slice, per the purpose split.
+
+## 2026-07-10 — Adult identify computes its own phash, drops live-Stash dependency
+
+Adult phash-first identification previously read a live Stash instance's
+already-computed phash (`scanAdultPhashFirst` → `sess.Stash.FindSceneInfoByPaths`)
+and force-generated missing ones via a scan-job poll. It now computes its own
+StashDB-compatible hash directly via `internal/videophash`, the same package
+built and live-cross-validated earlier today. `identify.LookupFingerprints`
+and fingerprint give-back were already phash-source-agnostic — they talk to
+StashDB/FansDB/TPDB directly, never through local Stash — so this was a
+contained source swap, not a rework.
+
+Deleted `refreshMissingPhashes` and the `forceGenerate*` constants entirely:
+`videophash.Hash` is synchronous, so the async force-generate/poll dance
+that only existed because Stash computes phashes in the background is now
+dead weight.
+
+**Correctness fix, not just a mechanical swap.** `DurationSeconds` used to
+ride in on the same Stash read as the phash. `videophash.Hash` returns only
+a hash string — duration is required by fingerprint give-back, which
+silently no-ops on a non-positive duration in two independent places
+(`submitFingerprintGiveBack` and `GiveBack.SubmitFingerprint` itself),
+neither raising an error or failing a test. Missing this would have shipped
+a silent regression in a working feature. `mediainfo.Probe` gained a
+`Duration float64` field (via ffprobe `-show_format`, matching videophash's
+own internal duration probe rather than stream-level duration, which is
+often absent on MKV) and now supplies `DurationSeconds` instead. Verified
+with a dedicated end-to-end test that drives a cascade-hit proposal through
+the real `rename.Apply` and asserts the submitted duration on a recording
+fake give-back box — the only test that actually catches this regression,
+since a bare "was PHash stamped" check does not.
+
+New `GET|PUT /api/modes/adult/identify-enabled` toggle (default on) is now
+the sole gate for Adult phash-first identification, replacing the implicit
+`sess.Stash != nil` check — a real toggle didn't exist before (`Available`
+in the setup wizard is computed from Whisparr connectivity, not a manual
+switch; verified before assuming otherwise). Per-file compute is bounded to
+4 concurrent workers, each capped by videophash's own ~2-minute internal
+timeout; a hash error degrades that one candidate to the legacy AI/text
+path rather than failing the whole batch — an improvement over the old
+all-or-nothing Stash-read fail-open.
+
+**Honest performance note:** this trades one batched Stash GraphQL read for
+up to N local ffmpeg decodes (4x bounded). Materially slower per scan — the
+accepted cost of owning identification without a Stash bridge.
+
+`sess.Stash`, `SubmitFingerprintRetry`, `buildStashClient`, `mode.Session.Stash`,
+and the `"stash"` connection type are all left in place, unmodified — they
+become unreachable in practice (nothing calls them anymore) but their
+removal is a deliberate, separate follow-up, not bundled here.
+
+Verified via `go build/vet/test -race` across the whole module (all green,
+`internal/phash`/`internal/videophash`/`internal/dedup` genuinely untouched)
+and `-tags integration` (compiles clean; the new live-identify test —
+which validates a SAK-computed hash actually resolves against a real
+StashDB, not just that it matches Stash's own value — skips cleanly with
+no credentials configured for this pass).

@@ -83,7 +83,7 @@ func TestScan_ProducesPendingProposalForNewItem(t *testing.T) {
 	}
 	sess := newTestSession(t, servarr.Radarr, f.handler(t))
 
-	got, err := Scan(context.Background(), sess)
+	got, err := Scan(context.Background(), sess, nil, nil, true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -138,7 +138,7 @@ func TestScan_FallsBackToAIWhenLookupFindsNothing(t *testing.T) {
 	sess := newTestSession(t, servarr.Radarr, f.handler(t))
 	sess.MainstreamAI = fakeMainstreamAI(t, `{"title":"Some Movie 2020"}`)
 
-	got, err := Scan(context.Background(), sess)
+	got, err := Scan(context.Background(), sess, nil, nil, true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -167,7 +167,7 @@ func TestScan_UnmatchedWhenAIDeclines(t *testing.T) {
 	sess := newTestSession(t, servarr.Radarr, f.handler(t))
 	sess.MainstreamAI = fakeMainstreamAI(t, `{"title":null}`)
 
-	got, err := Scan(context.Background(), sess)
+	got, err := Scan(context.Background(), sess, nil, nil, true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -198,7 +198,7 @@ func TestScan_NoAIFallbackWhenUnconfigured(t *testing.T) {
 		t.Fatal("precondition: expected a nil MainstreamAI for this test")
 	}
 
-	got, err := Scan(context.Background(), sess)
+	got, err := Scan(context.Background(), sess, nil, nil, true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -221,7 +221,7 @@ func TestScan_SkipsSidecarFiles(t *testing.T) {
 	}
 	sess := newTestSession(t, servarr.Radarr, f.handler(t))
 
-	got, err := Scan(context.Background(), sess)
+	got, err := Scan(context.Background(), sess, nil, nil, true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -241,7 +241,7 @@ func TestScan_MarksUnmatchedWhenNoLookupResult(t *testing.T) {
 	}
 	sess := newTestSession(t, servarr.Radarr, f.handler(t))
 
-	got, err := Scan(context.Background(), sess)
+	got, err := Scan(context.Background(), sess, nil, nil, true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -266,7 +266,7 @@ func TestScan_MarksUnmatchedForAlreadyTrackedDuplicate(t *testing.T) {
 	}
 	sess := newTestSession(t, servarr.Radarr, f.handler(t))
 
-	got, err := Scan(context.Background(), sess)
+	got, err := Scan(context.Background(), sess, nil, nil, true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -292,7 +292,7 @@ func TestScan_QualityProfileLearnsFromExistingRootFolderConvention(t *testing.T)
 	}
 	sess := newTestSession(t, servarr.Radarr, f.handler(t))
 
-	got, err := Scan(context.Background(), sess)
+	got, err := Scan(context.Background(), sess, nil, nil, true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -499,7 +499,7 @@ func TestScan_AdultFailsFastWhenIdentifyUnconfigured(t *testing.T) {
 		t.Fatal("precondition: expected a nil Identify for this test")
 	}
 
-	_, err := Scan(context.Background(), sess)
+	_, err := Scan(context.Background(), sess, nil, nil, true)
 	if err == nil {
 		t.Fatal("expected Scan to fail fast when adult identification isn't configured")
 	}
@@ -605,7 +605,7 @@ func TestScan_RoutesKidsClassifiedContentToKidsRoot(t *testing.T) {
 	sess := newTestSession(t, servarr.Radarr, f.handler(t))
 	sess.KidsRootPath = "/media/Movies (Kids)"
 
-	got, err := Scan(context.Background(), sess)
+	got, err := Scan(context.Background(), sess, nil, nil, true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -641,7 +641,7 @@ func TestScan_NoRerouteWhenKidsPathNotConfigured(t *testing.T) {
 		t.Fatal("precondition: expected an empty KidsRootPath")
 	}
 
-	got, err := Scan(context.Background(), sess)
+	got, err := Scan(context.Background(), sess, nil, nil, true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -668,7 +668,7 @@ func TestScan_IgnoresKidsPathNotAmongRealRootFolders(t *testing.T) {
 	sess := newTestSession(t, servarr.Radarr, f.handler(t))
 	sess.KidsRootPath = "/media/Movies (Kids)" // never reported by the fake above
 
-	got, err := Scan(context.Background(), sess)
+	got, err := Scan(context.Background(), sess, nil, nil, true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -703,7 +703,7 @@ func TestScan_SkipsClassificationForItemsAlreadyInKidsRoot(t *testing.T) {
 	defer srv.Close()
 	sess.MainstreamAI = ollama.New(srv.URL, "test-model", srv.Client())
 
-	got, err := Scan(context.Background(), sess)
+	got, err := Scan(context.Background(), sess, nil, nil, true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -865,7 +865,7 @@ func TestScan_ReconcilesGeneralToKidsForTrackedItem(t *testing.T) {
 	sess := newTestSession(t, servarr.Radarr, f.handler(t))
 	sess.KidsRootPath = "/media/Movies (Kids)"
 
-	got, err := Scan(context.Background(), sess)
+	got, err := Scan(context.Background(), sess, nil, nil, true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -899,7 +899,7 @@ func TestScan_ReconcilesKidsToGeneralWhenUnambiguous(t *testing.T) {
 	sess := newTestSession(t, servarr.Radarr, f.handler(t))
 	sess.KidsRootPath = "/media/Movies (Kids)"
 
-	got, err := Scan(context.Background(), sess)
+	got, err := Scan(context.Background(), sess, nil, nil, true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -929,7 +929,7 @@ func TestScan_NoKidsToGeneralReconcileWhenAmbiguous(t *testing.T) {
 	sess := newTestSession(t, servarr.Radarr, f.handler(t))
 	sess.KidsRootPath = "/media/Movies (Kids)"
 
-	got, err := Scan(context.Background(), sess)
+	got, err := Scan(context.Background(), sess, nil, nil, true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -951,7 +951,7 @@ func TestScan_NoReconcileWhenKidsPathNotConfigured(t *testing.T) {
 	}
 	sess := newTestSession(t, servarr.Radarr, f.handler(t))
 
-	got, err := Scan(context.Background(), sess)
+	got, err := Scan(context.Background(), sess, nil, nil, true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

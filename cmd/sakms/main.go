@@ -24,6 +24,7 @@ import (
 	"github.com/curtiswtaylorjr/sakms/internal/proposals"
 	"github.com/curtiswtaylorjr/sakms/internal/secrets"
 	"github.com/curtiswtaylorjr/sakms/internal/settings"
+	"github.com/curtiswtaylorjr/sakms/internal/videophash"
 	"github.com/curtiswtaylorjr/sakms/internal/web"
 )
 
@@ -63,6 +64,10 @@ func run() error {
 	allowStore := allowlist.New(sqlDB)
 	prober := mediainfo.New()
 	hasher := phash.New()
+	// videoHasher is SAK's StashDB-compatible video perceptual hasher for Adult
+	// Rename's phash-first identification — a SEPARATE algorithm from `hasher`
+	// (internal/phash, Movies/Series Dedup); the two are not interchangeable.
+	videoHasher := videophash.New()
 	settingsStore := settings.New(sqlDB)
 	grabsStore := grabs.New(sqlDB)
 	libStore := library.New(sqlDB)
@@ -73,7 +78,7 @@ func run() error {
 	// exemption list on this one (see internal/api.NewAuthMux's doc
 	// comment) — NewMux stays unaware auth exists either way, so its own
 	// large test suite never had to change for auth specifically.
-	apiMux := api.NewMux(&http.Client{Timeout: outboundTimeout}, connStore, propStore, allowStore, prober, hasher, settingsStore, grabsStore, libStore)
+	apiMux := api.NewMux(&http.Client{Timeout: outboundTimeout}, connStore, propStore, allowStore, prober, hasher, videoHasher, settingsStore, grabsStore, libStore)
 	protectedAPI := auth.Middleware(secretStore, apiMux)
 
 	top := http.NewServeMux()

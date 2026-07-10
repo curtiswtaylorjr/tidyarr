@@ -82,12 +82,32 @@ where Adult's Scan branch previously received neither a hasher nor a resolved
 threshold at all. See the CHANGELOG entry of the same date for the full
 safety trace and the new direct `refineByPHash` reference-selection test.
 
+**Shipped (2026-07-10): Adult identify gets `internal/videophash`.**
+`rename.scanAdultPhashFirst` now computes its own StashDB-compatible phash
+directly instead of reading a live Stash instance's precomputed one. Deleted
+the now-dead force-generate/poll machinery (SAK's compute is synchronous).
+Fixed a real correctness gap along the way: `DurationSeconds` (required by
+fingerprint give-back) used to ride in on the deleted Stash read —
+`mediainfo.Probe` gained a `Duration` field to replace it, guarded by a
+dedicated end-to-end test through `rename.Apply`. New
+`GET|PUT /api/modes/adult/identify-enabled` toggle (default on) replaces the
+old `sess.Stash != nil` gate. Per-file compute is bounded to 4 concurrent
+workers; a hash error degrades only that one candidate to the legacy
+AI/text path. See the CHANGELOG entry of the same date for the full
+duration-regression trace and the honest performance note (N ffmpeg decodes
+vs. one batched Stash read).
+
 **Still open (next slices):**
-- **Adult identify gets `internal/videophash`.** Replace
-  `rename.scanAdultPhashFirst`'s current dependency on reading a live Stash
-  instance's phash with SAK's own `internal/videophash.Hash` call. Separate
-  slice from Dedup above — different package, different purpose. Not yet
-  designed at the file/function level.
+- **`sess.Stash` teardown.** Now that identify no longer needs Stash, the
+  only remaining reader is `SubmitFingerprintRetry` — whose reason to exist
+  (recovering a phash that arrived late from Stash's async generation) has
+  evaporated, since SAK's hash is always ready synchronously at Scan time.
+  `sess.Stash`, `SubmitFingerprintRetry`, `buildStashClient`,
+  `mode.Session.Stash`, and the `"stash"` connection type + `testStash` are
+  all still in place but unreachable in practice. Deliberately left
+  untouched through both the Dedup and identify slices (mirrors the "should
+  we delete internal/phash" caution) — removal is its own deliberate
+  decision, not yet made.
 - **Whisparr elimination for Adult.** Adult gets its own library-owned
   Rename/Purge/Dedup/Tag path, same pattern as Movies/Sonarr. Decided
   2026-07-10 (`CLAUDE.md` Scope), no design yet — this is a substantial

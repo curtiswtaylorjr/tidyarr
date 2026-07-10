@@ -49,7 +49,16 @@ func yearFromReleaseDate(releaseDate string) int {
 // produces one proposal per orphaned item: a resolved match ready to
 // register (Pending), or a record of why it couldn't be resolved on its own
 // (Unmatched) — surfaced either way, never silently dropped.
-func Scan(ctx context.Context, sess *mode.Session) ([]proposals.Proposal, error) {
+//
+// For Adult, hasher/prober back phash-first identification: hasher computes
+// each candidate's StashDB-compatible phash locally (internal/videophash) and
+// prober supplies its duration for give-back (internal/mediainfo). identifyEnabled
+// is Adult's per-mode toggle (resolved by the caller from settings) — when
+// true, Adult resolves via the phash cascade first; when false, it goes
+// straight to the legacy AI/text pipeline. The toggle is the SOLE dispatch
+// gate (it replaced the old sess.Stash != nil check entirely). Movies/Series
+// ignore all three (they run through ScanLibrary*, not Scan).
+func Scan(ctx context.Context, sess *mode.Session, hasher PHasher, prober Prober, identifyEnabled bool) ([]proposals.Proposal, error) {
 	client := sess.Servarr
 
 	// Adult identification runs through sess.Identify, which mode.Build leaves
@@ -93,12 +102,13 @@ func Scan(ctx context.Context, sess *mode.Session) ([]proposals.Proposal, error)
 				continue
 			}
 			switch {
-			case sess.Mode == mode.Adult && sess.Stash != nil:
+			case sess.Mode == mode.Adult && identifyEnabled:
 				// Batched through the phash-first pipeline below rather than
-				// resolved here one at a time — it needs every candidate's path
-				// up front to do a single batched Stash lookup.
+				// resolved here one at a time — it computes every candidate's
+				// phash (bounded worker pool) then does one batched cascade lookup.
 				adultCandidates = append(adultCandidates, adultCandidate{root: root, uf: uf})
 			case sess.Mode == mode.Adult:
+				// Toggle off -> straight to the legacy AI/text pipeline.
 				out = append(out, proposeOneAdult(ctx, sess.Identify, sess.Mode, root, uf, tracked, profiles))
 			default:
 				out = append(out, proposeOne(ctx, client, sess.Mode, sess.MainstreamAI, kidsRootPath, root, uf, tracked, profiles))
@@ -106,7 +116,7 @@ func Scan(ctx context.Context, sess *mode.Session) ([]proposals.Proposal, error)
 		}
 	}
 	if len(adultCandidates) > 0 {
-		out = append(out, scanAdultPhashFirst(ctx, sess, adultCandidates, tracked, profiles)...)
+		out = append(out, scanAdultPhashFirst(ctx, sess, hasher, prober, adultCandidates, tracked, profiles)...)
 	}
 	if sess.Mode != mode.Adult {
 		out = append(out, reconcileTracked(ctx, sess.Mode, sess.MainstreamAI, kidsRootPath, folders, tracked)...)

@@ -14,12 +14,18 @@ import (
 	"time"
 )
 
-// Probe holds the fields needed to build a place.QualityKey.
+// Probe holds the fields needed to build a place.QualityKey, plus the video's
+// duration in seconds. Duration is sourced from ffprobe's FORMAT section (not
+// the stream-level duration, which MKV/MP4 frequently omit) so it matches the
+// value internal/videophash's own duration probe uses for the same file — the
+// two must agree because Adult fingerprint give-back stamps this duration and
+// rejects a non-positive one. Missing/blank format duration parses to 0.
 type Probe struct {
 	CodecName string
 	Width     int
 	Height    int
 	BitRate   int64
+	Duration  float64
 }
 
 // runner executes ffprobe and returns its raw JSON stdout. Injected so
@@ -42,6 +48,7 @@ func runFFprobe(ctx context.Context, path string) ([]byte, error) {
 		"-print_format", "json",
 		"-show_streams",
 		"-select_streams", "v:0",
+		"-show_format",
 		path,
 	)
 	out, err := cmd.Output()
@@ -58,8 +65,13 @@ type ffprobeStream struct {
 	BitRate   string `json:"bit_rate"`
 }
 
+type ffprobeFormat struct {
+	Duration string `json:"duration"`
+}
+
 type ffprobeOutput struct {
 	Streams []ffprobeStream `json:"streams"`
+	Format  ffprobeFormat   `json:"format"`
 }
 
 // Probe runs ffprobe against path (bounded by an internal timeout layered
@@ -91,10 +103,19 @@ func (p *Prober) Probe(ctx context.Context, path string) (*Probe, error) {
 		bitRate, _ = strconv.ParseInt(s.BitRate, 10, 64)
 	}
 
+	var duration float64
+	if out.Format.Duration != "" {
+		// Best-effort like bit_rate: a missing/blank format duration parses to
+		// 0, never an error — a file with no reported duration is a valid probe
+		// result, just one that can't feed fingerprint give-back.
+		duration, _ = strconv.ParseFloat(out.Format.Duration, 64)
+	}
+
 	return &Probe{
 		CodecName: s.CodecName,
 		Width:     s.Width,
 		Height:    s.Height,
 		BitRate:   bitRate,
+		Duration:  duration,
 	}, nil
 }

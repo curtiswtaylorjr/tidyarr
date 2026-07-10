@@ -11,6 +11,7 @@ import (
 	"github.com/curtiswtaylorjr/sakms/internal/library"
 	"github.com/curtiswtaylorjr/sakms/internal/mode"
 	"github.com/curtiswtaylorjr/sakms/internal/proposals"
+	"github.com/curtiswtaylorjr/sakms/internal/rename"
 	"github.com/curtiswtaylorjr/sakms/internal/settings"
 )
 
@@ -31,8 +32,13 @@ import (
 // see internal/grabs' package doc for why); libStore backs Movies' own
 // library (root folder contents, tags) now that Radarr no longer does —
 // every Rename/Purge/Dedup/Tag handler below dispatches to a Movies-library
-// code path or the existing *arr-backed one depending on {mode}.
-func NewMux(httpClient *http.Client, connStore *connections.Store, propStore *proposals.Store, allowStore *allowlist.Store, prober dedup.Prober, hasher dedup.PHasher, settingsStore *settings.Store, grabsStore *grabs.Store, libStore *library.Store) *http.ServeMux {
+// code path or the existing *arr-backed one depending on {mode}. videoHasher
+// backs Adult Rename's phash-first identification (a real *videophash.Hasher
+// in production, a fake satisfying rename.PHasher in tests) — a SEPARATE,
+// StashDB-compatible hasher from `hasher` above (internal/phash's Movies/Series
+// Dedup algorithm is a different, incompatible scheme; the two must not be
+// blurred).
+func NewMux(httpClient *http.Client, connStore *connections.Store, propStore *proposals.Store, allowStore *allowlist.Store, prober dedup.Prober, hasher dedup.PHasher, videoHasher rename.PHasher, settingsStore *settings.Store, grabsStore *grabs.Store, libStore *library.Store) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/connections/test", connectionsTestHandler(httpClient))
 	mux.HandleFunc("GET /api/connections", listConnectionsHandler(connStore))
@@ -49,13 +55,15 @@ func NewMux(httpClient *http.Client, connStore *connections.Store, propStore *pr
 	mux.HandleFunc("PUT /api/modes/{mode}/naming-preset", putNamingPresetHandler(settingsStore))
 	mux.HandleFunc("GET /api/modes/{mode}/phash-threshold", getPHashThresholdHandler(settingsStore))
 	mux.HandleFunc("PUT /api/modes/{mode}/phash-threshold", putPHashThresholdHandler(settingsStore))
+	mux.HandleFunc("GET /api/modes/{mode}/identify-enabled", getIdentifyEnabledHandler(settingsStore))
+	mux.HandleFunc("PUT /api/modes/{mode}/identify-enabled", putIdentifyEnabledHandler(settingsStore))
 
 	// One-time Sonarr library importer (see internal/sonarrimport) — Series
 	// only, not mode-generic, since Movies never had a Sonarr library to
 	// migrate from.
 	mux.HandleFunc("POST /api/series/import-from-sonarr", sonarrImportHandler(httpClient, connStore, libStore))
 
-	mux.HandleFunc("POST /api/modes/{mode}/rename/scan", renameScanHandler(httpClient, connStore, settingsStore, propStore, libStore))
+	mux.HandleFunc("POST /api/modes/{mode}/rename/scan", renameScanHandler(httpClient, connStore, settingsStore, propStore, libStore, prober, videoHasher))
 	mux.HandleFunc("GET /api/modes/{mode}/rename/proposals", listProposalsHandler(propStore, proposals.Rename))
 	mux.HandleFunc("GET /api/modes/{mode}/rename/kids-root-path", getKidsRootPathHandler(settingsStore))
 	mux.HandleFunc("PUT /api/modes/{mode}/rename/kids-root-path", putKidsRootPathHandler(settingsStore))

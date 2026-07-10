@@ -29,6 +29,34 @@ func TestProbe_ParsesFields(t *testing.T) {
 	}
 }
 
+func TestProbe_ParsesDuration(t *testing.T) {
+	raw := []byte(`{"streams":[{"codec_name":"h264","width":1920,"height":1080,"bit_rate":"4416482"}],"format":{"duration":"1800.48"}}`)
+	p := fakeProber(raw, nil)
+
+	got, err := p.Probe(context.Background(), "/fake/path.mp4")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.Duration != 1800.48 {
+		t.Errorf("expected duration 1800.48 from the format section, got %v", got.Duration)
+	}
+}
+
+func TestProbe_MissingFormatDurationDefaultsToZero(t *testing.T) {
+	// The existing streams-only fixture shape (no format section at all) must
+	// still parse cleanly, yielding Duration == 0 rather than an error.
+	raw := []byte(`{"streams":[{"codec_name":"av1","width":1920,"height":1080,"bit_rate":"4416482"}]}`)
+	p := fakeProber(raw, nil)
+
+	got, err := p.Probe(context.Background(), "/fake/path.mp4")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.Duration != 0 {
+		t.Errorf("expected 0 duration when no format section is present, got %v", got.Duration)
+	}
+}
+
 func TestProbe_MissingBitRateDefaultsToZero(t *testing.T) {
 	raw := []byte(`{"streams":[{"codec_name":"h264","width":1280,"height":720,"bit_rate":""}]}`)
 	p := fakeProber(raw, nil)
