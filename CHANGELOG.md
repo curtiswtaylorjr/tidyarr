@@ -1,0 +1,245 @@
+# Changelog
+
+This is an **append-only** project history. Once an entry is written, it is
+never edited or removed — only new entries get added, at the bottom. If a
+past decision turns out to be wrong or gets reversed, that reversal is its
+own new entry ("X, reversing the 2026-07-09 decision to Y"), not a rewrite
+of the original one. The goal is a record that survives context loss across
+sessions — anyone (human or Claude) picking this file up cold should be able
+to reconstruct what happened and why without re-deriving it.
+
+For the current backlog/roadmap (as opposed to history), see `docs/ROADMAP.md`.
+For house engineering conventions and mission/scope, see `CLAUDE.md`.
+
+---
+
+## 2026-07-08 — Initial scaffold and ported foundations
+
+Project started as **Tidyarr**, later renamed (see 2026-07-09 entry). Initial
+commits: Go server skeleton, SQLite + goose migrations, AGPL-3.0 license.
+Ported `internal/servarr` (Radarr/Sonarr/Whisparr client), `internal/identify`
++ `internal/ollama` + `internal/stashapi` (the AI-assisted Adult
+identification pipeline) from two prior sibling CLI projects
+(`sonarr-radarr-sort`, `stash-whisparr-sort`). Added `internal/secrets`
+(encrypted-at-rest) and `internal/connections` (persisted service
+credentials, with real reachability checks for StashDB/FansDB/TPDB/Brave).
+Confirmed Whisparr V3's actual API shape against real Whisparr-Eros source
+rather than assuming.
+
+Same day: implemented all four original review workflows end-to-end for
+Movies/Series (and progressively Adult) — **Rename** (Scan→stage→Apply
+against Radarr/Sonarr/Whisparr Lookup), **Purge** (allowlist-tag-based
+Scan→stage→Apply), **Dedup** (quality-based duplicate grouping), **Tag**
+(native tag assign/remove). Adult's own Rename/Dedup landed the same day:
+Rename via the AI identification pipeline (Scan proposes, Apply carries the
+resolved scene id to Whisparr); Dedup groups Whisparr scenes by `foreignId`
+with graceful degradation. Unmatched Adult identifications can be given back
+to TPDB/StashDB as scene drafts — a separate, explicitly human-triggered
+action, not automatic.
+
+## 2026-07-09 — Frontend, auth, Docker, rename to SAK, Movies off Radarr, Series off Sonarr
+
+Built a real frontend (the review workflows could finally be exercised
+end-to-end, not just via curl). Gated the app behind a single-operator login
+with an enforced setup wizard. Added a Debian-based Dockerfile + dev loop
+script. Added AI title-guess fallback for Movies/Series Rename (sharing
+Adult's configured AI provider/model) and Kids/general content
+classification with physical relocation, including drift reconciliation for
+already-tracked items, not just new orphans.
+
+**Renamed the project from Tidyarr to SAK Media Server** (module path,
+Docker image, GitHub repo all updated to `sakms`).
+
+Added native indexer search + grab (Prowlarr + qBittorrent/NZBGet) and a
+TMDB-powered Discover browse UI — shared infrastructure across Movies and
+Series, independent of any `*arr` app.
+
+**Eliminated Radarr for Movies**: Movies gained its own library
+(`internal/library`), with its own Rename/Purge/Dedup/Tag paths and its own
+root-folder + quality-tier settings, no Radarr involved anywhere in the
+Movies path anymore.
+
+Added `CLAUDE.md` — the project's mission, scope, and load-bearing
+engineering conventions (staged-for-approval one-item-at-a-time; secrets
+encrypted at rest; single-operator auth; honesty about unverified
+assumptions; house HTTP client pattern; no premature abstraction; no dead
+code left behind, but don't strip still-generically-valid capability).
+
+**Eliminated Sonarr for Series**: Series gained its own episode-aware
+library (genuinely different tables from Movies' `Item` — `Series`/`Episode`,
+since Series needs rows for episodes TMDB knows about but that aren't on
+disk yet). Own Rename/Purge paths, own root-folder + quality-tier settings,
+own episode/season-aware Search→grab→check-import. A one-time,
+human-triggered importer (`internal/sonarrimport`) migrates an existing
+Sonarr library by walking disk + resolving TVDB→TMDB ids, read-only against
+Sonarr, safe to re-run.
+
+**Added Series Dedup**: duplicates group by `(show TMDB id, season,
+episode)` rather than a single id — the tracked copy for a key is the one
+`library.Episode` row for that exact slot (the schema's own
+`UNIQUE(series_id, season_number, episode_number)` constraint rules out
+ambiguity), and a season-pack duplicate groups naturally with a loose
+single-episode duplicate since a pack is broken into individual files before
+grouping happens.
+
+## 2026-07-10 — Stage 2c: recursive scanning, Season-0 fix, schema-aware Rename, Jellyfin/Emby naming
+
+Four related fixes/features shipped together:
+
+1. **`library.ScanRootFolder` made recursive** (`filepath.WalkDir` instead of
+   a single-level `os.ReadDir`). Fixed a real bug: once any file in a folder
+   was tracked, the *entire* wrapping folder was previously masked from ever
+   being rescanned — a new season added later, or a new file dropped
+   alongside something already tracked, was invisible forever. Rename and
+   Dedup (Movies and Series) inherit the fix automatically. Purge never
+   walked the filesystem at all, so needed no change. A directory is now
+   reported whole only if it has no real subdirectories (ignoring
+   bonus-content names like `Sample`/`Extras`, tracked in
+   `config.ExcludedDirNames`) and no already-known direct children;
+   otherwise it's opened up and recursed into.
+
+2. **Season-0/Specials sentinel bug fixed**: `grabs.Grab` gained a
+   `SeasonSpecified bool` field (migration `0014`). Previously,
+   `SeasonNumber == 0` was treated as "no season info" during Search's
+   check-import, which silently dropped a deliberate Season-0 (Specials)
+   grab whose filename didn't parse. The fix also caught a matching frontend
+   bug: `seasonNumber ? {...} : {}` made "season 0 typed deliberately" and
+   "season left blank entirely" produce byte-identical wire payloads — the
+   naive fix (just deleting the `== 0` check) would have been unsafe without
+   also fixing this, since it would have started silently misfiling
+   unidentifiable plain series-wide grabs as Season-0 episodes. Caught by
+   adversarial review during planning, not after the fact.
+
+3. **Schema-conformance filtering for Rename**: new
+   `naming.MatchesMovieSchema`/`MatchesSeriesSchema` structural predicates —
+   a file/folder that already matches the active naming preset is never
+   re-proposed by Rename's Scan, even if it was never tracked in the
+   database (e.g. a library someone already organized by hand).
+
+4. **New `internal/naming` package**: a small, fixed set of on-disk naming
+   presets — `Jellyfin` (default: `Title (Year) [tmdbid-N]` folders/files,
+   space-separated episode names, matching Jellyfin/Emby's documented
+   convention) and `Legacy` (this project's original dash-separated Series
+   shape, no tag on Movies — an explicit opt-in so an already-renamed
+   library's shape never silently changes after an upgrade). **Movies gets
+   real renaming for the first time** here — before this, Movies' Rename
+   only ever relocated a file, preserving whatever scene-release name it
+   arrived with. Configurable per-mode via `GET/PUT
+   /api/modes/{mode}/naming-preset`. `proposals.Proposal` gained a `Year`
+   field (migration `0015`, populated from TMDB at Scan time), finally
+   populating the previously-dead `library.Item.Year`/`library.Series.Year`
+   columns on Apply.
+
+Verified via `go build/vet/test -race` across the whole module (all green)
+plus a live Playwright walkthrough proving Jellyfin-standard renaming
+actually happens on disk for both Movies and Series, the naming-preset
+setting persists per-mode, and — the key regression proof — a new episode
+file dropped into an already-organized, already-tracked season folder is
+correctly discovered on rescan.
+
+## 2026-07-10 — Redesign discussion begins (no code shipped yet)
+
+User shared five UI mockup images depicting a much richer dashboard-style
+redesign than SAK's current lightweight single-page tab UI (sidebar nav,
+system dashboard, table-driven workflows with bulk actions, poster-grid
+tagging). Full description of each mockup is recorded in `docs/ROADMAP.md`
+under "UI mockup reference" for durability, since the images themselves
+aren't stored as files.
+
+Decided: treat the mockups as inspiration, not a literal spec — real SAK
+terminology (Movies/Series/Adult, actual workflow names), only build widgets
+backed by data SAK actually has. Sequencing decided: finish the
+already-in-flight Stage 2c work (above) before starting on the redesign.
+
+Follow-up discussion ("deep-interview") reviewed 13 additional candidate
+capabilities across Core Media Management, Infrastructure, Automation, and
+Metadata Sourcing. Key decisions from that round:
+- **Naming overhaul** (token/regex-based custom renaming): dropped from
+  scope for now — user will revisit later if needed. `internal/naming`'s
+  fixed-preset design (from Stage 2c, above) stands as-is.
+- **Bulk apply**: decided to actually build this (a deliberate, considered
+  reversal of the "no apply-everything path anywhere" principle in
+  `CLAUDE.md` — needs its own design pass for partial-failure handling, not
+  a casual add).
+- **SSO**: forward-auth header support only (trusting a reverse-proxy-set
+  identity header), not a full OIDC/SAML client — keeps SAK single-operator.
+- **Network mount resiliency**: verified already safe. No workflow deletes
+  anything in reaction to a missing file — Purge triggers on tag membership
+  only, Dedup only removes a *detected duplicate's* loser, Rename never
+  deletes. A disconnected mount just errors the scan or skips an unreadable
+  subdirectory. Only gap: clearer error messaging, not a redesign.
+- **Hardware acceleration (GPU)**: initially flagged as a scope mismatch
+  (SAK doesn't transcode or generate thumbnails today) — then reopened with
+  a concrete driver, see the phash entry below.
+- **Background task queue**: not building speculatively; only if/when
+  watch-folders (see Automation below) actually need it.
+- **Confirmed real gaps, not yet scheduled**: confidence scoring for weak
+  TMDB/community-DB matches (today `items[0]` is always taken, no
+  threshold); manual override/re-pick for a misidentified match; logical
+  episode-splitting (one file, multiple `Episode` rows — explicitly NOT
+  physical re-encoding); TVDB/IMDB as fallback metadata sources alongside
+  TMDB; local `.nfo`/artwork preference (confirmed zero support today —
+  `.nfo` is purely skip-listed, never parsed); watch-folders (would only
+  ever auto-run Scan, never auto-Apply — that would break the one invariant
+  this whole project is built on); webhooks + real API docs (the REST API
+  already *is* the extensibility surface; GraphQL explicitly rejected as an
+  unnecessary rewrite); Collections (Movies-only, seeded from TMDB's
+  `belongs_to_collection` — Series has no TMDB equivalent); structured
+  Genre/Actor tagging (richer than today's flat per-mode tag vocabulary).
+
+## 2026-07-10 — Phash-based duplicate detection: scope decided, split into two efforts
+
+User: perceptual hashing (phash) should be "the defacto standard across all
+media for identifying duplicates," and specifically that Adult identification
+against StashDB/TPDB/FansDB should already have this (`borrowed from stash`).
+
+**Verified, not assumed**: the claim was correct and more precise than
+expected. The prior CLI this project descended from
+(`stash-whisparr-sort`) had phash as the **primary, authoritative**
+identification signal for Adult content — files with a phash matched via a
+StashDB→FansDB→TPDB-GraphQL fingerprint cascade first, falling back to
+AI/text search only for files without one yet (with a force-generate step
+that triggered a targeted Stash rescan for missing phashes before falling
+back). When ported into this codebase, the low-level client methods came
+along verbatim (`stashbox.FindScenesByFingerprints`, `stashbox.SubmitFingerprint`,
+`tpdbrest.SearchByHash`, `stashapi.StashFile.PHash`) but the *orchestration*
+that made phash primary did not — today's `internal/identify.Identifier.Identify`
+is pure UUID-lookup + AI-parsed-title text search + web-search grounding,
+never touching a hash. The dead client methods are exercised only by their
+own unit tests.
+
+Also surfaced a subtlety while verifying: the old CLI's own code comment
+claimed a 4-stage cascade (`...→TPDB-GraphQL→TPDB-REST`), but the actual
+implementation only ever queried 3 stages — TPDB-REST was never part of the
+fingerprint cascade, only used for AI-fallback text search. The restoration
+will implement the real 3-stage cascade, not the comment's stale claim.
+
+Also clarified: **the old CLI never computed a phash itself** — it always
+read one already computed by the user's own separately-running Stash
+instance, and forced Stash to compute one (via a targeted rescan) when
+missing. This splits "phash as the defacto standard across all media" into
+two genuinely different efforts:
+
+1. **Adult identification** (in progress — design finalized, not yet
+   implemented): restore the phash-first cascade, leaning on Stash's own
+   already-computed fingerprint via a new `mode.Session.Stash *stashapi.Client`
+   field (reusing the already-recognized, already-testable `"stash"`
+   connection key that exists but was never wired into a live session).
+   Give-back (submitting a confirmed fingerprint back to StashDB/FansDB)
+   moves from Scan-time (as in the old CLI) to Apply-time, since Scan only
+   ever proposes in this project — submitting to a community database based
+   on an unapproved proposal would violate staged-for-approval.
+2. **Movies/Series Dedup** (deferred, not yet designed in detail): there's
+   no Stash instance for Movies/Series to lean on, so SAK would need to
+   compute phashes itself for the first time in either codebase — real
+   frame-decode work. Decided: CPU baseline by default, GPU (QuickSync/NVENC)
+   as an opt-in speedup, scoped comparison to start (not full library
+   all-pairs), across all three modes including Adult once available.
+
+This is where the GPU-acceleration item from the deep-interview round
+reopened: it's a real, well-motivated need for effort #2's frame decoding,
+not the vague "transcoding" scope mismatch it looked like in isolation.
+
+User also requested this changelog and `docs/ROADMAP.md` be created and
+kept up going forward, given the volume of undocumented decisions
+accumulating in conversation alone.
