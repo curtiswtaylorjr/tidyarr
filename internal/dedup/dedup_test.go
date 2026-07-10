@@ -252,7 +252,7 @@ func TestApply_KeepsWinnerByDefault_DeletesOrphanLoser(t *testing.T) {
 			{Label: "loser", Path: loserPath},
 		},
 	}
-	id, err := Apply(context.Background(), sess, p, nil, false)
+	id, changes, err := Apply(context.Background(), sess, p, nil, false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -261,6 +261,9 @@ func TestApply_KeepsWinnerByDefault_DeletesOrphanLoser(t *testing.T) {
 	}
 	if _, err := os.Stat(loserPath); !os.IsNotExist(err) {
 		t.Error("expected the losing orphan file to be deleted")
+	}
+	if len(changes) != 1 || changes[0].Path != loserPath || changes[0].Kind != mode.Deleted {
+		t.Errorf("expected exactly one Deleted PathChange for %q, got %+v", loserPath, changes)
 	}
 }
 
@@ -294,7 +297,7 @@ func TestApply_WinnerIsOrphan_DeletesTrackedLoserAndRegistersWinner(t *testing.T
 			{Label: "winner", Path: winnerPath, Winner: true},
 		},
 	}
-	id, err := Apply(context.Background(), sess, p, nil, false)
+	id, changes, err := Apply(context.Background(), sess, p, nil, false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -310,6 +313,15 @@ func TestApply_WinnerIsOrphan_DeletesTrackedLoserAndRegistersWinner(t *testing.T
 	if !scanTriggered {
 		t.Error("expected a downloaded-files scan to be triggered after registering the winner")
 	}
+	// The tracked loser here has no local file (Path: "/tracked.mkv" is never
+	// written to disk — removal goes through DeleteTracked, not os.Remove),
+	// but Apply still reports its candidate path since both removeCandidate
+	// branches key off c.Path (unlike the library-backed path, which resolves
+	// the item's own FilePath). The newly-registered winner never moved, so
+	// it doesn't appear.
+	if len(changes) != 1 || changes[0].Path != "/tracked.mkv" || changes[0].Kind != mode.Deleted {
+		t.Errorf("expected exactly one Deleted PathChange for %q, got %+v", "/tracked.mkv", changes)
+	}
 }
 
 func TestApply_KeepAll_NoMutation(t *testing.T) {
@@ -324,12 +336,15 @@ func TestApply_KeepAll_NoMutation(t *testing.T) {
 			{Label: "b", Path: "/b.mkv"},
 		},
 	}
-	id, err := Apply(context.Background(), sess, p, nil, true)
+	id, changes, err := Apply(context.Background(), sess, p, nil, true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if id != 9 {
 		t.Errorf("expected keepAll to still report the existing tracked id, got %d", id)
+	}
+	if changes != nil {
+		t.Errorf("expected keepAll to report no changes, got %+v", changes)
 	}
 }
 
@@ -349,7 +364,7 @@ func TestApply_ExplicitKeepIndexOverridesWinner(t *testing.T) {
 		},
 	}
 	keepA := 0
-	id, err := Apply(context.Background(), sess, p, &keepA, false)
+	id, changes, err := Apply(context.Background(), sess, p, &keepA, false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -358,6 +373,9 @@ func TestApply_ExplicitKeepIndexOverridesWinner(t *testing.T) {
 	}
 	if _, err := os.Stat(loserPath); !os.IsNotExist(err) {
 		t.Error("expected the explicitly-not-kept file to be deleted")
+	}
+	if len(changes) != 1 || changes[0].Path != loserPath || changes[0].Kind != mode.Deleted {
+		t.Errorf("expected exactly one Deleted PathChange for %q, got %+v", loserPath, changes)
 	}
 }
 
@@ -369,7 +387,7 @@ func TestApply_RejectsNonPendingProposal(t *testing.T) {
 		Status:     proposals.Applied,
 		Candidates: []proposals.Candidate{{Path: "/a.mkv"}, {Path: "/b.mkv"}},
 	}
-	if _, err := Apply(context.Background(), sess, p, nil, false); err == nil {
+	if _, _, err := Apply(context.Background(), sess, p, nil, false); err == nil {
 		t.Fatal("expected Apply to refuse an already-applied proposal")
 	}
 }
@@ -379,7 +397,7 @@ func TestApply_RejectsFewerThanTwoCandidates(t *testing.T) {
 		t.Fatal("Apply must not make any HTTP call with too few candidates")
 	})
 	p := proposals.Proposal{Status: proposals.Pending, Candidates: []proposals.Candidate{{Path: "/a.mkv"}}}
-	if _, err := Apply(context.Background(), sess, p, nil, false); err == nil {
+	if _, _, err := Apply(context.Background(), sess, p, nil, false); err == nil {
 		t.Fatal("expected Apply to refuse a proposal with fewer than 2 candidates")
 	}
 }
@@ -393,7 +411,7 @@ func TestApply_RejectsOutOfRangeKeepIndex(t *testing.T) {
 		Candidates: []proposals.Candidate{{Path: "/a.mkv"}, {Path: "/b.mkv"}},
 	}
 	bad := 5
-	if _, err := Apply(context.Background(), sess, p, &bad, false); err == nil {
+	if _, _, err := Apply(context.Background(), sess, p, &bad, false); err == nil {
 		t.Fatal("expected Apply to refuse an out-of-range keepIndex")
 	}
 }
@@ -741,7 +759,7 @@ func TestApply_Adult_RegistersUntrackedWinnerWithForeignID(t *testing.T) {
 			{Label: "winner", Path: winnerPath, Winner: true},
 		},
 	}
-	id, err := Apply(context.Background(), sess, p, nil, false)
+	id, changes, err := Apply(context.Background(), sess, p, nil, false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -753,6 +771,12 @@ func TestApply_Adult_RegistersUntrackedWinnerWithForeignID(t *testing.T) {
 	}
 	if addBody["foreignId"] != sceneUUIDA || addBody["itemType"] != "scene" {
 		t.Errorf("expected the scene identifiers on the Add body, got %+v", addBody)
+	}
+	// Row 9 (player-rescan-notify plan): the tracked loser's candidate path
+	// is reported (both removeCandidate branches key off c.Path here); the
+	// newly-registered winner never moved, so it never appears.
+	if len(changes) != 1 || changes[0].Path != "/tracked.mkv" || changes[0].Kind != mode.Deleted {
+		t.Errorf("expected exactly one Deleted PathChange for %q, got %+v", "/tracked.mkv", changes)
 	}
 	if !scanTriggered {
 		t.Error("expected a downloaded-files scan after registering the winner")
@@ -778,7 +802,7 @@ func TestApply_Adult_GuardRejectsBlankForeignID(t *testing.T) {
 			{Label: "loser", Path: loserPath},                    // untracked orphan with a real file
 		},
 	}
-	if _, err := Apply(context.Background(), sess, p, nil, false); err == nil {
+	if _, _, err := Apply(context.Background(), sess, p, nil, false); err == nil {
 		t.Fatal("expected Apply to refuse a blank-identifier Whisparr proposal")
 	}
 	if _, err := os.Stat(loserPath); err != nil {

@@ -537,12 +537,21 @@ func adultForeignID(res *identify.MatchResult, err error) (fid, itemType, title 
 // or the tracked copy just lost), Apply registers it the same way Rename
 // does, so the duplicate group always resolves to exactly one tracked item
 // with a file behind it — never zero.
-func Apply(ctx context.Context, sess *mode.Session, p proposals.Proposal, keepIndex *int, keepAll bool) (trackedID int, err error) {
+//
+// changes is a named return reporting each removed loser's path for
+// Session.NotifyPlayers — appended only after removeCandidate for that
+// candidate succeeds, so a mid-loop removal failure still reports whatever
+// was actually deleted before the error propagates. Both removeCandidate
+// branches (tracked-via-Whisparr and untracked-via-os.Remove) key off c.Path
+// here, unlike the Movies/Series library path. The survivor never moves, so
+// nothing is emitted for it; keepAll removes nothing and always returns nil
+// changes.
+func Apply(ctx context.Context, sess *mode.Session, p proposals.Proposal, keepIndex *int, keepAll bool) (trackedID int, changes []mode.PathChange, err error) {
 	if p.Status != proposals.Pending {
-		return 0, fmt.Errorf("proposal %d is %q, not pending — nothing to apply", p.ID, p.Status)
+		return 0, nil, fmt.Errorf("proposal %d is %q, not pending — nothing to apply", p.ID, p.Status)
 	}
 	if len(p.Candidates) < 2 {
-		return 0, fmt.Errorf("proposal %d has fewer than 2 candidates to resolve", p.ID)
+		return 0, nil, fmt.Errorf("proposal %d has fewer than 2 candidates to resolve", p.ID)
 	}
 
 	// Structural safety guard at the TOP of Apply — before the removal loop and
@@ -554,22 +563,22 @@ func Apply(ctx context.Context, sess *mode.Session, p proposals.Proposal, keepIn
 	// — partial destruction. For a real Scan-produced Adult proposal these fields
 	// are always set, so it only catches a hand-crafted / future-buggy proposal.
 	if sess.Servarr.AppType() == servarr.Whisparr && (p.ForeignID == "" || p.ItemType == "") {
-		return 0, fmt.Errorf("proposal %d has no scene identifier — refusing to register it as a mis-typed movie", p.ID)
+		return 0, nil, fmt.Errorf("proposal %d has no scene identifier — refusing to register it as a mis-typed movie", p.ID)
 	}
 
 	if keepAll {
 		for _, c := range p.Candidates {
 			if c.TrackedID != 0 {
-				return c.TrackedID, nil
+				return c.TrackedID, nil, nil
 			}
 		}
-		return 0, nil
+		return 0, nil, nil
 	}
 
 	idx := winnerIndex(p.Candidates)
 	if keepIndex != nil {
 		if *keepIndex < 0 || *keepIndex >= len(p.Candidates) {
-			return 0, fmt.Errorf("proposal %d: keepIndex %d out of range", p.ID, *keepIndex)
+			return 0, nil, fmt.Errorf("proposal %d: keepIndex %d out of range", p.ID, *keepIndex)
 		}
 		idx = *keepIndex
 	}
@@ -580,12 +589,15 @@ func Apply(ctx context.Context, sess *mode.Session, p proposals.Proposal, keepIn
 			continue
 		}
 		if err := removeCandidate(ctx, sess, c); err != nil {
-			return 0, fmt.Errorf("removing %s: %w", c.Path, err)
+			return 0, changes, fmt.Errorf("removing %s: %w", c.Path, err)
+		}
+		if c.Path != "" {
+			changes = append(changes, mode.PathChange{Path: c.Path, Kind: mode.Deleted})
 		}
 	}
 
 	if winner.TrackedID != 0 {
-		return winner.TrackedID, nil
+		return winner.TrackedID, changes, nil
 	}
 
 	id, err := sess.Servarr.Add(ctx, servarr.AddRequest{
@@ -594,12 +606,12 @@ func Apply(ctx context.Context, sess *mode.Session, p proposals.Proposal, keepIn
 		QualityProfileID: p.QualityProfileID, RootFolderPath: p.RootFolderPath, Monitored: true,
 	})
 	if err != nil {
-		return 0, fmt.Errorf("registering surviving copy %q: %w", p.Title, err)
+		return 0, changes, fmt.Errorf("registering surviving copy %q: %w", p.Title, err)
 	}
 	if err := sess.Servarr.ScanForDownloaded(ctx); err != nil {
-		return id, fmt.Errorf("registered as id=%d but triggering the downloaded-files scan failed: %w", id, err)
+		return id, changes, fmt.Errorf("registered as id=%d but triggering the downloaded-files scan failed: %w", id, err)
 	}
-	return id, nil
+	return id, changes, nil
 }
 
 func winnerIndex(candidates []proposals.Candidate) int {

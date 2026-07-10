@@ -901,3 +901,78 @@ matter (row 3's `Add`-fails-after-a-successful-`Relocate` sub-case).
 
 Verified via `go build/vet/test -race` across the whole module (all green,
 including `-tags integration`).
+
+## 2026-07-10 — Notify Stash on Adult Apply: rename/purge/dedup (Slice 4 of player-rescan-notify)
+
+Wires Slice 2's `mode.PathChange`/`Session.NotifyPlayers` contract into the
+three Adult Servarr-backed (Whisparr) Apply functions — `rename.Apply`,
+`purge.Apply`, `dedup.Apply` — the counterpart to Slice 3's Movies/Series
+wiring, notifying Stash instead of Jellyfin. Scoping is hardcoded and needs
+no extra branching: `sess.Jellyfin` is nil for Adult and `sess.Stash` is nil
+for Movies/Series, so `NotifyPlayers`'s existing nil-checks route correctly
+on their own.
+
+`rename.Apply` now returns `changes []mode.PathChange` alongside its
+existing `trackedID`/`fingerprintSubmitted`/`err`. Nothing is emitted on the
+`p.TrackedID != 0` reclassify early-return (SAK does no local `os.Rename`
+there) or when the relocate branch is skipped (source and destination
+already share a root — no move, Stash already has the file where it is).
+When the relocate branch *does* run, `changes` is captured **immediately
+after `Relocate` succeeds, unconditionally** — not gated on the subsequent
+`Add`/`ScanForDownloaded` calls, or on `trackedID` ending up nonzero. This
+was flagged during planning (Critic fix #3) as the slice's highest-risk
+detail: a naive "only report changes when the whole function succeeds"
+implementation would silently drop the notify for the sub-case where
+`Relocate` succeeds but `Add` itself then fails — the file has genuinely
+moved on disk, `trackedID` stays 0 so the proposal is correctly left
+Pending (unchanged pre-existing behavior), but without this fix Stash would
+never be told the file moved, leaving a phantom/stale scene with no
+corresponding SAK record to reconcile it later. Both partial-success
+sub-cases are covered end to end: `Add` failing after a successful
+`Relocate` (proposal stays Pending, Stash still notified) and
+`ScanForDownloaded` failing after a successful `Add` (proposal still gets
+`MarkApplied`, per the pre-existing partial-success design — Stash is now
+*also* notified).
+
+`purge.Apply` now returns `changes []mode.PathChange`, appending
+`{p.SourcePath, Deleted}` after `DeleteTracked` succeeds, guarded against an
+empty `SourcePath` the same way Slice 3's library-backed purge paths are.
+`p.SourcePath` is the Whisparr-tracked path by construction — set directly
+from the same Whisparr record `DeleteTracked` acts on — so it cannot
+disagree with what Whisparr itself deleted.
+
+`dedup.Apply` now returns `changes []mode.PathChange`, appending
+`{c.Path, Deleted}` per removed loser inside the removal loop, after
+`removeCandidate` for that candidate succeeds — a mid-loop removal failure
+still reports whatever was actually deleted before the error propagates.
+Both `removeCandidate` branches (tracked-via-Whisparr `DeleteTracked` and
+untracked-via-`os.Remove`) key off the candidate's own `c.Path` here, unlike
+Slice 3's Movies dedup path, which needed a library lookup for the exact
+tracked-loser path instead. The survivor never moves, so it never appears;
+`keepAll` removes nothing and always returns nil changes.
+
+`internal/api.applyByWorkflow`'s three Adult dispatch call sites (rename,
+purge, dedup) feed the same `changes` accumulator Slice 3 introduced, using
+the same fresh-local-then-plain-`=`-assign discipline (Critic fix #1) to
+avoid shadowing the deferred `sess.NotifyPlayers` closure's accumulator.
+
+Tests (`internal/rename`, `internal/purge`, `internal/dedup` unit level;
+`internal/api` end-to-end against fake Whisparr and Stash GraphQL servers
+and the real HTTP dispatch): Adult rename with a dir-change → Stash
+phash-free scan of the actual moved-to path plus a clean of the vacated
+source; Adult rename with no dir-change → zero Stash calls; **both
+partial-success sub-cases** (`Add` fails after a successful `Relocate`;
+`ScanForDownloaded` fails after a successful `Add`) → the file is
+confirmed to have actually moved on disk in both cases, and Stash is
+notified in both cases, with the pre-existing MarkApplied/Pending behavior
+otherwise unchanged; Adult purge → a single clean of `p.SourcePath`, no
+scan; Adult dedup loser → a single clean of the tracked loser's `c.Path`,
+`keepAll` → zero calls; a scoping check the mirror image of Slice 3's — an
+Adult Apply with a `"jellyfin"` connection fully configured sends zero
+requests to it, since `sess.Jellyfin` stays nil for Adult mode; and
+confirmation that the existing Whisparr `ScanForDownloaded` scan-trigger
+behavior is unchanged (still fires once per successful registration, in
+both the rename and dedup happy paths).
+
+Verified via `go build/vet/test -race` across the whole module (all green,
+including `-tags integration`).

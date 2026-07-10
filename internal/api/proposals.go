@@ -154,7 +154,8 @@ func applyByWorkflow(ctx context.Context, settingsStore *settings.Store, propSto
 			}
 			return propStore.MarkApplied(ctx, p.ID, int(episodeID))
 		}
-		trackedID, fingerprintSubmitted, err := rename.Apply(ctx, sess, p)
+		trackedID, fingerprintSubmitted, c, err := rename.Apply(ctx, sess, p)
+		changes = c
 		if trackedID != 0 {
 			// Registered even if the follow-up scan trigger failed — see
 			// rename.Apply's doc comment. Record it as applied either way so
@@ -186,7 +187,9 @@ func applyByWorkflow(ctx context.Context, settingsStore *settings.Store, propSto
 			}
 			return propStore.MarkApplied(ctx, p.ID, p.TrackedID)
 		}
-		if err := purge.Apply(ctx, sess, p); err != nil {
+		c, err := purge.Apply(ctx, sess, p)
+		changes = c
+		if err != nil {
 			return err
 		}
 		return propStore.MarkApplied(ctx, p.ID, p.TrackedID)
@@ -207,7 +210,8 @@ func applyByWorkflow(ctx context.Context, settingsStore *settings.Store, propSto
 			}
 			return propStore.MarkApplied(ctx, p.ID, int(episodeID))
 		}
-		trackedID, err := dedup.Apply(ctx, sess, p, req.KeepIndex, req.KeepAll)
+		trackedID, c, err := dedup.Apply(ctx, sess, p, req.KeepIndex, req.KeepAll)
+		changes = c
 		if err != nil {
 			return err
 		}

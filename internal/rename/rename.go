@@ -393,16 +393,27 @@ func classifyAdultMatch(res *identify.MatchResult, err error) (status proposals.
 // best-effort and never turns an otherwise-successful Apply into an error —
 // the caller uses it only to decide whether to record
 // p.FingerprintSubmittedAt.
-func Apply(ctx context.Context, sess *mode.Session, p proposals.Proposal) (trackedID int, fingerprintSubmitted bool, err error) {
+//
+// changes is a named return so a post-move failure (Add or
+// ScanForDownloaded) still reports the committed relocate to the caller for
+// Session.NotifyPlayers — it's set immediately after Relocate succeeds,
+// unconditionally, never gated on trackedID/Add/ScanForDownloaded also
+// succeeding: the file has already physically moved by that point, so Stash
+// must be told regardless of what happens next, or a phantom scene results.
+// Nothing is emitted when the relocate branch is skipped (dir unchanged —
+// no rename occurred, Stash already has the file at its path) or on the
+// p.TrackedID != 0 reclassify early-return (SAK does no local os.Rename
+// there).
+func Apply(ctx context.Context, sess *mode.Session, p proposals.Proposal) (trackedID int, fingerprintSubmitted bool, changes []mode.PathChange, err error) {
 	if p.Status != proposals.Pending {
-		return 0, false, fmt.Errorf("proposal %d is %q, not pending — nothing to apply", p.ID, p.Status)
+		return 0, false, nil, fmt.Errorf("proposal %d is %q, not pending — nothing to apply", p.ID, p.Status)
 	}
 
 	if p.TrackedID != 0 {
 		if err := sess.Servarr.UpdateRootFolder(ctx, p.TrackedID, p.RootFolderPath); err != nil {
-			return 0, false, fmt.Errorf("reclassifying %q: %w", p.Title, err)
+			return 0, false, nil, fmt.Errorf("reclassifying %q: %w", p.Title, err)
 		}
-		return p.TrackedID, false, nil
+		return p.TrackedID, false, nil, nil
 	}
 
 	// Structural safety guard at the mutation boundary: a Whisparr scene needs
@@ -411,13 +422,17 @@ func Apply(ctx context.Context, sess *mode.Session, p proposals.Proposal) (track
 	// rather than trusting Scan-convention — even a hand-crafted or future-buggy
 	// Adult proposal can never be registered without a real scene identifier.
 	if sess.Servarr.AppType() == servarr.Whisparr && (p.ForeignID == "" || p.ItemType == "") {
-		return 0, false, fmt.Errorf("proposal %d has no scene identifier — refusing to register it as a mis-typed movie", p.ID)
+		return 0, false, nil, fmt.Errorf("proposal %d has no scene identifier — refusing to register it as a mis-typed movie", p.ID)
 	}
 
 	if p.SourcePath != "" && filepath.Dir(p.SourcePath) != p.RootFolderPath {
-		if _, err := Relocate(p.SourcePath, p.RootFolderPath); err != nil {
-			return 0, false, fmt.Errorf("relocating %q into %q: %w", p.SourcePath, p.RootFolderPath, err)
+		unique, err := Relocate(p.SourcePath, p.RootFolderPath)
+		if err != nil {
+			return 0, false, nil, fmt.Errorf("relocating %q into %q: %w", p.SourcePath, p.RootFolderPath, err)
 		}
+		// Critic fix #3: capture the committed move right here, unconditionally
+		// — not gated on trackedID/Add/ScanForDownloaded succeeding below.
+		changes = []mode.PathChange{{Path: p.SourcePath, Kind: mode.Deleted}, {Path: unique, Kind: mode.Created}}
 	}
 
 	id, err := sess.Servarr.Add(ctx, servarr.AddRequest{
@@ -426,13 +441,13 @@ func Apply(ctx context.Context, sess *mode.Session, p proposals.Proposal) (track
 		QualityProfileID: p.QualityProfileID, RootFolderPath: p.RootFolderPath, Monitored: true,
 	})
 	if err != nil {
-		return 0, false, fmt.Errorf("registering %q: %w", p.Title, err)
+		return 0, false, changes, fmt.Errorf("registering %q: %w", p.Title, err)
 	}
 
 	if err := sess.Servarr.ScanForDownloaded(ctx); err != nil {
-		return id, false, fmt.Errorf("registered as id=%d but triggering the downloaded-files scan failed: %w", id, err)
+		return id, false, changes, fmt.Errorf("registered as id=%d but triggering the downloaded-files scan failed: %w", id, err)
 	}
-	return id, submitFingerprintGiveBack(ctx, sess, p), nil
+	return id, submitFingerprintGiveBack(ctx, sess, p), changes, nil
 }
 
 // submitFingerprintGiveBack submits p's phash back to whichever community box

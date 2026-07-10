@@ -325,7 +325,7 @@ func TestApply_RegistersAndTriggersDownloadedScan(t *testing.T) {
 		ID: 1, Status: proposals.Pending, Title: "A Beautiful Mind", TMDBID: 453,
 		QualityProfileID: 4, RootFolderPath: "/media/Movies",
 	}
-	id, _, err := Apply(context.Background(), sess, p)
+	id, _, _, err := Apply(context.Background(), sess, p)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -346,7 +346,7 @@ func TestApply_RejectsNonPendingProposal(t *testing.T) {
 	})
 
 	for _, status := range []proposals.Status{proposals.Applied, proposals.Dismissed, proposals.Unmatched} {
-		if _, _, err := Apply(context.Background(), sess, proposals.Proposal{Status: status}); err == nil {
+		if _, _, _, err := Apply(context.Background(), sess, proposals.Proposal{Status: status}); err == nil {
 			t.Errorf("expected Apply to refuse a %q proposal", status)
 		}
 	}
@@ -378,7 +378,7 @@ func TestApply_RegistersWhisparrSceneWithForeignID(t *testing.T) {
 		ForeignID: "abc-uuid", ItemType: "scene",
 		QualityProfileID: 4, RootFolderPath: "/media/Adult",
 	}
-	id, _, err := Apply(context.Background(), sess, p)
+	id, _, _, err := Apply(context.Background(), sess, p)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -412,7 +412,7 @@ func TestApply_RefusesWhisparrProposalWithoutIdentifier(t *testing.T) {
 			sess := newTestSession(t, servarr.Whisparr, func(w http.ResponseWriter, r *http.Request) {
 				t.Fatalf("guard must refuse before any HTTP call, but got %s %s", r.Method, r.URL.Path)
 			})
-			if _, _, err := Apply(context.Background(), sess, tc.p); err == nil {
+			if _, _, _, err := Apply(context.Background(), sess, tc.p); err == nil {
 				t.Fatal("expected Apply to refuse a Whisparr proposal missing a scene identifier")
 			}
 		})
@@ -750,7 +750,7 @@ func TestApply_RelocatesFileIntoTargetRootWhenDifferentFromSource(t *testing.T) 
 		ID: 1, Status: proposals.Pending, Title: "Kids Movie", TMDBID: 111,
 		QualityProfileID: 4, SourcePath: sourcePath, RootFolderPath: destRoot,
 	}
-	id, _, err := Apply(context.Background(), sess, p)
+	id, _, changes, err := Apply(context.Background(), sess, p)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -767,6 +767,12 @@ func TestApply_RelocatesFileIntoTargetRootWhenDifferentFromSource(t *testing.T) 
 	}
 	if addBody["rootFolderPath"] != destRoot {
 		t.Errorf("expected Add to register against the target root, got %+v", addBody)
+	}
+	// Row 3 (player-rescan-notify plan): the relocate branch reports the
+	// exact source/dest pair as PathChanges.
+	want := []mode.PathChange{{Path: sourcePath, Kind: mode.Deleted}, {Path: wantDest, Kind: mode.Created}}
+	if len(changes) != 2 || changes[0] != want[0] || changes[1] != want[1] {
+		t.Errorf("expected changes %+v, got %+v", want, changes)
 	}
 }
 
@@ -807,7 +813,8 @@ func TestApply_RelocateAvoidsFilenameCollision(t *testing.T) {
 		ID: 1, Status: proposals.Pending, Title: "Movie", TMDBID: 1,
 		QualityProfileID: 4, SourcePath: sourcePath, RootFolderPath: destRoot,
 	}
-	if _, _, err := Apply(context.Background(), sess, p); err != nil {
+	_, _, changes, err := Apply(context.Background(), sess, p)
+	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -817,6 +824,11 @@ func TestApply_RelocateAvoidsFilenameCollision(t *testing.T) {
 	uniqued := filepath.Join(destRoot, "Movie.2.mkv")
 	if data, err := os.ReadFile(uniqued); err != nil || string(data) != "new file" {
 		t.Errorf("expected the moved file at the .2 collision path, err=%v data=%q", err, data)
+	}
+	// The ACTUAL collision-renamed path must be reported, not the originally
+	// intended (and never-used) destination.
+	if len(changes) != 2 || changes[0].Path != sourcePath || changes[1].Path != uniqued || changes[1].Kind != mode.Created {
+		t.Errorf("expected changes to report the actual unique path %q, got %+v", uniqued, changes)
 	}
 }
 
@@ -840,8 +852,12 @@ func TestApply_NoRelocateWhenRootFolderPathMatchesSource(t *testing.T) {
 		ID: 1, Status: proposals.Pending, Title: "Movie", TMDBID: 1, QualityProfileID: 4,
 		SourcePath: "/this/path/does/not/exist/Movie.mkv", RootFolderPath: "/this/path/does/not/exist",
 	}
-	if _, _, err := Apply(context.Background(), sess, p); err != nil {
+	_, _, changes, err := Apply(context.Background(), sess, p)
+	if err != nil {
 		t.Fatalf("expected no relocate attempt (and so no error) when the root already matches, got: %v", err)
+	}
+	if changes != nil {
+		t.Errorf("expected no PathChange when no relocate was attempted, got %+v", changes)
 	}
 }
 
@@ -983,7 +999,7 @@ func TestApply_ReconcileCallsUpdateRootFolder(t *testing.T) {
 		ID: 1, Status: proposals.Pending, Title: "Old Kids Movie", TMDBID: 50,
 		TrackedID: 50, RootFolderPath: "/media/Movies (Kids)",
 	}
-	id, _, err := Apply(context.Background(), sess, p)
+	id, _, changes, err := Apply(context.Background(), sess, p)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -992,6 +1008,11 @@ func TestApply_ReconcileCallsUpdateRootFolder(t *testing.T) {
 	}
 	if gotMoveFiles != "true" {
 		t.Errorf("expected moveFiles=true, got %q", gotMoveFiles)
+	}
+	// SAK does no local os.Rename on the reclassify early-return path — no
+	// PathChange should be emitted.
+	if changes != nil {
+		t.Errorf("expected no PathChange on the reclassify path, got %+v", changes)
 	}
 	if putBody["rootFolderPath"] != "/media/Movies (Kids)" {
 		t.Errorf("expected the PUT to carry the new root folder, got %+v", putBody)
@@ -1060,7 +1081,7 @@ func TestApply_Adult_SubmitsFingerprintGiveBack_WhenPHashAndDurationKnown(t *tes
 		QualityProfileID: 4, RootFolderPath: "/media/Adult",
 		GiveBackBox: "stashdb", GiveBackSceneID: "abc-uuid", PHash: "hash1", DurationSeconds: 1800,
 	}
-	_, submitted, err := Apply(context.Background(), sess, p)
+	_, submitted, _, err := Apply(context.Background(), sess, p)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1097,7 +1118,7 @@ func TestApply_Adult_NoGiveBack_WhenPHashUnknown(t *testing.T) {
 		ForeignID: "abc-uuid", ItemType: "scene",
 		QualityProfileID: 4, RootFolderPath: "/media/Adult",
 	}
-	_, submitted, err := Apply(context.Background(), sess, p)
+	_, submitted, _, err := Apply(context.Background(), sess, p)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

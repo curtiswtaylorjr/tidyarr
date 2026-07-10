@@ -309,7 +309,7 @@ func TestScanAdultPhashFirst_GiveBackFiresWithProberDuration(t *testing.T) {
 		t.Fatalf("expected the scanned proposal to carry phash+prober duration into Apply, got phash=%q duration=%d", out[0].PHash, out[0].DurationSeconds)
 	}
 
-	_, submitted, err := Apply(context.Background(), sess, out[0])
+	_, submitted, _, err := Apply(context.Background(), sess, out[0])
 	if err != nil {
 		t.Fatalf("Apply returned an error: %v", err)
 	}
@@ -393,7 +393,7 @@ func TestScanAdultPhashFirst_TextMatchFallback_GivesBackAtApplyStashFree(t *test
 		t.Fatalf("expected give-back target captured from the text match, got box=%q scene=%q", p.GiveBackBox, p.GiveBackSceneID)
 	}
 
-	trackedID, submitted, err := Apply(context.Background(), sess, p)
+	trackedID, submitted, _, err := Apply(context.Background(), sess, p)
 	if err != nil {
 		t.Fatalf("Apply returned an error: %v", err)
 	}

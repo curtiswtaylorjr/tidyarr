@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"testing"
 
 	"github.com/curtiswtaylorjr/sakms/internal/mode"
@@ -164,7 +165,7 @@ func TestApply_DeletesTrackedItem(t *testing.T) {
 		gotPath = r.URL.String()
 	})
 
-	err := Apply(context.Background(), sess, proposals.Proposal{
+	changes, err := Apply(context.Background(), sess, proposals.Proposal{
 		ID: 1, Status: proposals.Pending, Title: "Flagged Movie", TrackedID: 2,
 	})
 	if err != nil {
@@ -172,6 +173,9 @@ func TestApply_DeletesTrackedItem(t *testing.T) {
 	}
 	if gotPath != "/api/v3/movie/2?deleteFiles=true" {
 		t.Errorf("unexpected delete request: %s", gotPath)
+	}
+	if changes != nil {
+		t.Errorf("expected no changes for a proposal with no SourcePath, got %+v", changes)
 	}
 }
 
@@ -181,7 +185,7 @@ func TestApply_RejectsNonPendingProposal(t *testing.T) {
 	})
 
 	for _, status := range []proposals.Status{proposals.Applied, proposals.Dismissed, proposals.Unmatched} {
-		err := Apply(context.Background(), sess, proposals.Proposal{Status: status, TrackedID: 5})
+		_, err := Apply(context.Background(), sess, proposals.Proposal{Status: status, TrackedID: 5})
 		if err == nil {
 			t.Errorf("expected Apply to refuse a %q proposal", status)
 		}
@@ -193,7 +197,7 @@ func TestApply_RejectsMissingTrackedID(t *testing.T) {
 		t.Fatal("Apply must not make any HTTP call without a tracked id")
 	})
 
-	err := Apply(context.Background(), sess, proposals.Proposal{Status: proposals.Pending, TrackedID: 0})
+	_, err := Apply(context.Background(), sess, proposals.Proposal{Status: proposals.Pending, TrackedID: 0})
 	if err == nil {
 		t.Fatal("expected Apply to refuse a proposal with no tracked id")
 	}
@@ -254,13 +258,18 @@ func TestApply_AdultWhisparrDeletesTrackedScene(t *testing.T) {
 		gotPath = r.URL.String()
 	})
 
-	err := Apply(context.Background(), sess, proposals.Proposal{
+	changes, err := Apply(context.Background(), sess, proposals.Proposal{
 		ID: 1, Status: proposals.Pending, Title: "Flagged Scene", TrackedID: 2,
+		SourcePath: "/media/Adult/Flagged Scene",
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if gotPath != "/api/v3/movie/2?deleteFiles=true" {
 		t.Errorf("unexpected delete request: %s", gotPath)
+	}
+	want := []mode.PathChange{{Path: "/media/Adult/Flagged Scene", Kind: mode.Deleted}}
+	if !reflect.DeepEqual(changes, want) {
+		t.Errorf("expected changes %+v, got %+v", want, changes)
 	}
 }

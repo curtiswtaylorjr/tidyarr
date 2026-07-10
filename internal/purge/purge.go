@@ -98,17 +98,27 @@ func matchedLabels(tagIDs []int, labelByID map[int]string, allowlist []string) [
 // must be Pending, and must carry a TrackedID from Scan — there is no
 // "delete everything matched" path, by design: exactly one already-approved
 // proposal per call.
-func Apply(ctx context.Context, sess *mode.Session, p proposals.Proposal) error {
+//
+// changes reports the deleted path for Session.NotifyPlayers. p.SourcePath
+// is the Whisparr-tracked path by construction — set directly from the same
+// Whisparr record DeleteTracked acts on, so it cannot disagree — but the
+// Deleted PathChange is still only appended inside a non-empty guard, never
+// unconditionally, matching the same discipline as the Movies/Series purge
+// paths.
+func Apply(ctx context.Context, sess *mode.Session, p proposals.Proposal) (changes []mode.PathChange, err error) {
 	if p.Status != proposals.Pending {
-		return fmt.Errorf("proposal %d is %q, not pending — nothing to apply", p.ID, p.Status)
+		return nil, fmt.Errorf("proposal %d is %q, not pending — nothing to apply", p.ID, p.Status)
 	}
 	if p.TrackedID == 0 {
-		return fmt.Errorf("proposal %d has no tracked item id to delete", p.ID)
+		return nil, fmt.Errorf("proposal %d has no tracked item id to delete", p.ID)
 	}
 	if err := sess.Servarr.DeleteTracked(ctx, p.TrackedID); err != nil {
-		return fmt.Errorf("deleting %q (tracked id %d): %w", p.Title, p.TrackedID, err)
+		return nil, fmt.Errorf("deleting %q (tracked id %d): %w", p.Title, p.TrackedID, err)
 	}
-	return nil
+	if p.SourcePath != "" {
+		changes = []mode.PathChange{{Path: p.SourcePath, Kind: mode.Deleted}}
+	}
+	return changes, nil
 }
 
 // ScanLibrary is Purge's Movies-library counterpart to Scan — used only for
