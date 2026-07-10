@@ -101,6 +101,57 @@ func TestScanLibrarySeries_TrackedEpisodePlusOrphan_ProposesWithCorrectWinner(t 
 	}
 }
 
+// TestScanLibrarySeries_DiscoversDuplicateEpisodeAlongsideAlreadyTrackedOne
+// proves ScanRootFolder's recursion: once a season folder has one
+// already-tracked episode file inside it, the folder is no longer atomic —
+// a duplicate episode file dropped in beside it surfaces individually and
+// gets grouped as a duplicate, rather than being masked by the whole
+// "Show Name/Season 01/" subtree having previously been marked known.
+func TestScanLibrarySeries_DiscoversDuplicateEpisodeAlongsideAlreadyTrackedOne(t *testing.T) {
+	dir := t.TempDir()
+	seasonDir := filepath.Join(dir, "Show Name", "Season 01")
+	trackedFile := writeVideoFile(t, seasonDir, "Show Name - S01E01.mkv", 100)
+	orphanFile := writeVideoFile(t, seasonDir, "Show.Name.S01E01.1080p.BluRay.x264-GROUP.mkv", 100)
+
+	libStore := newTestLibraryStore(t)
+	ctx := context.Background()
+	series, err := libStore.UpsertSeries(ctx, library.Series{TMDBID: 555, Title: "Show Name", RootFolderPath: dir})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	tracked, err := libStore.UpsertEpisode(ctx, library.Episode{
+		SeriesID: series.ID, SeasonNumber: 1, EpisodeNumber: 1, FilePath: trackedFile,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	sess := &mode.Session{Mode: mode.Series, TMDB: fakeTMDBSeriesSearch(t, map[string]string{
+		"Show Name": `{"results":[{"id":555,"name":"Show Name"}]}`,
+	})}
+	prober := &fakeProber{byPath: map[string]*mediainfo.Probe{
+		trackedFile: {CodecName: "h264", Width: 1280, Height: 720, BitRate: 3000},
+		orphanFile:  {CodecName: "h265", Width: 1920, Height: 1080, BitRate: 8000},
+	}}
+
+	got, err := ScanLibrarySeries(ctx, sess, libStore, dir, prober)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 1 || len(got[0].Candidates) != 2 {
+		t.Fatalf("expected the sibling duplicate dropped alongside the tracked episode to be discovered, got %+v", got)
+	}
+	var loser proposals.Candidate
+	for _, c := range got[0].Candidates {
+		if !c.Winner {
+			loser = c
+		}
+	}
+	if loser.Path != trackedFile || loser.TrackedID != int(tracked.ID) {
+		t.Errorf("expected the tracked episode to be the loser, got %+v", loser)
+	}
+}
+
 // TestScanLibrarySeries_SeasonPackOrphanMatchesExistingSingleEpisodeDuplicate
 // is the concrete proof of the grouping-key design: a season-pack orphan
 // directory is broken into individual files, and the one matching an

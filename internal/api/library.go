@@ -1,12 +1,14 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"strconv"
 
 	"github.com/curtiswtaylorjr/sakms/internal/mode"
+	"github.com/curtiswtaylorjr/sakms/internal/naming"
 	"github.com/curtiswtaylorjr/sakms/internal/quality"
 	"github.com/curtiswtaylorjr/sakms/internal/settings"
 )
@@ -171,6 +173,71 @@ func putQualityPrefsHandler(settingsStore *settings.Store) http.HandlerFunc {
 			return
 		}
 		if err := settingsStore.Set(ctx, maxResolutionKey(m), strconv.Itoa(req.MaxResolution)); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+// namingPresetKey is per-mode — Movies and Series each pick their own
+// naming convention independently (e.g. a small Movies library on the
+// Jellyfin/Emby standard while an already-renamed Series library stays on
+// Legacy). Adult has no Rename-into-a-computed-name concept, so no key
+// exists for it.
+func namingPresetKey(m mode.Mode) string { return string(m) + "_naming_preset" }
+
+// resolveNamingPreset loads m's naming-preset setting, defaulting to
+// naming.Jellyfin when unset — the same fallback getNamingPresetHandler
+// reports over the API, reused by rename.go/proposals.go's Scan/Apply
+// handlers so Rename actually applies whatever preset is configured.
+func resolveNamingPreset(ctx context.Context, settingsStore *settings.Store, m mode.Mode) (naming.Preset, error) {
+	presetStr, err := settingsStore.Get(ctx, namingPresetKey(m))
+	if err != nil && !errors.Is(err, settings.ErrNotFound) {
+		return "", err
+	}
+	if presetStr == "" {
+		return naming.Jellyfin, nil
+	}
+	return naming.Preset(presetStr), nil
+}
+
+type namingPresetResponse struct {
+	Preset string `json:"preset"`
+}
+
+type namingPresetRequest struct {
+	Preset string `json:"preset"`
+}
+
+// getNamingPresetHandler returns {mode}'s configured file/folder naming
+// preset — defaults to "jellyfin" when unset.
+func getNamingPresetHandler(settingsStore *settings.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		preset, err := resolveNamingPreset(r.Context(), settingsStore, mode.Mode(r.PathValue("mode")))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(namingPresetResponse{Preset: string(preset)})
+	}
+}
+
+// putNamingPresetHandler stores {mode}'s file/folder naming preset.
+func putNamingPresetHandler(settingsStore *settings.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		m := mode.Mode(r.PathValue("mode"))
+		var req namingPresetRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+		if !naming.Valid(naming.Preset(req.Preset)) {
+			http.Error(w, "preset must be one of: jellyfin, legacy", http.StatusBadRequest)
+			return
+		}
+		if err := settingsStore.Set(r.Context(), namingPresetKey(m), req.Preset); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}

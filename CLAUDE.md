@@ -119,6 +119,40 @@ above, so don't drop them for convenience:
   a pack is broken into individual files
   (`library.ResolveEpisodeVideoFiles`) before grouping happens.
 - **Adult (Whisparr)**: untouched, not in any near-term plan.
-- **Jellyfin**: not integrated at all yet. Whether it's ever absorbed vs.
-  stays a permanent separate playback layer is genuinely undecided (see
-  Scope above) — don't assume either answer.
+- **Jellyfin**: not integrated as a service, but its documented naming
+  convention is now SAK's own default (see below) — no live Jellyfin
+  connection exists or is planned; whether one ever gets added is still
+  genuinely undecided (see Scope above).
+- **Naming, scanning, and Season-0 (Stage 2c)**:
+  - `library.ScanRootFolder` is now recursive (`filepath.WalkDir`,
+    `internal/library/library.go`) — a directory is reported whole only if
+    it has no real subdirectories (ignoring bonus-content names in
+    `config.ExcludedDirNames`) and no already-known direct children;
+    otherwise it's opened up. Fixes a real bug: previously, once any
+    episode of a show (or file of a movie) was tracked, the entire
+    wrapping folder was masked from ever being rescanned — a new season,
+    or a new file dropped alongside a tracked one, was invisible forever.
+    Rename and Dedup (Movies and Series) all inherit this fix for free;
+    Purge never walked the filesystem, so it needed no change.
+  - `internal/naming` is a new package: a small, fixed set of on-disk
+    naming presets — `Jellyfin` (default: `Title (Year) [tmdbid-N]`
+    folders/files, space-separated episode names) and `Legacy` (this
+    project's original dash-separated Series shape, no tag on Movies).
+    Configurable per-mode via `GET/PUT /api/modes/{mode}/naming-preset`.
+    Movies gets real renaming for the first time (`rename.RelocateMovie`)
+    — before this, Movies' Rename only ever relocated a file, preserving
+    whatever scene-release name it arrived with.
+  - `naming.MatchesMovieSchema`/`MatchesSeriesSchema` are structural
+    conformance checks wired into `rename.ScanLibrary`/`ScanLibrarySeries`:
+    a file/folder that already matches the active preset is never
+    proposed, even if it was never in `libStore` (e.g. a library someone
+    already organized by hand).
+  - `proposals.Proposal.Year` (new field, populated from TMDB's release
+    date at Scan time) finally populates the previously-dead
+    `library.Item.Year`/`library.Series.Year` columns on Apply.
+  - `grabs.Grab.SeasonSpecified` (new field) fixes a real Season-0/
+    Specials bug: `SeasonNumber == 0` used to be treated as "no season
+    info" during Search's check-import, which silently dropped a
+    deliberate Season-0 (Specials) grab whose filename didn't parse — the
+    new bool distinguishes "a season was actually picked" from "none
+    was," which a bare `int` can never do on its own.

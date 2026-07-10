@@ -16,6 +16,19 @@ var SidecarExts = map[string]bool{
 	".log": true, ".trickplay": true,
 }
 
+// ExcludedDirNames are bonus-content subdirectory names (case-insensitive)
+// that library.ScanRootFolder's recursive walk must never report or descend
+// into — relevant once recursion can open up an already-organized movie/show
+// folder (because one of its files is newly tracked) and expose a Sample/
+// Extras folder inside it for the first time. Deliberately excludes anything
+// "specials"-shaped: Jellyfin's own Series convention uses a literal
+// "Specials" season folder for Season 0, which must stay visible.
+var ExcludedDirNames = map[string]bool{
+	"sample": true, "samples": true, "extras": true, "featurettes": true,
+	"behind the scenes": true, "deleted scenes": true, "trailers": true,
+	"interviews": true, "shorts": true, "subs": true, "subtitles": true,
+}
+
 // Config holds settings resolved once at startup.
 type Config struct {
 	// Addr is the HTTP listen address, e.g. ":8080".

@@ -345,24 +345,6 @@ func trimSeparators(s string) string {
 	return strings.TrimRight(strings.TrimSpace(s), ".-_ ")
 }
 
-// SeasonDirName formats a season number the way episode files get
-// organized on disk: "Season 03".
-func SeasonDirName(seasonNumber int) string {
-	return fmt.Sprintf("Season %02d", seasonNumber)
-}
-
-// EpisodeFileName formats one episode's target file name:
-// "Series Title - S03E05 - Episode Title.ext". A plain format function,
-// not a templating engine — there's exactly one convention this project
-// needs today.
-func EpisodeFileName(seriesTitle string, seasonNumber, episodeNumber int, episodeTitle, ext string) string {
-	base := fmt.Sprintf("%s - S%02dE%02d", seriesTitle, seasonNumber, episodeNumber)
-	if episodeTitle != "" {
-		base = fmt.Sprintf("%s - %s", base, episodeTitle)
-	}
-	return base + ext
-}
-
 // ResolveEpisodeVideoFiles is ResolveVideoFile's season-pack-aware sibling:
 // if path is a file, returns just that file; if it's a directory, returns
 // EVERY video-extensioned file inside (not just the largest — a season

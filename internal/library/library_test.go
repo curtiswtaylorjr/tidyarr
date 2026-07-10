@@ -231,3 +231,119 @@ func TestScanRootFolder_SkipsKnownAndSidecarFiles(t *testing.T) {
 		t.Fatalf("expected only the one genuinely unmapped entry, got %+v", entries)
 	}
 }
+
+func TestScanRootFolder_RecursesIntoOrganizationalDirectories(t *testing.T) {
+	dir := t.TempDir()
+	season1 := filepath.Join(dir, "Show Title", "Season 01")
+	if err := os.MkdirAll(season1, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(season1, "ep2.mkv"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("writing ep2.mkv: %v", err)
+	}
+	tracked := filepath.Join(season1, "ep1.mkv")
+	if err := os.WriteFile(tracked, []byte("x"), 0o644); err != nil {
+		t.Fatalf("writing ep1.mkv: %v", err)
+	}
+
+	// "Show Title" has no direct video files of its own — nothing marks it
+	// known, so ScanRootFolder must open it up rather than reporting the
+	// whole show folder (which would hide ep2.mkv, added after ep1 was
+	// already tracked, forever).
+	known := map[string]bool{tracked: true}
+	entries, err := ScanRootFolder(dir, known)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Name != "ep2.mkv" {
+		t.Fatalf("expected only the new episode file surfaced individually, got %+v", entries)
+	}
+}
+
+func TestScanRootFolder_ReportsNewFileAlongsideKnownFile(t *testing.T) {
+	dir := t.TempDir()
+	movieDir := filepath.Join(dir, "Title (2024)")
+	if err := os.MkdirAll(movieDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	tracked := filepath.Join(movieDir, "movie.mkv")
+	if err := os.WriteFile(tracked, []byte("x"), 0o644); err != nil {
+		t.Fatalf("writing movie.mkv: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(movieDir, "extended-cut.mkv"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("writing extended-cut.mkv: %v", err)
+	}
+
+	known := map[string]bool{tracked: true}
+	entries, err := ScanRootFolder(dir, known)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Name != "extended-cut.mkv" {
+		t.Fatalf("expected the new file dropped alongside a tracked one to surface individually, got %+v", entries)
+	}
+}
+
+func TestScanRootFolder_StillReportsFreshLeafDirectoryWhole(t *testing.T) {
+	dir := t.TempDir()
+	pack := filepath.Join(dir, "Show.S01.Group")
+	if err := os.MkdirAll(pack, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	for _, name := range []string{"Show.S01E01.mkv", "Show.S01E02.mkv"} {
+		if err := os.WriteFile(filepath.Join(pack, name), []byte("x"), 0o644); err != nil {
+			t.Fatalf("writing %s: %v", name, err)
+		}
+	}
+
+	entries, err := ScanRootFolder(dir, map[string]bool{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Name != "Show.S01.Group" || entries[0].Path != pack {
+		t.Fatalf("expected the fresh season-pack directory reported whole (not descended into), got %+v", entries)
+	}
+}
+
+func TestScanRootFolder_SkipsKnownSubdirectoryEntirely(t *testing.T) {
+	dir := t.TempDir()
+	movieDir := filepath.Join(dir, "Title (2024)")
+	if err := os.MkdirAll(movieDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(movieDir, "movie.mkv"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("writing movie.mkv: %v", err)
+	}
+
+	known := map[string]bool{movieDir: true}
+	entries, err := ScanRootFolder(dir, known)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("expected a known subdirectory to be skipped entirely without descending into it, got %+v", entries)
+	}
+}
+
+func TestScanRootFolder_ExcludesBonusContentDirectories(t *testing.T) {
+	dir := t.TempDir()
+	movieDir := filepath.Join(dir, "Title (2024)")
+	sampleDir := filepath.Join(movieDir, "Sample")
+	if err := os.MkdirAll(sampleDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(movieDir, "movie.mkv"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("writing movie.mkv: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sampleDir, "sample.mkv"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("writing sample.mkv: %v", err)
+	}
+
+	entries, err := ScanRootFolder(dir, map[string]bool{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Name != "Title (2024)" {
+		t.Fatalf("expected the movie folder reported whole, unaffected by its Sample/ subdirectory, got %+v", entries)
+	}
+}

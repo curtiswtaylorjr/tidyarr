@@ -13,6 +13,7 @@ import (
 	"github.com/curtiswtaylorjr/sakms/internal/mediainfo"
 	"github.com/curtiswtaylorjr/sakms/internal/mode"
 	"github.com/curtiswtaylorjr/sakms/internal/proposals"
+	"github.com/curtiswtaylorjr/sakms/internal/searchterm"
 	"github.com/curtiswtaylorjr/sakms/internal/tmdb"
 )
 
@@ -100,6 +101,53 @@ func TestScanLibrary_TrackedItemPlusOrphan_ProposesWithCorrectWinner(t *testing.
 	}
 	if winner.Path != orphanFile {
 		t.Errorf("expected the higher-resolution orphan to win, got winner=%+v", winner)
+	}
+	if loser.Path != trackedFile || loser.TrackedID != int(tracked.ID) {
+		t.Errorf("expected the tracked file to be the loser, got %+v", loser)
+	}
+}
+
+// TestScanLibrary_DiscoversDuplicateFileAlongsideAlreadyTrackedItem proves
+// ScanRootFolder's recursion: once a movie folder has one already-tracked
+// file inside it, the folder is no longer atomic — a duplicate file dropped
+// in beside it (e.g. a second, higher-quality copy someone added later)
+// surfaces individually and gets grouped as a duplicate, rather than being
+// masked by the whole folder having previously been marked known.
+func TestScanLibrary_DiscoversDuplicateFileAlongsideAlreadyTrackedItem(t *testing.T) {
+	dir := t.TempDir()
+	trackedDir := filepath.Join(dir, "Some Movie (2020)")
+	trackedFile := writeVideoFile(t, trackedDir, "movie.mkv", 100)
+	orphanFile := writeVideoFile(t, trackedDir, "Some.Movie.2020.REMUX.mkv", 100)
+
+	libStore := newTestLibraryStore(t)
+	tracked, err := libStore.Upsert(context.Background(), library.Item{
+		Mode: mode.Movies, TMDBID: 42, Title: "Some Movie", FilePath: trackedFile, RootFolderPath: dir,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	term := searchterm.FromName("Some.Movie.2020.REMUX.mkv")
+	sess := &mode.Session{Mode: mode.Movies, TMDB: fakeTMDBSearch(t, map[string]string{
+		term: `{"results":[{"id":42,"title":"Some Movie"}]}`,
+	})}
+	prober := &fakeProber{byPath: map[string]*mediainfo.Probe{
+		trackedFile: {CodecName: "h264", Width: 1280, Height: 720, BitRate: 3000},
+		orphanFile:  {CodecName: "h265", Width: 1920, Height: 1080, BitRate: 8000},
+	}}
+
+	got, err := ScanLibrary(context.Background(), sess, libStore, dir, prober)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 1 || len(got[0].Candidates) != 2 {
+		t.Fatalf("expected the sibling duplicate dropped alongside the tracked file to be discovered, got %+v", got)
+	}
+	var loser proposals.Candidate
+	for _, c := range got[0].Candidates {
+		if !c.Winner {
+			loser = c
+		}
 	}
 	if loser.Path != trackedFile || loser.TrackedID != int(tracked.ID) {
 		t.Errorf("expected the tracked file to be the loser, got %+v", loser)

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -192,6 +193,125 @@ func TestRenameWorkflow_Movies_ScanThenApply_EndToEnd(t *testing.T) {
 	}
 	if item.TMDBID != 453 || item.Title != "A Beautiful Mind" {
 		t.Errorf("unexpected library item: %+v", item)
+	}
+	wantDest := filepath.Join(root, "A Beautiful Mind [tmdbid-453]", "A Beautiful Mind [tmdbid-453].mkv")
+	if item.FilePath != wantDest {
+		t.Errorf("expected the Jellyfin/Emby-standard naming preset applied by default, wanted %q, got %q", wantDest, item.FilePath)
+	}
+	if _, err := os.Stat(wantDest); err != nil {
+		t.Errorf("expected the file to actually be renamed on disk, got: %v", err)
+	}
+}
+
+// TestRenameWorkflow_Movies_LegacyPreset_ScanThenApply_EndToEnd proves the
+// naming-preset setting actually changes ApplyLibrary's on-disk behavior —
+// Legacy keeps a bare "Title (Year)" folder/file, no tmdbid tag.
+func TestRenameWorkflow_Movies_LegacyPreset_ScanThenApply_EndToEnd(t *testing.T) {
+	root := t.TempDir()
+	orphanDir := filepath.Join(root, "A.Beautiful.Mind.2001.1080p.BluRay.x264-GROUP")
+	if err := os.Mkdir(orphanDir, 0o755); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(orphanDir, "movie.mkv"), []byte("fake video data"), 0o644); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	fakeTMDB := httptest.NewServer(fakeTMDBSearchHandler(t, 453, "A Beautiful Mind"))
+	defer fakeTMDB.Close()
+
+	connStore, propStore, allowStore, settingsStore, grabsStore, libStore := testStores(t)
+	ctx := context.Background()
+	if err := connStore.Upsert(ctx, "tmdb", fakeTMDB.URL, "test-key"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if err := settingsStore.Set(ctx, moviesLibraryRootFolderKey, root); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	srv := httptest.NewServer(NewMux(testHTTPClient(), connStore, propStore, allowStore, testProber(t), settingsStore, grabsStore, libStore))
+	defer srv.Close()
+
+	presetBody, _ := json.Marshal(namingPresetRequest{Preset: "legacy"})
+	presetResp, err := http.NewRequest(http.MethodPut, srv.URL+"/api/modes/movies/naming-preset", bytes.NewReader(presetBody))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, err := http.DefaultClient.Do(presetResp); err != nil {
+		t.Fatalf("naming-preset PUT failed: %v", err)
+	}
+
+	scanResp, err := http.Post(srv.URL+"/api/modes/movies/rename/scan", "application/json", nil)
+	if err != nil {
+		t.Fatalf("scan POST failed: %v", err)
+	}
+	defer scanResp.Body.Close()
+	var scanned []proposals.Proposal
+	if err := json.NewDecoder(scanResp.Body).Decode(&scanned); err != nil {
+		t.Fatalf("decoding scan response: %v", err)
+	}
+	if len(scanned) != 1 {
+		t.Fatalf("unexpected scan result: %+v", scanned)
+	}
+
+	applyResp, err := http.Post(
+		srv.URL+"/api/proposals/"+strconv.FormatInt(scanned[0].ID, 10)+"/apply", "application/json", nil)
+	if err != nil {
+		t.Fatalf("apply POST failed: %v", err)
+	}
+	defer applyResp.Body.Close()
+	var applied proposals.Proposal
+	if err := json.NewDecoder(applyResp.Body).Decode(&applied); err != nil {
+		t.Fatalf("decoding apply response: %v", err)
+	}
+
+	item, err := libStore.Get(ctx, int64(applied.TrackedID))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	wantDest := filepath.Join(root, "A Beautiful Mind", "A Beautiful Mind.mkv")
+	if item.FilePath != wantDest {
+		t.Errorf("expected the legacy naming preset (no tmdbid tag), wanted %q, got %q", wantDest, item.FilePath)
+	}
+}
+
+func TestGetNamingPresetHandler_DefaultsToJellyfin(t *testing.T) {
+	connStore, propStore, allowStore, settingsStore, grabsStore, libStore := testStores(t)
+	srv := httptest.NewServer(NewMux(testHTTPClient(), connStore, propStore, allowStore, testProber(t), settingsStore, grabsStore, libStore))
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/api/modes/movies/naming-preset")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	var got namingPresetResponse
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decoding response: %v", err)
+	}
+	if got.Preset != "jellyfin" {
+		t.Errorf("expected default preset %q, got %q", "jellyfin", got.Preset)
+	}
+}
+
+func TestPutNamingPresetHandler_RejectsInvalidPreset(t *testing.T) {
+	connStore, propStore, allowStore, settingsStore, grabsStore, libStore := testStores(t)
+	srv := httptest.NewServer(NewMux(testHTTPClient(), connStore, propStore, allowStore, testProber(t), settingsStore, grabsStore, libStore))
+	defer srv.Close()
+
+	body, _ := json.Marshal(namingPresetRequest{Preset: "bogus"})
+	req, err := http.NewRequest(http.MethodPut, srv.URL+"/api/modes/movies/naming-preset", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 for an invalid preset, got %d", resp.StatusCode)
 	}
 }
 

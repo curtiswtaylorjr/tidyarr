@@ -88,10 +88,15 @@ func renameScanHandler(httpClient *http.Client, connStore *connections.Store, se
 				http.Error(w, rpErr.Error(), http.StatusInternalServerError)
 				return
 			}
+			preset, presetErr := resolveNamingPreset(ctx, settingsStore, m)
+			if presetErr != nil {
+				http.Error(w, presetErr.Error(), http.StatusInternalServerError)
+				return
+			}
 			if m == mode.Movies {
-				found, err = rename.ScanLibrary(ctx, sess, libStore, rootPath)
+				found, err = rename.ScanLibrary(ctx, sess, libStore, rootPath, preset)
 			} else {
-				found, err = rename.ScanLibrarySeries(ctx, sess, libStore, rootPath)
+				found, err = rename.ScanLibrarySeries(ctx, sess, libStore, rootPath, preset)
 			}
 		} else {
 			found, err = rename.Scan(ctx, sess)

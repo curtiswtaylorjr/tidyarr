@@ -75,11 +75,19 @@ type Proposal struct {
 	TMDBID         int       `json:"tmdbId,omitempty"`
 	// SeasonNumber/EpisodeNumber are Series-only — a season-pack orphan
 	// produces one proposal per episode file found inside it, never a
-	// bulk proposal, so each needs to record which episode it is. Same
-	// 0/0-sentinel semantics (and the same Specials-season caveat) as
-	// grabs.Grab's fields of the same name.
-	SeasonNumber     int         `json:"seasonNumber,omitempty"`
-	EpisodeNumber    int         `json:"episodeNumber,omitempty"`
+	// bulk proposal, so each needs to record which episode it is. Unlike
+	// grabs.Grab's fields of the same name, no companion "was this
+	// specified" flag is needed here: a Proposal's SeasonNumber always
+	// comes from a successful library.ParseEpisodeFilename call, so 0
+	// unambiguously means the filename itself encoded season 0 (Specials).
+	SeasonNumber  int `json:"seasonNumber,omitempty"`
+	EpisodeNumber int `json:"episodeNumber,omitempty"`
+	// Year is the release year resolved from TMDB at Scan time (Rename
+	// only) — carried through to Apply so RelocateMovie/RelocateEpisode can
+	// include it in the Jellyfin/Emby-style destination name, and so the
+	// library row it produces finally populates library.Item.Year/
+	// library.Series.Year instead of leaving them at their Go zero value.
+	Year             int         `json:"year,omitempty"`
 	QualityProfileID int         `json:"qualityProfileId,omitempty"`
 	Reason           string      `json:"reason,omitempty"`
 	TrackedID        int         `json:"trackedId,omitempty"`
@@ -135,12 +143,12 @@ func (s *Store) ReplacePending(ctx context.Context, m mode.Mode, wf Workflow, fr
 		row := tx.QueryRowContext(ctx, `
 			INSERT INTO proposals (
 				mode, workflow, status, source_name, source_path, root_folder_path,
-				title, tvdb_id, tmdb_id, season_number, episode_number, quality_profile_id, reason, tracked_id,
+				title, tvdb_id, tmdb_id, season_number, episode_number, year, quality_profile_id, reason, tracked_id,
 				foreign_id, item_type, candidates_json, studio, scene_date
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			RETURNING id, created_at
 		`, string(p.Mode), string(p.Workflow), string(p.Status), p.SourceName, p.SourcePath, p.RootFolderPath,
-			p.Title, p.TVDBID, p.TMDBID, p.SeasonNumber, p.EpisodeNumber, p.QualityProfileID, p.Reason, p.TrackedID,
+			p.Title, p.TVDBID, p.TMDBID, p.SeasonNumber, p.EpisodeNumber, p.Year, p.QualityProfileID, p.Reason, p.TrackedID,
 			p.ForeignID, p.ItemType, string(candidatesJSON), p.Studio, p.Date)
 		if err := row.Scan(&p.ID, &p.CreatedAt); err != nil {
 			return nil, fmt.Errorf("inserting proposal for %q: %w", p.SourceName, err)
@@ -158,7 +166,7 @@ func (s *Store) ReplacePending(ctx context.Context, m mode.Mode, wf Workflow, fr
 func (s *Store) List(ctx context.Context, m mode.Mode, wf Workflow) ([]Proposal, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, mode, workflow, status, source_name, source_path, root_folder_path,
-		       title, tvdb_id, tmdb_id, season_number, episode_number, quality_profile_id, reason, tracked_id,
+		       title, tvdb_id, tmdb_id, season_number, episode_number, year, quality_profile_id, reason, tracked_id,
 		       foreign_id, item_type, candidates_json, studio, scene_date,
 		       draft_id, COALESCE(draft_submitted_at, ''),
 		       created_at, COALESCE(applied_at, '')
@@ -188,7 +196,7 @@ func (s *Store) List(ctx context.Context, m mode.Mode, wf Workflow) ([]Proposal,
 func (s *Store) Get(ctx context.Context, id int64) (*Proposal, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT id, mode, workflow, status, source_name, source_path, root_folder_path,
-		       title, tvdb_id, tmdb_id, season_number, episode_number, quality_profile_id, reason, tracked_id,
+		       title, tvdb_id, tmdb_id, season_number, episode_number, year, quality_profile_id, reason, tracked_id,
 		       foreign_id, item_type, candidates_json, studio, scene_date,
 		       draft_id, COALESCE(draft_submitted_at, ''),
 		       created_at, COALESCE(applied_at, '')
@@ -263,7 +271,7 @@ func scanProposal(row rowScanner) (Proposal, error) {
 	var p Proposal
 	var m, wf, status, candidatesJSON string
 	if err := row.Scan(&p.ID, &m, &wf, &status, &p.SourceName, &p.SourcePath, &p.RootFolderPath,
-		&p.Title, &p.TVDBID, &p.TMDBID, &p.SeasonNumber, &p.EpisodeNumber, &p.QualityProfileID, &p.Reason, &p.TrackedID,
+		&p.Title, &p.TVDBID, &p.TMDBID, &p.SeasonNumber, &p.EpisodeNumber, &p.Year, &p.QualityProfileID, &p.Reason, &p.TrackedID,
 		&p.ForeignID, &p.ItemType, &candidatesJSON, &p.Studio, &p.Date,
 		&p.DraftID, &p.DraftSubmittedAt,
 		&p.CreatedAt, &p.AppliedAt); err != nil {

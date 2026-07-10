@@ -85,7 +85,7 @@ func applyProposalHandler(httpClient *http.Client, connStore *connections.Store,
 			return
 		}
 
-		if err := applyByWorkflow(ctx, propStore, libStore, sess, *p, req); err != nil {
+		if err := applyByWorkflow(ctx, settingsStore, propStore, libStore, sess, *p, req); err != nil {
 			if errors.Is(err, errUnknownWorkflow) {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 			} else {
@@ -116,18 +116,28 @@ var errUnknownWorkflow = errors.New("unknown proposal workflow")
 // returns the resulting tracked id the same way Rename's does — so each
 // branch marks the queue accordingly rather than forcing all three through
 // one shared success rule.
-func applyByWorkflow(ctx context.Context, propStore *proposals.Store, libStore *library.Store, sess *mode.Session, p proposals.Proposal, req applyProposalRequest) error {
+func applyByWorkflow(ctx context.Context, settingsStore *settings.Store, propStore *proposals.Store, libStore *library.Store, sess *mode.Session, p proposals.Proposal, req applyProposalRequest) error {
 	switch p.Workflow {
 	case proposals.Rename:
 		switch p.Mode {
-		case mode.Movies:
-			itemID, err := rename.ApplyLibrary(ctx, libStore, p)
+		case mode.Movies, mode.Series:
+			// Apply re-reads whatever preset is currently configured rather
+			// than freezing Scan-time's preset into the Proposal — consistent
+			// with RelocateEpisode already recomputing the destination name
+			// fresh at Apply time from p.Title/season/episode, never from
+			// anything precomputed at Scan.
+			preset, err := resolveNamingPreset(ctx, settingsStore, p.Mode)
 			if err != nil {
 				return err
 			}
-			return propStore.MarkApplied(ctx, p.ID, int(itemID))
-		case mode.Series:
-			episodeID, err := rename.ApplyLibrarySeries(ctx, libStore, p)
+			if p.Mode == mode.Movies {
+				itemID, err := rename.ApplyLibrary(ctx, libStore, p, preset)
+				if err != nil {
+					return err
+				}
+				return propStore.MarkApplied(ctx, p.ID, int(itemID))
+			}
+			episodeID, err := rename.ApplyLibrarySeries(ctx, libStore, p, preset)
 			if err != nil {
 				return err
 			}

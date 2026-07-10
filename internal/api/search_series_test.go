@@ -53,7 +53,7 @@ func TestCheckImportHandler_Series_SingleEpisode_PerformsImport(t *testing.T) {
 	}
 
 	g, err := grabsStore.Create(ctx, grabs.Grab{
-		Mode: mode.Series, Title: "Some Show", TMDBID: 555, SeasonNumber: 1, EpisodeNumber: 1,
+		Mode: mode.Series, Title: "Some Show", TMDBID: 555, SeasonNumber: 1, EpisodeNumber: 1, SeasonSpecified: true,
 		Indexer: "I", Protocol: "torrent", DownloadClient: "qbittorrent",
 		ClientRef: "abc123", RootFolderPath: tvRoot,
 	})
@@ -178,5 +178,156 @@ func TestCheckImportHandler_Series_SeasonPack_PerformsImport(t *testing.T) {
 	}
 	if byEpisode[1].FilePath == "" || byEpisode[2].FilePath == "" {
 		t.Fatalf("expected both episode files resolved, got %+v", episodes)
+	}
+}
+
+// TestCheckImportHandler_Series_SeasonSpecifiedZero_RecordsSpecialsEpisode
+// proves a deliberate Season 0 (Specials) grab whose single resolved file's
+// name doesn't parse via ParseEpisodeFilename still gets recorded — the
+// SeasonSpecified flag distinguishes it from "no season picked at all"
+// (see the next test), which SeasonNumber==0 alone can never do.
+func TestCheckImportHandler_Series_SeasonSpecifiedZero_RecordsSpecialsEpisode(t *testing.T) {
+	dir := t.TempDir()
+	downloadDir := filepath.Join(dir, "downloads", "Some.Show.Special.1080p.WEB-DL.x264-GROUP")
+	tvRoot := filepath.Join(dir, "TV")
+	if err := os.MkdirAll(downloadDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.MkdirAll(tvRoot, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(downloadDir, "special.mkv"), []byte("fake video"), 0o644); err != nil {
+		t.Fatalf("writing file: %v", err)
+	}
+
+	fakeQB := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v2/auth/login":
+			http.SetCookie(w, &http.Cookie{Name: "SID", Value: "test-sid"})
+			w.Write([]byte("Ok."))
+		case "/api/v2/torrents/info":
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`[{"hash":"special1","state":"uploading","progress":1,"content_path":"` + downloadDir + `"}]`))
+		default:
+			t.Fatalf("unexpected request: %s", r.URL.Path)
+		}
+	}))
+	defer fakeQB.Close()
+
+	connStore, propStore, allowStore, settingsStore, grabsStore, libStore := testStores(t)
+	ctx := context.Background()
+	if err := connStore.UpsertWithUsername(ctx, "qbittorrent", fakeQB.URL, "wade", "hunter2"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// SeasonNumber/EpisodeNumber left at 0/0 — genuine Season 0 (Specials),
+	// episode unspecified within it — but SeasonSpecified is true, since the
+	// user deliberately picked season 0.
+	g, err := grabsStore.Create(ctx, grabs.Grab{
+		Mode: mode.Series, Title: "Some Show", TMDBID: 555, SeasonSpecified: true,
+		Indexer: "I", Protocol: "torrent", DownloadClient: "qbittorrent",
+		ClientRef: "special1", RootFolderPath: tvRoot,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	srv := httptest.NewServer(NewMux(testHTTPClient(), connStore, propStore, allowStore, testProber(t), settingsStore, grabsStore, libStore))
+	defer srv.Close()
+
+	resp, err := http.Post(srv.URL+"/api/grabs/"+strconv.FormatInt(g.ID, 10)+"/check-import", "application/json", nil)
+	if err != nil {
+		t.Fatalf("POST failed: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	series, err := libStore.GetSeriesByTMDBID(ctx, 555)
+	if err != nil {
+		t.Fatalf("expected the series to be recorded, got err=%v", err)
+	}
+	episodes, err := libStore.ListEpisodes(ctx, series.ID)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(episodes) != 1 || episodes[0].SeasonNumber != 0 || episodes[0].EpisodeNumber != 0 || episodes[0].FilePath == "" {
+		t.Fatalf("expected a season-0 episode recorded, got %+v", episodes)
+	}
+}
+
+// TestCheckImportHandler_Series_SeasonNotSpecified_UnparseableFilename_SkipsRatherThanMisfiling
+// is the regression guard for the bug the naive "just delete the ==0 check"
+// fix would have introduced: a plain series-wide grab (no season ever
+// picked) whose single resolved file's name doesn't parse must NOT be
+// misfiled as a Season 0/Specials episode — it should simply not be
+// recorded, leaving the file on disk for a human to sort out via Rename.
+func TestCheckImportHandler_Series_SeasonNotSpecified_UnparseableFilename_SkipsRatherThanMisfiling(t *testing.T) {
+	dir := t.TempDir()
+	downloadDir := filepath.Join(dir, "downloads", "Some.Show.Complete.1080p.WEB-DL.x264-GROUP")
+	tvRoot := filepath.Join(dir, "TV")
+	if err := os.MkdirAll(downloadDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.MkdirAll(tvRoot, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(downloadDir, "video.mkv"), []byte("fake video"), 0o644); err != nil {
+		t.Fatalf("writing file: %v", err)
+	}
+
+	fakeQB := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v2/auth/login":
+			http.SetCookie(w, &http.Cookie{Name: "SID", Value: "test-sid"})
+			w.Write([]byte("Ok."))
+		case "/api/v2/torrents/info":
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`[{"hash":"noseasons","state":"uploading","progress":1,"content_path":"` + downloadDir + `"}]`))
+		default:
+			t.Fatalf("unexpected request: %s", r.URL.Path)
+		}
+	}))
+	defer fakeQB.Close()
+
+	connStore, propStore, allowStore, settingsStore, grabsStore, libStore := testStores(t)
+	ctx := context.Background()
+	if err := connStore.UpsertWithUsername(ctx, "qbittorrent", fakeQB.URL, "wade", "hunter2"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// A plain series-wide grab: no season ever picked, SeasonSpecified false.
+	g, err := grabsStore.Create(ctx, grabs.Grab{
+		Mode: mode.Series, Title: "Some Show", TMDBID: 555,
+		Indexer: "I", Protocol: "torrent", DownloadClient: "qbittorrent",
+		ClientRef: "noseasons", RootFolderPath: tvRoot,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	srv := httptest.NewServer(NewMux(testHTTPClient(), connStore, propStore, allowStore, testProber(t), settingsStore, grabsStore, libStore))
+	defer srv.Close()
+
+	resp, err := http.Post(srv.URL+"/api/grabs/"+strconv.FormatInt(g.ID, 10)+"/check-import", "application/json", nil)
+	if err != nil {
+		t.Fatalf("POST failed: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	series, err := libStore.GetSeriesByTMDBID(ctx, 555)
+	if err != nil {
+		t.Fatalf("expected the series to be recorded, got err=%v", err)
+	}
+	episodes, err := libStore.ListEpisodes(ctx, series.ID)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(episodes) != 0 {
+		t.Fatalf("expected no episode recorded for an unparseable file with no season specified, got %+v", episodes)
 	}
 }

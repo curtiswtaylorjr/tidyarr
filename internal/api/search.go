@@ -151,6 +151,7 @@ type grabRequest struct {
 	TVDBID           int    `json:"tvdbId,omitempty"`
 	SeasonNumber     int    `json:"seasonNumber,omitempty"`
 	EpisodeNumber    int    `json:"episodeNumber,omitempty"`
+	SeasonSpecified  bool   `json:"seasonSpecified,omitempty"`
 	QualityProfileID int    `json:"qualityProfileId,omitempty"`
 	Indexer          string `json:"indexer"`
 	Protocol         string `json:"protocol"`
@@ -223,7 +224,7 @@ func grabHandler(httpClient *http.Client, connStore *connections.Store, settings
 
 		created, err := grabsStore.Create(ctx, grabs.Grab{
 			Mode: m, Title: req.Title, TMDBID: req.TMDBID, TVDBID: req.TVDBID,
-			SeasonNumber: req.SeasonNumber, EpisodeNumber: req.EpisodeNumber,
+			SeasonNumber: req.SeasonNumber, EpisodeNumber: req.EpisodeNumber, SeasonSpecified: req.SeasonSpecified,
 			QualityProfileID: req.QualityProfileID, Indexer: req.Indexer, Protocol: req.Protocol,
 			DownloadClient: downloadClient, ClientRef: clientRef, RootFolderPath: req.RootFolderPath,
 		})
@@ -404,8 +405,11 @@ func checkImportHandler(httpClient *http.Client, connStore *connections.Store, s
 						// which season it targeted; a single-episode grab
 						// whose relocated file name didn't carry its own
 						// SxxExx token falls back to what was requested —
-						// only sound when there's exactly one resolved file.
-						if len(videoPaths) != 1 || g.SeasonNumber == 0 {
+						// only sound when there's exactly one resolved file
+						// and a season was actually specified at grab time
+						// (SeasonNumber alone can't tell "Season 0/Specials"
+						// apart from "no season was picked at all").
+						if len(videoPaths) != 1 || !g.SeasonSpecified {
 							continue
 						}
 						season, episode = g.SeasonNumber, g.EpisodeNumber

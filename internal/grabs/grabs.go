@@ -38,12 +38,13 @@ const (
 
 // Grab is one release the user chose to download.
 //
-// SeasonNumber/EpisodeNumber are Series-only: 0/0 means a movie grab (or no
-// episode info); season>0,episode=0 means a season-pack grab; both >0
-// means a single-episode grab. Known limitation: TMDB uses season 0 for
-// "Specials," so a whole-Specials-pack grab is indistinguishable from
-// "unspecified" under this scheme — accepted, not solved, since it's rare
-// enough that nullable columns everywhere aren't worth the complexity.
+// SeasonNumber/EpisodeNumber are Series-only: season>0,episode=0 means a
+// season-pack grab; both >0 means a single-episode grab. TMDB uses season 0
+// for "Specials," which collides with SeasonNumber's Go zero-value for "no
+// season was picked at all" (a plain series-wide grab) — SeasonSpecified is
+// what disambiguates the two: true means SeasonNumber/EpisodeNumber were
+// deliberately supplied (including a genuine Season 0), false means they
+// weren't and must not be trusted as real season/episode data.
 type Grab struct {
 	ID               int64     `json:"id"`
 	Mode             mode.Mode `json:"mode"`
@@ -52,6 +53,7 @@ type Grab struct {
 	TVDBID           int       `json:"tvdbId,omitempty"`
 	SeasonNumber     int       `json:"seasonNumber,omitempty"`
 	EpisodeNumber    int       `json:"episodeNumber,omitempty"`
+	SeasonSpecified  bool      `json:"seasonSpecified,omitempty"`
 	QualityProfileID int       `json:"qualityProfileId,omitempty"`
 	Indexer          string    `json:"indexer"`
 	Protocol         string    `json:"protocol"`
@@ -79,11 +81,11 @@ func New(db *sql.DB) *Store {
 func (s *Store) Create(ctx context.Context, g Grab) (Grab, error) {
 	row := s.db.QueryRowContext(ctx, `
 		INSERT INTO grabs (
-			mode, title, tmdb_id, tvdb_id, season_number, episode_number, quality_profile_id, indexer, protocol,
+			mode, title, tmdb_id, tvdb_id, season_number, episode_number, season_specified, quality_profile_id, indexer, protocol,
 			download_client, client_ref, status, root_folder_path
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		RETURNING id, created_at, updated_at
-	`, string(g.Mode), g.Title, g.TMDBID, g.TVDBID, g.SeasonNumber, g.EpisodeNumber, g.QualityProfileID, g.Indexer, g.Protocol,
+	`, string(g.Mode), g.Title, g.TMDBID, g.TVDBID, g.SeasonNumber, g.EpisodeNumber, g.SeasonSpecified, g.QualityProfileID, g.Indexer, g.Protocol,
 		g.DownloadClient, g.ClientRef, string(Queued), g.RootFolderPath)
 
 	g.Status = Queued
@@ -96,7 +98,7 @@ func (s *Store) Create(ctx context.Context, g Grab) (Grab, error) {
 // List returns every grab for m, most recently created first.
 func (s *Store) List(ctx context.Context, m mode.Mode) ([]Grab, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, mode, title, tmdb_id, tvdb_id, season_number, episode_number, quality_profile_id, indexer, protocol,
+		SELECT id, mode, title, tmdb_id, tvdb_id, season_number, episode_number, season_specified, quality_profile_id, indexer, protocol,
 		       download_client, client_ref, status, root_folder_path, created_at, updated_at
 		FROM grabs WHERE mode = ? ORDER BY created_at DESC
 	`, string(m))
@@ -122,7 +124,7 @@ func (s *Store) List(ctx context.Context, m mode.Mode) ([]Grab, error) {
 // Get returns a single grab by ID.
 func (s *Store) Get(ctx context.Context, id int64) (*Grab, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT id, mode, title, tmdb_id, tvdb_id, season_number, episode_number, quality_profile_id, indexer, protocol,
+		SELECT id, mode, title, tmdb_id, tvdb_id, season_number, episode_number, season_specified, quality_profile_id, indexer, protocol,
 		       download_client, client_ref, status, root_folder_path, created_at, updated_at
 		FROM grabs WHERE id = ?
 	`, id)
@@ -158,7 +160,7 @@ type rowScanner interface {
 func scanGrab(row rowScanner) (Grab, error) {
 	var g Grab
 	var m string
-	err := row.Scan(&g.ID, &m, &g.Title, &g.TMDBID, &g.TVDBID, &g.SeasonNumber, &g.EpisodeNumber, &g.QualityProfileID, &g.Indexer, &g.Protocol,
+	err := row.Scan(&g.ID, &m, &g.Title, &g.TMDBID, &g.TVDBID, &g.SeasonNumber, &g.EpisodeNumber, &g.SeasonSpecified, &g.QualityProfileID, &g.Indexer, &g.Protocol,
 		&g.DownloadClient, &g.ClientRef, &g.Status, &g.RootFolderPath, &g.CreatedAt, &g.UpdatedAt)
 	g.Mode = mode.Mode(m)
 	return g, err

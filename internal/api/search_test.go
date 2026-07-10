@@ -157,6 +157,43 @@ func TestGrabHandler_Torrent_SendsToQBittorrentAndRecordsGrab(t *testing.T) {
 	}
 }
 
+// TestGrabHandler_SeasonSpecified_RoundTrips proves seasonSpecified survives
+// the POST body -> grabsStore.Create round trip — this flag is what lets
+// checkImportHandler tell a deliberate Season 0 (Specials) grab apart from a
+// plain series-wide grab with no season picked at all (see search_series_test.go).
+func TestGrabHandler_SeasonSpecified_RoundTrips(t *testing.T) {
+	fakeQB := fakeQBittorrent(t, func(r *http.Request) {})
+
+	connStore, propStore, allowStore, settingsStore, grabsStore, libStore := testStores(t)
+	ctx := context.Background()
+	if err := connStore.UpsertWithUsername(ctx, "qbittorrent", fakeQB.URL, "wade", "hunter2"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	srv := httptest.NewServer(NewMux(testHTTPClient(), connStore, propStore, allowStore, testProber(t), settingsStore, grabsStore, libStore))
+	defer srv.Close()
+
+	body, _ := json.Marshal(grabRequest{
+		Title: "Some Show Special", TMDBID: 555, SeasonNumber: 0, EpisodeNumber: 0, SeasonSpecified: true,
+		Protocol: "torrent", DownloadURL: "magnet:?xt=urn:btih:ABCDEF1234567890abcdef1234567890abcdef12", RootFolderPath: "/tv",
+	})
+	resp, err := http.Post(srv.URL+"/api/modes/series/search/grab", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST failed: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	var g grabs.Grab
+	if err := json.NewDecoder(resp.Body).Decode(&g); err != nil {
+		t.Fatalf("decoding response: %v", err)
+	}
+	if !g.SeasonSpecified {
+		t.Errorf("expected seasonSpecified to round-trip true, got %+v", g)
+	}
+}
+
 func fakeNZBGet(t *testing.T, nzbID int64) *httptest.Server {
 	t.Helper()
 	mux := http.NewServeMux()

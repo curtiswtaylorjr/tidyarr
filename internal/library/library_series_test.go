@@ -239,18 +239,6 @@ func TestStripEpisodeMarker(t *testing.T) {
 	}
 }
 
-func TestSeasonDirNameAndEpisodeFileName(t *testing.T) {
-	if got := SeasonDirName(3); got != "Season 03" {
-		t.Errorf("expected %q, got %q", "Season 03", got)
-	}
-	if got := EpisodeFileName("Show Name", 3, 5, "Episode Title", ".mkv"); got != "Show Name - S03E05 - Episode Title.mkv" {
-		t.Errorf("unexpected file name: %q", got)
-	}
-	if got := EpisodeFileName("Show Name", 3, 5, "", ".mkv"); got != "Show Name - S03E05.mkv" {
-		t.Errorf("unexpected file name with no episode title: %q", got)
-	}
-}
-
 func TestResolveEpisodeVideoFiles_SingleFileAndSeasonPack(t *testing.T) {
 	dir := t.TempDir()
 	singleFile := filepath.Join(dir, "episode.mkv")

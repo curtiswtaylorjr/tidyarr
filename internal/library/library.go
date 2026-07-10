@@ -25,6 +25,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -248,30 +249,87 @@ type UnmappedEntry struct {
 	Path string
 }
 
-// ScanRootFolder lists every entry directly under rootPath that known
-// (keyed by absolute path) doesn't already claim, skipping sidecar files
-// (subtitles, .nfo, thumbnails — see config.SidecarExts, the same filter
-// Rename already applies to Radarr/Sonarr's own unmapped-folder lists).
-// Mode-agnostic by design, so a later Series orphan-episode scan can reuse
-// it unchanged.
+// ScanRootFolder walks rootPath recursively, reporting one UnmappedEntry per
+// "atomic" unit not already claimed by known (keyed by absolute path):
+// either a loose file, or a directory with no real subdirectories of its own
+// (ignoring config.ExcludedDirNames, which are pruned regardless) and no
+// already-known direct children — a movie's wrapping folder, a fresh
+// season-pack release, or an empty placeholder folder, handed whole to
+// ResolveVideoFile/ResolveEpisodeVideoFiles. A directory that doesn't
+// qualify as atomic — because it has a real subdirectory of its own (an
+// organizational "Series Title/" or "Season NN/" folder) or because one of
+// its direct children is already known (a season folder with some episodes
+// tracked and one new file dropped in) — is recursed into instead of
+// reported whole, so content nested arbitrarily deep, or added alongside
+// something already tracked, is still discovered. Skips sidecar files
+// (config.SidecarExts) entirely. Mode-agnostic by design, shared by
+// Rename's and Dedup's Movies/Series orphan scans alike.
 func ScanRootFolder(rootPath string, known map[string]bool) ([]UnmappedEntry, error) {
-	entries, err := os.ReadDir(rootPath)
+	var out []UnmappedEntry
+	err := filepath.WalkDir(rootPath, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if path == rootPath {
+			return nil
+		}
+		if d.IsDir() && config.ExcludedDirNames[strings.ToLower(d.Name())] {
+			return filepath.SkipDir
+		}
+		if !d.IsDir() && config.SidecarExts[strings.ToLower(filepath.Ext(d.Name()))] {
+			return nil
+		}
+		if known[path] {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if d.IsDir() {
+			atomic, err := dirIsLeafEntry(path, known)
+			if err != nil {
+				return nil // unreadable subdir — skip quietly, matches this scan's tolerant style elsewhere
+			}
+			if atomic {
+				out = append(out, UnmappedEntry{Name: d.Name(), Path: path})
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		out = append(out, UnmappedEntry{Name: d.Name(), Path: path})
+		return nil
+	})
 	if err != nil {
 		return nil, fmt.Errorf("reading %s: %w", rootPath, err)
 	}
-
-	var out []UnmappedEntry
-	for _, e := range entries {
-		if config.SidecarExts[strings.ToLower(filepath.Ext(e.Name()))] {
-			continue
-		}
-		path := filepath.Join(rootPath, e.Name())
-		if known[path] {
-			continue
-		}
-		out = append(out, UnmappedEntry{Name: e.Name(), Path: path})
-	}
 	return out, nil
+}
+
+// dirIsLeafEntry reports whether path should be reported as one atomic
+// UnmappedEntry rather than recursed into: none of its direct children are a
+// real subdirectory (config.ExcludedDirNames don't count — they're pruned by
+// the walk regardless, so a bonus-content folder like Sample/ shouldn't stop
+// its parent movie folder from being reported whole), and none of its direct
+// file children are already known (which would mean it's a partially-tracked
+// organizational directory that needs opening up, not a fresh release to
+// hand whole to ResolveVideoFile/ResolveEpisodeVideoFiles).
+func dirIsLeafEntry(path string, known map[string]bool) (bool, error) {
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return false, err
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			if config.ExcludedDirNames[strings.ToLower(e.Name())] {
+				continue
+			}
+			return false, nil
+		}
+		if known[filepath.Join(path, e.Name())] {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 // videoExts are the file extensions ResolveVideoFile treats as playable

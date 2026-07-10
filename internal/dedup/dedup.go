@@ -465,12 +465,11 @@ func ScanLibrary(ctx context.Context, sess *mode.Session, libStore *library.Stor
 	known := make(map[string]bool, len(tracked))
 	for _, t := range tracked {
 		trackedByTMDB[t.TMDBID] = t
+		// Marking just the file path is enough — ScanRootFolder's recursive
+		// walk decides atomicity dynamically from known at whatever depth it
+		// encounters a directory, so it doesn't need the wrapping folder
+		// pre-marked too.
 		known[t.FilePath] = true
-		// A tracked movie typically lives one level deeper than the root
-		// folder scan sees (root/Title (Year)/movie.mkv) — mark the
-		// containing directory known too, or ScanRootFolder would still
-		// report that wrapping folder as unmapped.
-		known[filepath.Dir(t.FilePath)] = true
 	}
 
 	type orphanHit struct {
@@ -649,15 +648,10 @@ func ScanLibrarySeries(ctx context.Context, sess *mode.Session, libStore *librar
 			if ep.FilePath == "" {
 				continue // known from TMDB but not on disk — not a duplicate target
 			}
-			// An organized episode lives two levels below root
-			// (root/Series Title/Season NN/file.ext) — mark the file itself
-			// plus both containing directories known, so ScanRootFolder's
-			// one-level view of root doesn't re-report the series' own
-			// top-level folder as unmapped (same three-level marking
-			// rename.ScanLibrarySeries already does).
+			// Marking just the file path is enough — ScanRootFolder's
+			// recursive walk decides atomicity dynamically from known at
+			// whatever depth it encounters a directory.
 			known[ep.FilePath] = true
-			known[filepath.Dir(ep.FilePath)] = true
-			known[filepath.Dir(filepath.Dir(ep.FilePath))] = true
 			trackedByKey[episodeDedupKey{tmdbID: s.TMDBID, season: ep.SeasonNumber, episode: ep.EpisodeNumber}] = ep
 		}
 	}

@@ -49,7 +49,20 @@ naming convention. Kids/general drift reconciliation for already-tracked
 items (auditing whether a tracked item's classification has since changed)
 is a known v1 simplification neither Movies' nor Series' library-backed
 Rename does yet — new orphans still get classified, just not
-already-tracked items on every Scan), **Purge** (`POST
+already-tracked items on every Scan). Movies/Series' orphan discovery walks
+the filesystem recursively now (`internal/library.ScanRootFolder`), so a new
+season added later, or a new file dropped alongside something already
+tracked, is still found — not masked forever the way a single-level scan
+would. Rename renames Movies/Series files into a configurable naming
+convention on Apply — `GET`/`PUT /api/modes/{movies,series}/naming-preset`
+(`{"preset": "jellyfin"}` or `"legacy"`) — defaulting to a Jellyfin/Emby-
+standard shape (`Title (Year) [tmdbid-N]` folders/files; Movies get real
+renaming for the first time here, not just relocation), with a "legacy"
+option preserving this project's original dash-separated Series
+convention so an already-renamed library's shape never silently changes
+after an upgrade. A file/folder that already matches the active preset is
+never re-proposed, even if it was never tracked (e.g. a library organized
+by hand). **Purge** (`POST
 /api/modes/{movies,series,adult}/purge/scan` matches a per-mode tag
 allowlist, managed via `/api/modes/{mode}/purge/allowlist`, against every
 tracked item's tags — Movies/Series against their own local library tags,

@@ -457,6 +457,7 @@ async function renderSearch(container) {
     await api("/api/modes/" + m + "/search/grab", { method: "POST", body: JSON.stringify({
       title: release.title, tmdbId: picked.tmdbId, tvdbId: picked.tvdbId,
       seasonNumber: picked.seasonNumber || undefined, episodeNumber: picked.episodeNumber || undefined,
+      seasonSpecified: picked.seasonSpecified || false,
       indexer: release.indexer, protocol: release.protocol, downloadUrl: release.downloadUrl,
       rootFolderPath,
     }) });
@@ -468,18 +469,22 @@ async function renderSearch(container) {
   const seasonInput = el("input", { type: "text", placeholder: "Season", style: "max-width:6rem" });
   const episodeInput = el("input", { type: "text", placeholder: "Episode", style: "max-width:6rem" });
 
+  // Season "0" is a deliberate, valid choice (Specials) — checking the
+  // input's raw text for blank, not the parsed number's truthiness, is
+  // what lets "0" and "left blank" mean different things downstream.
   function pickedFromInputs() {
     if (m !== "series") return {};
+    if (seasonInput.value.trim() === "") return {};
     const seasonNumber = parseInt(seasonInput.value, 10) || 0;
     const episodeNumber = parseInt(episodeInput.value, 10) || 0;
-    return seasonNumber ? { seasonNumber, episodeNumber } : {};
+    return { seasonNumber, episodeNumber, seasonSpecified: true };
   }
 
   const searchRow = [queryInput];
   if (m === "series") searchRow.push(seasonInput, episodeInput);
   searchRow.push(el("button", { class: "primary", text: "Search releases", onclick: () => {
     const picked = pickedFromInputs();
-    const query = picked.seasonNumber ? episodeSearchQuery(queryInput.value, picked.seasonNumber, picked.episodeNumber) : queryInput.value;
+    const query = picked.seasonSpecified ? episodeSearchQuery(queryInput.value, picked.seasonNumber, picked.episodeNumber) : queryInput.value;
     runSearch(query, picked);
   } }));
   container.appendChild(el("div", { class: "row" }, searchRow));
@@ -787,6 +792,10 @@ const CONNECTION_SERVICES = ["sonarr", "whisparr", "prowlarr", "qbittorrent", "n
 const AI_PROVIDERS = ["ollama", "openai", "gemini", "anthropic"];
 const QUALITY_TIERS = ["low", "medium", "high", "lossless"];
 const MAX_RESOLUTIONS = [0, 480, 720, 1080, 2160];
+const NAMING_PRESETS = [
+  { value: "jellyfin", label: "Jellyfin/Emby standard (default)" },
+  { value: "legacy", label: "Legacy (SAK's original convention)" },
+];
 
 async function renderSettings(container) {
   container.innerHTML = "";
@@ -801,6 +810,7 @@ async function renderSettings(container) {
   await renderAISettings(container);
   await renderLibrarySettings(container, state.mode);
   await renderQualityPrefs(container);
+  await renderNamingPreset(container);
   await renderKidsRootPath(container);
   await renderSonarrImport(container);
 }
@@ -912,6 +922,33 @@ async function renderQualityPrefs(container) {
   ]));
   fs.appendChild(el("div", { class: "row", style: "margin-top:0.5rem" }, [saveBtn, status]));
   fs.appendChild(el("div", { class: "muted", text: "Tier prefers smaller/more-compressed releases (Low) up to the least-compressed remux/Blu-ray (Lossless) — it never changes what resolution is preferred. Maximum resolution softly prefers at-or-below-cap results, falling back to whatever's available if nothing meets it." }));
+  container.appendChild(fs);
+}
+
+// renderNamingPreset picks the file/folder naming convention Rename applies
+// on Apply (and uses to decide what already looks correctly named, so it
+// isn't re-proposed). No-op for Adult, which has no computed-naming concept.
+async function renderNamingPreset(container) {
+  const m = state.mode;
+  if (m !== "movies" && m !== "series") return;
+
+  const fs = el("fieldset", {}, [el("legend", { text: "File/folder naming (" + MODE_LABELS[m] + ")" })]);
+  let preset = "jellyfin";
+  try { preset = (await api("/api/modes/" + m + "/naming-preset")).preset; } catch (e) {}
+
+  const presetSelect = el("select", {});
+  for (const p of NAMING_PRESETS) presetSelect.appendChild(el("option", { value: p.value, text: p.label, selected: p.value === preset ? "selected" : null }));
+  const status = el("span", { class: "muted" });
+  const saveBtn = el("button", { class: "primary", text: "Save", onclick: async () => {
+    try {
+      await api("/api/modes/" + m + "/naming-preset", { method: "PUT", body: JSON.stringify({ preset: presetSelect.value }) });
+      status.textContent = "saved"; status.className = "muted";
+    } catch (e) { status.textContent = "✗ " + e.message; status.className = "error"; }
+  } });
+
+  fs.appendChild(el("label", {}, [document.createTextNode("Naming convention"), el("div", {}, [presetSelect])]));
+  fs.appendChild(el("div", { class: "row", style: "margin-top:0.5rem" }, [saveBtn, status]));
+  fs.appendChild(el("div", { class: "muted", text: "Jellyfin/Emby standard renames into \"Title (Year) [tmdbid-N]\" folders/files. Legacy keeps this project's original convention, so an already-renamed library's shape never silently changes after an upgrade." }));
   container.appendChild(fs);
 }
 

@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/curtiswtaylorjr/sakms/internal/classify"
@@ -22,11 +23,27 @@ import (
 	"github.com/curtiswtaylorjr/sakms/internal/identify"
 	"github.com/curtiswtaylorjr/sakms/internal/library"
 	"github.com/curtiswtaylorjr/sakms/internal/mode"
+	"github.com/curtiswtaylorjr/sakms/internal/naming"
 	"github.com/curtiswtaylorjr/sakms/internal/place"
 	"github.com/curtiswtaylorjr/sakms/internal/proposals"
 	"github.com/curtiswtaylorjr/sakms/internal/searchterm"
 	"github.com/curtiswtaylorjr/sakms/internal/servarr"
 )
+
+// yearFromReleaseDate parses the release year out of TMDB's normalized
+// "YYYY-MM-DD" ReleaseDate string, returning 0 if it's empty or malformed —
+// kept local to this package rather than shared with internal/dedup, same
+// precedent as internal/library's own private videoExts duplication.
+func yearFromReleaseDate(releaseDate string) int {
+	if len(releaseDate) < 4 {
+		return 0
+	}
+	year, err := strconv.Atoi(releaseDate[:4])
+	if err != nil {
+		return 0
+	}
+	return year
+}
 
 // Scan walks every root folder sess's Servarr app currently reports and
 // produces one proposal per orphaned item: a resolved match ready to
@@ -436,7 +453,7 @@ func Relocate(sourcePath, destRoot string) (string, error) {
 // classified (via AI, using title+overview only, since certification/genre
 // metadata isn't available here without an extra per-item call), just not
 // already-tracked items.
-func ScanLibrary(ctx context.Context, sess *mode.Session, libStore *library.Store, rootFolderPath string) ([]proposals.Proposal, error) {
+func ScanLibrary(ctx context.Context, sess *mode.Session, libStore *library.Store, rootFolderPath string, preset naming.Preset) ([]proposals.Proposal, error) {
 	if sess.TMDB == nil {
 		return nil, fmt.Errorf("tmdb isn't configured yet — add it in Settings first")
 	}
@@ -451,12 +468,11 @@ func ScanLibrary(ctx context.Context, sess *mode.Session, libStore *library.Stor
 	known := make(map[string]bool, len(existing))
 	byTMDB := make(map[int]bool, len(existing))
 	for _, item := range existing {
+		// Marking just the file path is enough — ScanRootFolder's recursive
+		// walk decides atomicity dynamically from known at whatever depth it
+		// encounters a directory, so it doesn't need the wrapping folder
+		// pre-marked too.
 		known[item.FilePath] = true
-		// A tracked movie typically lives one level deeper than the root
-		// folder scan sees (root/Title (Year)/movie.mkv) — mark the
-		// containing directory known too, or ScanRootFolder would still
-		// report that wrapping folder as unmapped.
-		known[filepath.Dir(item.FilePath)] = true
 		byTMDB[item.TMDBID] = true
 	}
 
@@ -474,6 +490,9 @@ func ScanLibrary(ctx context.Context, sess *mode.Session, libStore *library.Stor
 		for _, entry := range entries {
 			if config.SidecarExts[strings.ToLower(filepath.Ext(entry.Name))] {
 				continue
+			}
+			if naming.MatchesMovieSchema(entry.Path, preset) {
+				continue // already organized under the active preset — nothing to propose
 			}
 			out = append(out, proposeOneLibrary(ctx, sess, byTMDB, rootFolderPath, root, entry))
 		}
@@ -525,39 +544,66 @@ func proposeOneLibrary(
 	p.Status = proposals.Pending
 	p.Title = match.Title
 	p.TMDBID = match.ID
+	p.Year = yearFromReleaseDate(match.ReleaseDate)
 	p.RootFolderPath = targetRoot
 	return p
+}
+
+// RelocateMovie moves sourcePath into a preset-formatted wrapping folder
+// under destRoot — Movies' counterpart to RelocateEpisode, giving Movies
+// real renaming behavior for the first time (Relocate alone only ever moves
+// a file, preserving whatever name it already had). If the computed
+// destination already equals sourcePath (the file is already correctly
+// placed and named), this is a no-op — comparing paths up front, rather
+// than always calling os.Rename, avoids place.UniquePath mistaking a file
+// for colliding with itself and needlessly appending a ".2" suffix.
+func RelocateMovie(sourcePath, destRoot, title string, year, tmdbID int, preset naming.Preset) (string, error) {
+	folder := filepath.Join(destRoot, naming.MovieFolderName(preset, title, year, tmdbID))
+	dest := filepath.Join(folder, naming.MovieFileName(preset, title, year, tmdbID, filepath.Ext(sourcePath)))
+	if dest == sourcePath {
+		return dest, nil
+	}
+	if err := os.MkdirAll(folder, 0o755); err != nil {
+		return "", fmt.Errorf("creating %q: %w", folder, err)
+	}
+	unique, err := place.UniquePath(dest, func(p string) bool {
+		_, err := os.Stat(p)
+		return err == nil
+	})
+	if err != nil {
+		return "", err
+	}
+	if err := os.Rename(sourcePath, unique); err != nil {
+		return "", fmt.Errorf("moving %q to %q: %w", sourcePath, unique, err)
+	}
+	return unique, nil
 }
 
 // ApplyLibrary is Rename's Movies-library counterpart to Apply. p must be
 // Pending. Unlike Apply, there's no reconcile-drift case (ScanLibrary never
 // produces one — see its doc comment), so this only ever handles a new
-// orphan: relocate the file into its target root (if needed), resolve the
-// actual video file (Relocate preserves whatever shape the source had — a
-// directory wrapping the real file, or the file itself), then record it
-// directly in libStore — no registration/rescan round trip needed, since
+// orphan: resolve the actual video file (p.SourcePath may be a directory
+// wrapping it, or the file itself), relocate just that file into a
+// preset-formatted folder via RelocateMovie, then record it directly in
+// libStore — no registration/rescan round trip needed, since
 // libStore.Upsert itself IS the "now tracked" state, immediately.
-func ApplyLibrary(ctx context.Context, libStore *library.Store, p proposals.Proposal) (itemID int64, err error) {
+func ApplyLibrary(ctx context.Context, libStore *library.Store, p proposals.Proposal, preset naming.Preset) (itemID int64, err error) {
 	if p.Status != proposals.Pending {
 		return 0, fmt.Errorf("proposal %d is %q, not pending — nothing to apply", p.ID, p.Status)
 	}
 
-	destPath := p.SourcePath
-	if p.SourcePath != "" && filepath.Dir(p.SourcePath) != p.RootFolderPath {
-		moved, err := Relocate(p.SourcePath, p.RootFolderPath)
-		if err != nil {
-			return 0, fmt.Errorf("relocating %q into %q: %w", p.SourcePath, p.RootFolderPath, err)
-		}
-		destPath = moved
-	}
-	videoPath, err := library.ResolveVideoFile(destPath)
+	videoPath, err := library.ResolveVideoFile(p.SourcePath)
 	if err != nil {
-		return 0, fmt.Errorf("resolving the video file under %q: %w", destPath, err)
+		return 0, fmt.Errorf("resolving the video file under %q: %w", p.SourcePath, err)
+	}
+	destPath, err := RelocateMovie(videoPath, p.RootFolderPath, p.Title, p.Year, p.TMDBID, preset)
+	if err != nil {
+		return 0, fmt.Errorf("relocating %q into %q: %w", videoPath, p.RootFolderPath, err)
 	}
 
 	item, err := libStore.Upsert(ctx, library.Item{
-		Mode: mode.Movies, TMDBID: p.TMDBID, Title: p.Title,
-		FilePath: videoPath, RootFolderPath: p.RootFolderPath,
+		Mode: mode.Movies, TMDBID: p.TMDBID, Title: p.Title, Year: p.Year,
+		FilePath: destPath, RootFolderPath: p.RootFolderPath,
 	})
 	if err != nil {
 		return 0, fmt.Errorf("recording %q in the library: %w", p.Title, err)
@@ -583,7 +629,7 @@ type episodeKey struct {
 // One proposal per resolved episode file, never one per season-pack folder
 // — same "surface everything individually" posture ScanLibrary (Movies)
 // and every other workflow already follows.
-func ScanLibrarySeries(ctx context.Context, sess *mode.Session, libStore *library.Store, rootFolderPath string) ([]proposals.Proposal, error) {
+func ScanLibrarySeries(ctx context.Context, sess *mode.Session, libStore *library.Store, rootFolderPath string, preset naming.Preset) ([]proposals.Proposal, error) {
 	if sess.TMDB == nil {
 		return nil, fmt.Errorf("tmdb isn't configured yet — add it in Settings first")
 	}
@@ -607,14 +653,12 @@ func ScanLibrarySeries(ctx context.Context, sess *mode.Session, libStore *librar
 			if ep.FilePath == "" {
 				continue // known from TMDB but not on disk yet — not a duplicate
 			}
-			// An organized episode lives two levels below root
-			// (root/Series Title/Season NN/file.ext) — mark the file itself
-			// plus both containing directories known, so ScanRootFolder's
-			// one-level view of root doesn't re-report the series' own
-			// top-level folder as unmapped.
+			// Marking just the file path is enough — ScanRootFolder's
+			// recursive walk decides atomicity dynamically from known at
+			// whatever depth it encounters a directory, so a new season
+			// added later (or a new file dropped next to this one) is still
+			// discovered rather than masked by pre-marking ancestor dirs.
 			known[ep.FilePath] = true
-			known[filepath.Dir(ep.FilePath)] = true
-			known[filepath.Dir(filepath.Dir(ep.FilePath))] = true
 			tracked[episodeKey{tmdbID: series.TMDBID, season: ep.SeasonNumber, episode: ep.EpisodeNumber}] = true
 		}
 	}
@@ -644,6 +688,9 @@ func ScanLibrarySeries(ctx context.Context, sess *mode.Session, libStore *librar
 				continue
 			}
 			for _, videoPath := range videoFiles {
+				if naming.MatchesSeriesSchema(videoPath, preset) {
+					continue // already organized under the active preset — nothing to propose
+				}
 				out = append(out, proposeOneEpisodeLibrary(ctx, sess, tracked, rootFolderPath, root, videoPath))
 			}
 		}
@@ -713,28 +760,36 @@ func proposeOneEpisodeLibrary(
 	p.Status = proposals.Pending
 	p.Title = match.Title
 	p.TMDBID = match.ID
+	p.Year = yearFromReleaseDate(match.ReleaseDate)
 	p.SeasonNumber = season
 	p.EpisodeNumber = episode
 	p.RootFolderPath = targetRoot
 	return p
 }
 
-// RelocateEpisode moves sourcePath into destRoot/Series Title/Season NN/,
-// naming the destination file via library.EpisodeFileName rather than
-// preserving sourcePath's original basename (unlike Relocate) — an
-// episode's original release name carries no useful organization on its
-// own the way a movie's own wrapping folder often already does, so Series
-// needs Rename to actually impose the season-folder structure. No episode
-// title is threaded through here (proposals.Proposal carries none — see
-// ScanLibrarySeries) — a deliberate v1 simplification; EpisodeFileName
-// handles an empty title by simply omitting that segment.
-func RelocateEpisode(sourcePath, destRoot, seriesTitle string, seasonNumber, episodeNumber int) (string, error) {
-	seasonDir := filepath.Join(destRoot, seriesTitle, library.SeasonDirName(seasonNumber))
+// RelocateEpisode moves sourcePath into a preset-formatted
+// destRoot/Series Folder/Season NN/, naming the destination file via
+// naming.EpisodeFileName rather than preserving sourcePath's original
+// basename (unlike Relocate) — an episode's original release name carries
+// no useful organization on its own the way a movie's own wrapping folder
+// often already does, so Series needs Rename to actually impose the
+// season-folder structure. No episode title is threaded through here
+// (proposals.Proposal carries none — see ScanLibrarySeries) — a deliberate
+// v1 simplification; EpisodeFileName handles an empty title by simply
+// omitting that segment. If the computed destination already equals
+// sourcePath, this is a no-op — same self-collision guard RelocateMovie
+// uses.
+func RelocateEpisode(sourcePath, destRoot, seriesTitle string, seriesYear, tmdbID, seasonNumber, episodeNumber int, preset naming.Preset) (string, error) {
+	seriesFolder := naming.SeriesFolderName(preset, seriesTitle, seriesYear, tmdbID)
+	seasonDir := filepath.Join(destRoot, seriesFolder, naming.SeasonDirName(seasonNumber))
+	dest := filepath.Join(seasonDir, naming.EpisodeFileName(preset, seriesTitle, seasonNumber, episodeNumber, "", filepath.Ext(sourcePath)))
+	if dest == sourcePath {
+		return dest, nil
+	}
+
 	if err := os.MkdirAll(seasonDir, 0o755); err != nil {
 		return "", fmt.Errorf("creating %q: %w", seasonDir, err)
 	}
-
-	dest := filepath.Join(seasonDir, library.EpisodeFileName(seriesTitle, seasonNumber, episodeNumber, "", filepath.Ext(sourcePath)))
 	unique, err := place.UniquePath(dest, func(p string) bool {
 		_, err := os.Stat(p)
 		return err == nil
@@ -755,18 +810,18 @@ func RelocateEpisode(sourcePath, destRoot, seriesTitle string, seasonNumber, epi
 // prior Sonarr import or Scan reporting it as missing) is preserved rather
 // than blanked out, since this Apply call only ever supplies a file path,
 // never episode metadata of its own.
-func ApplyLibrarySeries(ctx context.Context, libStore *library.Store, p proposals.Proposal) (episodeID int64, err error) {
+func ApplyLibrarySeries(ctx context.Context, libStore *library.Store, p proposals.Proposal, preset naming.Preset) (episodeID int64, err error) {
 	if p.Status != proposals.Pending {
 		return 0, fmt.Errorf("proposal %d is %q, not pending — nothing to apply", p.ID, p.Status)
 	}
 
-	moved, err := RelocateEpisode(p.SourcePath, p.RootFolderPath, p.Title, p.SeasonNumber, p.EpisodeNumber)
+	moved, err := RelocateEpisode(p.SourcePath, p.RootFolderPath, p.Title, p.Year, p.TMDBID, p.SeasonNumber, p.EpisodeNumber, preset)
 	if err != nil {
 		return 0, fmt.Errorf("relocating %q: %w", p.SourcePath, err)
 	}
 
 	series, err := libStore.UpsertSeries(ctx, library.Series{
-		TMDBID: p.TMDBID, Title: p.Title, RootFolderPath: p.RootFolderPath,
+		TMDBID: p.TMDBID, Title: p.Title, Year: p.Year, RootFolderPath: p.RootFolderPath,
 	})
 	if err != nil {
 		return 0, fmt.Errorf("recording series %q: %w", p.Title, err)
