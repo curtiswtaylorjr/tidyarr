@@ -1046,3 +1046,40 @@ Verified via `go build/vet/test -race` across the whole module (all green).
 This is the last planned slice of player-rescan-notify — all 5 call-site
 categories (Rename/Purge/Dedup × Movies/Series/Adult, plus grab-import) are
 now wired.
+
+## 2026-07-10 — player-rescan-notify: Phase 4 fix-up (dedup DB-failure gap, Stash-move honesty note)
+
+Two findings from the independent Phase 4 review of the player-rescan-notify
+feature (Slices 1-5, `b0a93e7`..`b2cc6d1`), applied before pushing:
+
+1. **Fixed a real gap**: `dedup.removeLibraryCandidate`'s tracked-loser
+   branch discarded the just-removed file's path when the subsequent
+   `libStore.Delete` (DB row removal) failed — even though `os.Remove` had
+   already committed. `ApplyLibrary` (Movies Dedup) would then drop that
+   iteration's `PathChange` from `changes` entirely, so a rare
+   remove-succeeds-then-DB-delete-fails case would silently leave a phantom
+   entry in any notified player. This was the one place in the whole
+   feature that didn't follow the "capture at the point the os-level
+   mutation lands, regardless of what fails afterward" rule (Slice 4's
+   Critic fix #3) that `purge.ApplyLibrary` and Series dedup already
+   followed correctly. Fixed both `removeLibraryCandidate` (returns
+   `removedPath` alongside a `Delete` error, not `""`) and its caller
+   (appends to `changes` before checking `err`, not after). New regression
+   test `TestApplyLibrary_TrackedLoserDBDeleteFails_StillReportsPhysicalDeletion`
+   forces the DB failure by dropping the `library_tags` table mid-test (no
+   mock `Store` needed) and asserts the physical deletion still surfaces —
+   verified by reverting the fix and confirming the test fails
+   (`got []`) before restoring it.
+2. **Documented a previously-unflagged assumption**: `Session.NotifyPlayers`'s
+   doc comment now states, per the house "unverified assumptions"
+   convention, that a move's `RescanPaths(new)` + `CleanMetadata(old)`
+   sequencing is modeled from Stash's own `CleanMetadata` doc, not
+   confirmed against a live Stash instance — mirroring the honesty note
+   `internal/jellyfin` already carried for the Jellyfin side of the same
+   convention, which had been correctly flagged in Slice 1 but had no
+   Stash-side counterpart until now.
+
+Verified via `go build/vet/test -race` across the whole module (all green).
+Both fixes are inside the feature's existing best-effort envelope — neither
+changes what Apply itself reports to its caller, only what the player
+learns about after the fact.

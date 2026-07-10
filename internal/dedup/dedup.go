@@ -779,11 +779,14 @@ func ApplyLibrary(ctx context.Context, libStore *library.Store, p proposals.Prop
 			continue
 		}
 		removedPath, err := removeLibraryCandidate(ctx, libStore, c)
-		if err != nil {
-			return 0, changes, fmt.Errorf("removing %s: %w", c.Path, err)
-		}
+		// Capture the committed physical deletion before checking err — the
+		// file can already be gone even when the subsequent DB row deletion
+		// fails, and NotifyPlayers must still learn about it (Critic fix #3).
 		if removedPath != "" {
 			changes = append(changes, mode.PathChange{Path: removedPath, Kind: mode.Deleted})
+		}
+		if err != nil {
+			return 0, changes, fmt.Errorf("removing %s: %w", c.Path, err)
 		}
 	}
 
@@ -831,7 +834,13 @@ func removeLibraryCandidate(ctx context.Context, libStore *library.Store, c prop
 		removedPath = item.FilePath
 	}
 	if err := libStore.Delete(ctx, int64(c.TrackedID)); err != nil {
-		return "", err
+		// The file is already physically gone (os.Remove above succeeded) even
+		// though the DB row deletion failed — return removedPath alongside the
+		// error so the caller still reports the committed deletion to
+		// NotifyPlayers, matching purge.ApplyLibrary's sibling behavior and the
+		// "capture at the point the os-level mutation lands" rule used
+		// throughout this feature (Critic fix #3).
+		return removedPath, err
 	}
 	return removedPath, nil
 }

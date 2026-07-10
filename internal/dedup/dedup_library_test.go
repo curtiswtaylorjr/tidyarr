@@ -298,6 +298,61 @@ func TestApplyLibrary_TrackedLoserChangeUsesLibraryItemPathNotCandidatePath(t *t
 	}
 }
 
+// TestApplyLibrary_TrackedLoserDBDeleteFails_StillReportsPhysicalDeletion
+// proves the fix for the Phase-4 code-review finding: if os.Remove succeeds
+// but the subsequent libStore.Delete (DB row removal) fails, the physically
+// committed file deletion must still surface in changes — mirroring
+// purge.ApplyLibrary's sibling behavior and the "capture at the point the
+// os-level mutation lands" rule (Critic fix #3) used throughout this
+// feature. Without the fix, removeLibraryCandidate discarded removedPath on
+// this error path, silently leaving a phantom entry in any notified player.
+func TestApplyLibrary_TrackedLoserDBDeleteFails_StillReportsPhysicalDeletion(t *testing.T) {
+	dir := t.TempDir()
+	trackedFile := writeVideoFile(t, dir, "tracked.mkv", 10)
+	winnerPath := writeVideoFile(t, dir, "winner.mkv", 10)
+
+	sqlDB, err := db.Open(filepath.Join(t.TempDir(), "sakms.db"))
+	if err != nil {
+		t.Fatalf("opening db: %v", err)
+	}
+	t.Cleanup(func() { sqlDB.Close() })
+	libStore := library.New(sqlDB)
+
+	tracked, err := libStore.Upsert(context.Background(), library.Item{
+		Mode: mode.Movies, TMDBID: 42, Title: "Some Movie", FilePath: trackedFile, RootFolderPath: dir,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Force libStore.Delete to fail on its first statement (DELETE FROM
+	// library_tags) while leaving Get/Upsert (which don't touch this table)
+	// working normally — simulates a DB failure strictly after os.Remove has
+	// already committed, without needing a mock Store.
+	if _, err := sqlDB.Exec(`DROP TABLE library_tags`); err != nil {
+		t.Fatalf("dropping library_tags to simulate a DB failure: %v", err)
+	}
+
+	p := proposals.Proposal{
+		ID: 1, Status: proposals.Pending, Title: "Some Movie", TMDBID: 42,
+		RootFolderPath: dir,
+		Candidates: []proposals.Candidate{
+			{Label: "tracked", Path: trackedFile, TrackedID: int(tracked.ID)},
+			{Label: "winner", Path: winnerPath, Winner: true},
+		},
+	}
+	_, changes, err := ApplyLibrary(context.Background(), libStore, p, nil, false)
+	if err == nil {
+		t.Fatal("expected an error from the forced libStore.Delete failure")
+	}
+	if _, statErr := os.Stat(trackedFile); !os.IsNotExist(statErr) {
+		t.Error("expected the loser file to have been physically removed despite the DB error")
+	}
+	if len(changes) != 1 || changes[0].Path != trackedFile || changes[0].Kind != mode.Deleted {
+		t.Errorf("expected the committed physical deletion to still be reported as a Deleted PathChange for %q, got %+v", trackedFile, changes)
+	}
+}
+
 func TestApplyLibrary_KeepAll_NoMutation(t *testing.T) {
 	libStore := newTestLibraryStore(t)
 	tracked, err := libStore.Upsert(context.Background(), library.Item{

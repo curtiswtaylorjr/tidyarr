@@ -484,6 +484,15 @@ const playerNotifyTimeout = 8 * time.Second
 // NotifyPlayers finishes — this is inside the best-effort envelope (updating
 // a player's own index, not one of SAK's records), so decoupling from
 // request cancellation is cheap insurance, not a correctness requirement.
+//
+// HONESTY NOTE (house "unverified assumptions" convention): a move is sent
+// as RescanPaths(newPath) followed by CleanMetadata(oldPath) — this is
+// modeled from Stash's own CleanMetadata doc, not confirmed against a live
+// Stash instance, so it is not verified that this ordering never produces a
+// transient duplicate scene between the two calls. A live-Stash check is a
+// reasonable follow-up but is NOT a gate for this feature (see
+// internal/jellyfin's parallel honesty note for the Jellyfin side of the
+// same convention).
 func (s *Session) NotifyPlayers(ctx context.Context, changes []PathChange) {
 	if len(changes) == 0 {
 		return
