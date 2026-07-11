@@ -1357,3 +1357,70 @@ scope the plan's own G6 row describes. JWKS-local token validation,
 considered for `authentik` mode,
 was explicitly deferred (spec §4) and is not built; noted in
 `docs/ROADMAP.md`.
+
+## 2026-07-11 — Four-mode auth strategy switch: Phase 4 fix-up
+
+Independent Phase 4 review — 12 reviewers (architect/security/code-reviewer
+× dedicated passes for slices 1/2/3, consolidated for 4/5), unanimous
+APPROVE across every group, zero blocking findings anywhere. Six small,
+well-scoped issues surfaced across the reviews, applied before push:
+
+1. **Raw internal error strings leaked to clients** (`internal/api/authmode.go`,
+   slice 1) — the new `GET`/`PUT /api/auth/mode` handlers echoed
+   `err.Error()` straight into 500 responses, inconsistent with the
+   `apikey.go` house pattern (log server-side, return a generic
+   `"internal error"` body) already established in this session's earlier
+   API-key-auth Phase 4 fix-up. Fixed identically here.
+2. **No minimum length on an operator-supplied forward secret**
+   (`internal/api/auth.go`, slice 2, MEDIUM) — the auto-generated default
+   is 32 bytes `crypto/rand`, but an operator-supplied secret at first-run
+   setup only got `strings.TrimSpace`, silently accepting e.g. a
+   one-character value that would trivially defeat forward mode's entire
+   authorization gate. Now rejects anything under 16 characters (400),
+   tested by `TestSetup_ForwardTooShortSecretRejected`.
+3. **Missing operator-facing deployment guidance** (`internal/web/static/index.html`,
+   slice 2, LOW) — neither the first-run setup screen nor the Settings
+   panel stated the deployment requirement that the reverse proxy must
+   **set** (overwrite), not append or pass through, the secret header on
+   every forwarded request. Added to both UI surfaces.
+4. **Missing wiring-protection regression test** (`internal/api/forward_test.go`,
+   slice 2) — the forward mux's tests all exercised `NewForwardMux`
+   unwrapped, so nothing regression-guarded "this must stay behind
+   `auth.Middleware`" for the single highest-stakes route in the slice
+   (`POST /api/auth/forward/secret`, which mints/reveals a fresh bypass
+   credential) — a precedent (`TestAuthModeMux_ProtectedByMiddleware`)
+   already existed for the parallel mode-mux and slice 2 simply didn't
+   have its own copy. Added `TestForwardMux_ProtectedByMiddleware`,
+   mirroring that precedent exactly. The wiring itself was never
+   vulnerable (verified correct by the architect review); this only closes
+   a future-regression gap.
+5. **Case-sensitive "Bearer" scheme matching** (`internal/auth/session.go` /
+   `internal/api/auth.go`, slice 3) — `strings.TrimPrefix(header, "Bearer ")`
+   only matched an exact-case prefix; RFC 7235 §2.1 auth-scheme names are
+   case-insensitive, so a client sending a lowercase `bearer` scheme would
+   have its token silently treated as absent. Always failed closed (deny,
+   never a security bug) but was a real interop nit. Extracted a shared
+   `auth.BearerToken(r)` helper (case-insensitive scheme match) and pointed
+   both `AuthentikAuth`'s real check and the status handler's presence-only
+   check at the same function, so there's exactly one implementation of
+   "what counts as a bearer token" rather than two copies that could drift.
+6. **Two stale placeholder tests passing for the wrong reason**
+   (`TestSetup_AuthentikPlaceholderRejected`, `TestPutMode_AuthentikNotAvailableYet_400`,
+   slice 3, MEDIUM) — both dated from slice 1's "authentik mode is a 400
+   placeholder" era and kept passing after slice 3 replaced that
+   placeholder with real handling, but for an entirely different, unstated
+   reason (missing required fields / no configured credentials, not "mode
+   not selectable yet") — a misleading-test-intent hazard the "no dead
+   code / no fake completion" convention specifically guards against.
+   Removed; both scenarios are already covered by correctly-named slice-3
+   tests (`TestSetup_AuthentikMissingFields_400`,
+   `TestPutMode_AuthentikWithoutCreds_400`).
+
+Verified via `go build/vet/test -race` across the whole module (all green,
+fresh testcache). None of the six items were security-blocking on their
+own — every reviewer's verdict was APPROVE or APPROVE WITH NOTES, and the
+two amplification/instance-takeover properties the whole feature exists to
+guarantee (the authentik status endpoint never introspects; an
+unauthenticated request can never reconfigure an already-configured
+instance) were independently re-verified clean by every security reviewer
+across all four review groups.

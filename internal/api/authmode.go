@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"log"
 	"net/http"
 
 	"github.com/curtiswtaylorjr/sakms/internal/auth"
@@ -32,7 +33,8 @@ func getAuthModeHandler(authStore *auth.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		mode, err := authStore.AuthMode(r.Context())
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			log.Printf("auth mode status: %v", err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -77,7 +79,8 @@ func putAuthModeHandler(authStore *auth.Store) http.HandlerFunc {
 		case auth.ModePassword:
 			ok, err := authStore.PasswordConfigured(ctx)
 			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
+				log.Printf("auth mode switch (password precondition): %v", err)
+				http.Error(w, "internal error", http.StatusInternalServerError)
 				return
 			}
 			if !ok {
@@ -87,7 +90,8 @@ func putAuthModeHandler(authStore *auth.Store) http.HandlerFunc {
 		case auth.ModeForward:
 			ok, err := authStore.ForwardConfigured(ctx)
 			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
+				log.Printf("auth mode switch (forward precondition): %v", err)
+				http.Error(w, "internal error", http.StatusInternalServerError)
 				return
 			}
 			if !ok {
@@ -97,7 +101,8 @@ func putAuthModeHandler(authStore *auth.Store) http.HandlerFunc {
 		case auth.ModeAuthentik:
 			ok, err := authStore.AuthentikConfigured(ctx)
 			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
+				log.Printf("auth mode switch (authentik precondition): %v", err)
+				http.Error(w, "internal error", http.StatusInternalServerError)
 				return
 			}
 			if !ok {
@@ -115,7 +120,8 @@ func putAuthModeHandler(authStore *auth.Store) http.HandlerFunc {
 		}
 
 		if err := authStore.SetAuthMode(ctx, req.Mode); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			log.Printf("auth mode switch: %v", err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)

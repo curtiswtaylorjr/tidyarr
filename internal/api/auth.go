@@ -3,11 +3,19 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 
 	"github.com/curtiswtaylorjr/sakms/internal/auth"
 )
+
+// minForwardSecretLen bounds an operator-supplied forward-auth secret
+// (Phase 4 fix-up). It's the entire authorization gate for forward mode, so
+// a one-character value must not be silently accepted the way the
+// crypto/rand-generated default (32 bytes) never would be. Chosen to match
+// a reasonable shared-secret floor, not tied to any particular algorithm.
+const minForwardSecretLen = 16
 
 // NewAuthMux returns the handful of routes that must stay reachable without
 // a session — setup, login, logout, and status — kept on their OWN mux,
@@ -134,9 +142,20 @@ func authSetupHandler(authStore *auth.Store, tokenEnc auth.TokenEncryptor) http.
 					return
 				}
 				rawSecret = generated
-			} else if err := authStore.SetForwardSecret(ctx, rawSecret); err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
+			} else {
+				// Phase 4 fix-up: an operator-supplied secret is the entire
+				// authorization gate for forward mode — unlike the generated
+				// path (32 bytes crypto/rand), nothing else enforces its
+				// strength. Reject anything too short to be a meaningful
+				// shared secret rather than silently accepting e.g. "x".
+				if len(rawSecret) < minForwardSecretLen {
+					http.Error(w, fmt.Sprintf("forwardSecret must be at least %d characters", minForwardSecretLen), http.StatusBadRequest)
+					return
+				}
+				if err := authStore.SetForwardSecret(ctx, rawSecret); err != nil {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+					return
+				}
 			}
 			if err := authStore.SetAuthMode(ctx, auth.ModeForward); err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -294,8 +313,9 @@ func authStatusHandler(authStore *auth.Store, tokenEnc auth.TokenEncryptor) http
 		case auth.ModeAuthentik:
 			// Presence-only (see doc comment above) — deliberately NOT
 			// auth.AuthentikAuth. No store call, no outbound call at all.
-			bearer := strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
-			authenticated = bearer != ""
+			// auth.BearerToken (shared with AuthentikAuth's real check, Phase
+			// 4 fix-up) matches the "Bearer" scheme case-insensitively.
+			authenticated = auth.BearerToken(r) != ""
 		default:
 			authenticated = auth.Authenticated(tokenEnc, r)
 		}

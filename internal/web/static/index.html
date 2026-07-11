@@ -1127,6 +1127,7 @@ async function renderAuthMode(container) {
     el("label", {}, [document.createTextNode("Identity header"), forwardUserHeaderInput]),
     el("label", {}, [document.createTextNode("Secret header"), forwardSecretHeaderInput]),
     el("div", { class: "row", style: "margin-top:0.5rem" }, [forwardHeadersSaveBtn, forwardHeadersStatus]),
+    el("div", { class: "muted", style: "margin-top:0.5rem", text: "Your reverse proxy must SET the secret header on every request it forwards — overwriting any value a client sent, never appending to or passing one through. The secret header is this mode's entire authorization gate; the identity header is informational only and is never trusted on its own." }),
   ]);
 
   // -- authentik: new field group, no §4.1-setup equivalent (this mode
@@ -1353,6 +1354,7 @@ function renderCredentialsGate(container, kind) {
     el("div", { class: "muted", text: "SAK will generate a shared secret and reveal it once below — put it in your reverse proxy's config as the value of the secret header. Header names shown are SAK's defaults; change them later in Settings → Authentication mode." }),
     el("label", {}, [document.createTextNode("Identity header (default)"), forwardUserHeaderInput]),
     el("label", {}, [document.createTextNode("Secret header (default)"), forwardSecretHeaderInput]),
+    el("div", { class: "muted", style: "margin-top:0.5rem", text: "Your reverse proxy must SET the secret header on every request — overwriting any client-supplied value, never appending or passing one through. This header is the entire authorization gate for this mode." }),
   ]);
 
   // -- none: no fields at all --

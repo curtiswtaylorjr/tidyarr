@@ -109,22 +109,13 @@ func TestPutMode_PasswordWithoutHash_400(t *testing.T) {
 	}
 }
 
-func TestPutMode_AuthentikNotAvailableYet_400(t *testing.T) {
-	authStore, _ := testAuthStore(t)
-	srv := httptest.NewServer(NewAuthModeMux(authStore))
-	defer srv.Close()
-
-	body, _ := json.Marshal(authModeRequest{Mode: auth.ModeAuthentik})
-	req, _ := http.NewRequest(http.MethodPut, srv.URL+"/api/auth/mode", bytes.NewReader(body))
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("expected 400 slice-1 placeholder for authentik mode, got %d", resp.StatusCode)
-	}
-}
+// TestPutMode_AuthentikNotAvailableYet_400 was removed (Phase 4 fix-up):
+// dated from slice 1's 400 placeholder for "authentik" mode. Slice 3
+// replaced the placeholder with real G4 precondition handling, so this
+// test kept passing for a different, unstated reason (no configured
+// credentials, not "mode not available yet"). Superseded by
+// TestPutMode_AuthentikWithoutCreds_400 in authentik_test.go, which is the
+// exact same scenario, correctly named and documented.
 
 // TestPutMode_SwitchAwayKeepsConfig covers G4/AC6: switching password ->
 // none -> password must never wipe the password hash — the operator's

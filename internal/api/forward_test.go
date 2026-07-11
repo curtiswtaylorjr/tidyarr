@@ -260,3 +260,27 @@ func TestStatus_ForwardMode_RealCheck(t *testing.T) {
 		t.Error("expected authenticated=false with no secret header presented")
 	}
 }
+
+// TestForwardMux_ProtectedByMiddleware (Phase 4 fix-up) asserts the forward
+// mux itself carries no auth authority — it's cmd/sakms's job to wrap it in
+// auth.Middleware, and an unwrapped instance would let anyone mint or
+// rotate the shared secret with no credential at all. Mirrors
+// TestAuthModeMux_ProtectedByMiddleware's precedent (authmode_test.go),
+// which slice 2 initially shipped without an equivalent for this mux, even
+// though POST /api/auth/forward/secret is the highest-stakes route in the
+// slice (it mints/reveals a fresh bypass credential).
+func TestForwardMux_ProtectedByMiddleware(t *testing.T) {
+	authStore, tokenEnc := testAuthStore(t)
+	protected := auth.Middleware(tokenEnc, authStore, NewForwardMux(authStore))
+	srv := httptest.NewServer(protected)
+	defer srv.Close()
+
+	resp, err := http.Post(srv.URL+"/api/auth/forward/secret", "application/json", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for an unauthenticated request to the protected forward-secret mux, got %d", resp.StatusCode)
+	}
+}

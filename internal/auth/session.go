@@ -275,7 +275,7 @@ func (s *Store) authentikClient(ctx context.Context) (*authentik.Client, error) 
 // store/decrypt fault, via the non-nil error returned by store.authentikClient
 // above).
 func AuthentikAuth(ctx context.Context, store *Store, r *http.Request) (bool, error) {
-	token := strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
+	token := BearerToken(r) // case-insensitive "Bearer" scheme match, per RFC 7235 §2.1 (Phase 4 fix-up)
 	if token == "" {
 		return false, nil // empty/whitespace bearer treated as absent — never introspected (EC7)
 	}
@@ -291,4 +291,20 @@ func AuthentikAuth(ctx context.Context, store *Store, r *http.Request) (bool, er
 		return false, nil // transport/timeout/non-2xx — fail closed via 401 (G5), not 500: Authentik being unreachable isn't a local store fault
 	}
 	return active, nil // active==false → (false, nil), same effect: 401
+}
+
+// BearerToken extracts the token from an "Authorization: Bearer <token>"
+// header, matching the "Bearer" scheme case-insensitively per RFC 7235 §2.1
+// (auth-scheme names are case-insensitive) — plain strings.TrimPrefix only
+// matched an exact-case "Bearer " and would fail closed (deny, not a
+// security bug) on a lowercase "bearer" scheme some clients send. Returns
+// "" (never introspected) if the header is absent or doesn't use the
+// Bearer scheme.
+func BearerToken(r *http.Request) string {
+	const scheme = "Bearer "
+	h := r.Header.Get("Authorization")
+	if len(h) < len(scheme) || !strings.EqualFold(h[:len(scheme)], scheme) {
+		return ""
+	}
+	return strings.TrimSpace(h[len(scheme):])
 }

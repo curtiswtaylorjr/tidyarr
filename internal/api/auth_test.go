@@ -257,21 +257,14 @@ func TestSetup_None_NoCookieNoCreds(t *testing.T) {
 	}
 }
 
-func TestSetup_AuthentikPlaceholderRejected(t *testing.T) {
-	authStore, tokenEnc := testAuthStore(t)
-	srv := httptest.NewServer(NewAuthMux(authStore, tokenEnc))
-	defer srv.Close()
-
-	body, _ := json.Marshal(authCredentialsRequest{Mode: "authentik"})
-	resp, err := http.Post(srv.URL+"/api/auth/setup", "application/json", bytes.NewReader(body))
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("expected 400 slice-1 placeholder for authentik mode, got %d", resp.StatusCode)
-	}
-}
+// TestSetup_AuthentikPlaceholderRejected was removed (Phase 4 fix-up): it
+// dated from slice 1, when "authentik" mode was a 400 placeholder. Slice 3
+// replaced that placeholder with real handling, so this test kept passing
+// but for an entirely different, unstated reason (missing required fields,
+// not "mode not selectable yet") — a misleading-test-intent hazard. Its
+// coverage is now provided by TestSetup_AuthentikMissingFields_400 in
+// authentik_test.go, whose first case ({Mode:"authentik"}, all fields
+// blank) is the exact same scenario, correctly named and asserted.
 
 // TestSetup_ForwardGeneratesSecretAndWritesMode is the first-run bootstrap
 // fix's end-to-end proof (plan §0.7/§2.2b): POST /api/auth/setup with
@@ -366,6 +359,35 @@ func TestSetup_ForwardAcceptsProvidedSecret(t *testing.T) {
 	}
 	if !ok {
 		t.Error("expected the operator-provided secret to verify")
+	}
+}
+
+// TestSetup_ForwardTooShortSecretRejected (Phase 4 fix-up) covers a MEDIUM
+// finding from the security/code-quality reviews: an operator-supplied
+// forward secret had no minimum-length validation, unlike the generated
+// default (32 bytes crypto/rand) — a one-character secret was silently
+// accepted, directly undermining forward mode's entire authorization gate.
+func TestSetup_ForwardTooShortSecretRejected(t *testing.T) {
+	authStore, tokenEnc := testAuthStore(t)
+	srv := httptest.NewServer(NewAuthMux(authStore, tokenEnc))
+	defer srv.Close()
+
+	body, _ := json.Marshal(authCredentialsRequest{Mode: "forward", ForwardSecret: "short"})
+	resp, err := http.Post(srv.URL+"/api/auth/setup", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 for a too-short operator-supplied secret, got %d", resp.StatusCode)
+	}
+
+	configured, err := authStore.Configured(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if configured {
+		t.Error("expected a rejected too-short secret to leave the instance unconfigured, not partially set up")
 	}
 }
 
