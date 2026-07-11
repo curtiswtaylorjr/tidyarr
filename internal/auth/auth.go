@@ -14,6 +14,7 @@ import (
 	"crypto/subtle"
 	"errors"
 	"fmt"
+	"net/http"
 
 	"golang.org/x/crypto/bcrypt"
 
@@ -27,14 +28,11 @@ const (
 )
 
 // The four auth strategies a first-run install can pick from and switch
-// between later (see GET/PUT /api/auth/mode). ModeForward/ModeAuthentik are
-// defined here so the mode-aware Middleware dispatch (session.go) and the
-// setup/switch handlers (internal/api) can reference them starting in slice
-// 1, even though their actual auth logic doesn't land until slices 2/3.
+// between later (see GET/PUT /api/auth/mode).
 const (
 	ModePassword  = "password"
-	ModeForward   = "forward"   // used by slice 2
-	ModeAuthentik = "authentik" // used by slice 3
+	ModeForward   = "forward"
+	ModeAuthentik = "authentik"
 	ModeNone      = "none"
 )
 
@@ -48,6 +46,22 @@ var ErrNotConfigured = errors.New("auth: no login configured yet")
 type Store struct {
 	settings *settings.Store
 
+	// enc decrypts the Authentik client secret (auth_authentik_client_secret_enc,
+	// slice 3) — the secret is encrypted at the API handler layer (which
+	// already holds the same secretStore instance, see internal/api's
+	// authSetupHandler/authentikPutHandler) and stored as ciphertext through
+	// settings.Set; this Store only needs to decrypt it, at the point
+	// AuthentikAuth builds an internal/authentik.Client. It is the same
+	// TokenEncryptor shape session tokens already use (see session.go), not
+	// a second crypto primitive.
+	enc TokenEncryptor
+
+	// httpClient bounds every outbound call this Store makes (Authentik
+	// token introspection, slice 3) — the caller (cmd/sakms) supplies one
+	// wrapping the program's shared outboundTimeout, same convention as
+	// every other external client in this program.
+	httpClient *http.Client
+
 	// envKeyHash/envKeySuffix hold an externally-supplied API key
 	// (SAKMS_API_KEY) for this process's lifetime only — see
 	// UseEnvAPIKey in apikey.go for why these are never persisted.
@@ -56,8 +70,15 @@ type Store struct {
 	envKeySuffix string
 }
 
-func New(settingsStore *settings.Store) *Store {
-	return &Store{settings: settingsStore}
+// New builds a Store. enc decrypts the Authentik client secret (slice 3;
+// pass the same secretStore already used elsewhere for at-rest encryption)
+// and httpClient bounds outbound introspection calls — both additive to
+// slice 1/2's original single-argument constructor, wired once in
+// cmd/sakms/main.go (plan §3.3's sanctioned wiring change). Middleware's own
+// signature is unaffected by this — it still takes its own TokenEncryptor
+// argument for session-cookie validation, orthogonal to this Store-level one.
+func New(settingsStore *settings.Store, enc TokenEncryptor, httpClient *http.Client) *Store {
+	return &Store{settings: settingsStore, enc: enc, httpClient: httpClient}
 }
 
 // Configured reports whether a login has been created yet — the API layer

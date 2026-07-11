@@ -2,7 +2,9 @@ package auth
 
 import (
 	"context"
+	"database/sql"
 	"errors"
+	"net/http"
 	"path/filepath"
 	"testing"
 
@@ -17,7 +19,21 @@ func newTestStore(t *testing.T) *Store {
 		t.Fatalf("opening db: %v", err)
 	}
 	t.Cleanup(func() { sqlDB.Close() })
-	return New(settings.New(sqlDB))
+	return newStoreFromDB(t, sqlDB)
+}
+
+// newStoreFromDB builds a Store around an already-open sqlDB, with a
+// deterministic test encryptor (testEncryptor, session_test.go — the same
+// all-zero-key secrets.Store used everywhere else in this package's tests,
+// so a secret encrypted via testEncryptor(t) in one test and stored via
+// SetAuthentikConfig decrypts correctly through this Store's own internal
+// enc field — see TestMiddleware_AuthentikMode) and a plain default HTTP
+// client (authentik tests point Config.URL directly at an httptest.Server,
+// so no special transport is needed). Shared by newTestStore here and
+// apikey_test.go's newTestStoreWithDB.
+func newStoreFromDB(t *testing.T, sqlDB *sql.DB) *Store {
+	t.Helper()
+	return New(settings.New(sqlDB), testEncryptor(t), http.DefaultClient)
 }
 
 func TestConfigured_FalseBeforeAnyCredentialsSet(t *testing.T) {

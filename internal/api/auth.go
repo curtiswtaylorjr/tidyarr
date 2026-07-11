@@ -29,10 +29,7 @@ type authCredentialsRequest struct {
 	Username string `json:"username"`
 	Password string `json:"password"`
 	// Mode selects the auth strategy at first run — "" means "password"
-	// (today's exact back-compat behavior). "authentik" is accepted here
-	// too (per the plan's first-run bootstrap fix: its config can't go
-	// through a protected endpoint before any credential exists) but
-	// returns a 400 placeholder until slice 3 lands.
+	// (today's exact back-compat behavior).
 	Mode string `json:"mode"`
 	// AcknowledgeInsecure must be true to select Mode "none" — a genuine
 	// no-auth instance requires an explicit, unmissable opt-in (G2).
@@ -43,6 +40,18 @@ type authCredentialsRequest struct {
 	// non-empty, the operator-supplied value is persisted as-is. Ignored
 	// for every other mode.
 	ForwardSecret string `json:"forwardSecret,omitempty"`
+	// AuthentikURL/AuthentikClientID/AuthentikClientSecret are required
+	// together for a "authentik"-mode setup request (plan §0.7/§3.3b) —
+	// carried in this public setup body, not a protected config endpoint,
+	// because no credential exists yet to authenticate against one. This
+	// mode's real audience is scripts/API clients calling the API
+	// directly, not the browser setup wizard (see CLAUDE.md/the slice
+	// plan's §4.1 human decision) — the frontend first-run selector never
+	// offers it, but the API must still accept it. Ignored for every
+	// other mode.
+	AuthentikURL          string `json:"authentikUrl,omitempty"`
+	AuthentikClientID     string `json:"authentikClientId,omitempty"`
+	AuthentikClientSecret string `json:"authentikClientSecret,omitempty"`
 }
 
 // authSetupResponse is the JSON body returned by authSetupHandler for modes
@@ -139,10 +148,38 @@ func authSetupHandler(authStore *auth.Store, tokenEnc auth.TokenEncryptor) http.
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(authSetupResponse{ForwardSecret: rawSecret})
 		case auth.ModeAuthentik:
-			// Slice-1 placeholder (plan §0.7/§1.3): slice 3 replaces this
-			// branch with real first-run config handling carried in this
-			// same public setup body.
-			http.Error(w, "mode not selectable yet", http.StatusBadRequest)
+			// First-run bootstrap (plan §0.7/§3.3b): carried in this same
+			// public setup body, not a protected config endpoint, because no
+			// credential exists yet to authenticate against one. All three
+			// fields are required together — unlike forward mode, SAK has no
+			// server-generated fallback here (the operator already has a
+			// client id/secret from Authentik's own UI).
+			url := strings.TrimSpace(req.AuthentikURL)
+			clientID := strings.TrimSpace(req.AuthentikClientID)
+			clientSecret := req.AuthentikClientSecret
+			if url == "" || clientID == "" || clientSecret == "" {
+				http.Error(w, "authentikUrl, authentikClientId, and authentikClientSecret are all required", http.StatusBadRequest)
+				return
+			}
+			cipher, err := tokenEnc.Encrypt(clientSecret)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			if err := authStore.SetAuthentikConfig(ctx, url, clientID, cipher); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			if err := authStore.SetAuthMode(ctx, auth.ModeAuthentik); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			// No cookie — authentik mode has no cookie concept either. No
+			// secret echoed back (G6): unlike forward mode's
+			// server-generated secret, the operator already holds their own
+			// copy of the client secret from Authentik's own UI, so there's
+			// nothing new to reveal here.
+			w.WriteHeader(http.StatusNoContent)
 		default:
 			http.Error(w, "unknown auth mode", http.StatusBadRequest)
 		}
@@ -216,13 +253,18 @@ type authStatusResponse struct {
 // auth.ForwardAuth directly for a REAL per-request check (plan §3.3's
 // critic-fix: safe here because the check is purely local — a settings
 // read + constant-time compare, no outbound call, no amplification
-// concern — unlike authentik mode's RFC 7662 introspection (slice 3),
-// which will use a presence-only heuristic here instead to avoid handing
-// an unauthenticated caller a free introspection call per request).
-// authentik isn't reachable as the active mode until slice 3 (setup's
-// placeholder branch above refuses to select it), so its status branch
-// lands alongside that slice's helper — the default case below is a safe
-// fallback (today's cookie check) until then.
+// concern). "authentik" is DELIBERATELY DIFFERENT: it uses a presence-only
+// heuristic — true iff a non-empty `Authorization: Bearer <token>` header is
+// present on THIS status request, false otherwise — and NEVER calls
+// auth.AuthentikAuth (which would introspect for real). Calling the real
+// check here would let an unauthenticated caller trigger one genuine
+// outbound introspection request to Authentik per hit on this public,
+// attacker-rate-controlled endpoint — a real amplification vector against
+// Authentik itself (plan §3.3's critic-driven fix, scoped to authentik
+// only: forward's check has no such concern, since it never leaves the
+// process). This is an optimistic signal for boot()-time UI gating only;
+// the real, fully-enforced gate remains auth.Middleware's per-request
+// AuthentikAuth call on every actual protected API request.
 func authStatusHandler(authStore *auth.Store, tokenEnc auth.TokenEncryptor) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
@@ -249,8 +291,12 @@ func authStatusHandler(authStore *auth.Store, tokenEnc auth.TokenEncryptor) http
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
+		case auth.ModeAuthentik:
+			// Presence-only (see doc comment above) — deliberately NOT
+			// auth.AuthentikAuth. No store call, no outbound call at all.
+			bearer := strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
+			authenticated = bearer != ""
 		default:
-			// authentik's presence-only status branch lands in slice 3.
 			authenticated = auth.Authenticated(tokenEnc, r)
 		}
 

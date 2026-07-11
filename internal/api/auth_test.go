@@ -26,7 +26,10 @@ func testAuthStore(t *testing.T) (*auth.Store, *secrets.Store) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	return auth.New(settings.New(sqlDB)), secretStore
+	// secretStore doubles as authStore's Authentik-client-secret decryptor,
+	// mirroring cmd/sakms/main.go's production wiring (the same secretStore
+	// instance is passed to both auth.New and api.NewAuthMux/NewAuthentikMux).
+	return auth.New(settings.New(sqlDB), secretStore, http.DefaultClient), secretStore
 }
 
 func TestAuthSetup_CreatesLoginAndLogsIn(t *testing.T) {

@@ -1,10 +1,14 @@
 package auth
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/curtiswtaylorjr/sakms/internal/authentik"
 )
 
 // CookieName is the session cookie the browser carries on every request
@@ -163,8 +167,7 @@ func Middleware(enc TokenEncryptor, store *Store, next http.Handler) http.Handle
 		case ModeForward:
 			allowed, err = ForwardAuth(store, r)
 		case ModeAuthentik:
-			// slice 3 replaces this with: allowed, err = authentikAuth(store, r)
-			allowed = false
+			allowed, err = AuthentikAuth(r.Context(), store, r)
 		default: // unknown/corrupt mode → fail closed
 			allowed = false
 		}
@@ -216,4 +219,76 @@ func ForwardAuth(store *Store, r *http.Request) (bool, error) {
 	// only, never the authorization gate. Authorization is entirely
 	// determined by the secret-header compare above.
 	return ok, nil
+}
+
+// authentikClient builds an internal/authentik.Client from the stored,
+// decrypted Authentik config — the one place the client secret's ciphertext
+// (auth_authentik_client_secret_enc) is ever decrypted, using this Store's
+// own enc field (see auth.go's New).
+//
+// Return shape distinguishes two different failure classes, matching the
+// rest of this file's convention (see ForwardAuth/VerifyForwardSecret): a
+// nil client with a nil error means "authentik mode is active but has no
+// config yet" — a legitimate not-configured state (mirrors
+// VerifyForwardSecret's "not configured" → false, no error), which
+// AuthentikAuth turns into a plain 401, not a 500. A non-nil error means a
+// genuine internal fault (the settings store itself is broken, or the
+// stored ciphertext no longer decrypts under the current secret key) — that
+// fails closed via Middleware's existing G1 500 path, the same way a broken
+// settings store already does for every other mode.
+func (s *Store) authentikClient(ctx context.Context) (*authentik.Client, error) {
+	url, clientID, cipher, err := s.AuthentikConfig(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if url == "" || clientID == "" || cipher == "" {
+		return nil, nil // not configured — not a store fault
+	}
+	if s.enc == nil {
+		return nil, errors.New("auth: no secret decryptor configured for authentik mode")
+	}
+	secret, err := s.enc.Decrypt(cipher)
+	if err != nil {
+		return nil, err
+	}
+	return authentik.New(authentik.Config{URL: url, ClientID: clientID, ClientSecret: secret}, s.httpClient), nil
+}
+
+// AuthentikAuth is the authentik-mode check: RFC 7662 token introspection
+// against a presented `Authorization: Bearer <token>` header. Exported
+// (mirroring ForwardAuth's naming convention), but — UNLIKE ForwardAuth —
+// must NEVER be called from the public status endpoint's per-request check.
+// ForwardAuth's check is a purely local, cheap subtle.ConstantTimeCompare
+// against a stored hash; this one makes a real outbound HTTP call to
+// Authentik, so calling it from an unauthenticated, attacker-rate-controlled
+// endpoint (the public /api/auth/status) would be a real amplification
+// vector against Authentik itself (plan §3.3's critic-driven fix) — the
+// status endpoint uses a cheaper presence-only heuristic instead (see
+// internal/api's authStatusHandler). This function remains the one true,
+// fully-enforced gate for every actual protected API request via Middleware.
+//
+// AC4/G5: an active token passes; an inactive token, a failed/timed-out
+// introspection call, or an unconfigured instance all deny with a plain
+// 401 (returned error is nil) — Authentik being unreachable is a fact about
+// an EXTERNAL service, not "our own store couldn't tell us" (that
+// distinction is what reserves Middleware's 500 path for a genuine local
+// store/decrypt fault, via the non-nil error returned by store.authentikClient
+// above).
+func AuthentikAuth(ctx context.Context, store *Store, r *http.Request) (bool, error) {
+	token := strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
+	if token == "" {
+		return false, nil // empty/whitespace bearer treated as absent — never introspected (EC7)
+	}
+	client, err := store.authentikClient(ctx)
+	if err != nil {
+		return false, err // genuine store/decrypt fault — fail closed via 500 (G1)
+	}
+	if client == nil {
+		return false, nil // authentik mode active but not configured — fail closed via 401
+	}
+	active, err := client.Introspect(ctx, token)
+	if err != nil {
+		return false, nil // transport/timeout/non-2xx — fail closed via 401 (G5), not 500: Authentik being unreachable isn't a local store fault
+	}
+	return active, nil // active==false → (false, nil), same effect: 401
 }

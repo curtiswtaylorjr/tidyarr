@@ -71,7 +71,12 @@ func run() error {
 	settingsStore := settings.New(sqlDB)
 	grabsStore := grabs.New(sqlDB)
 	libStore := library.New(sqlDB)
-	authStore := auth.New(settingsStore)
+	// secretStore doubles as authStore's Authentik-client-secret decryptor
+	// and the outbound HTTP client is the same outboundTimeout-bounded one
+	// every other external client in this program uses (RFC 7662
+	// introspection, slice 3) — the single additive auth.New wiring change
+	// the plan sanctions (§3.3); Middleware's own signature is untouched.
+	authStore := auth.New(settingsStore, secretStore, &http.Client{Timeout: outboundTimeout})
 
 	// Boot-time API key resolution: SAKMS_API_KEY (if set) always wins over
 	// whatever's persisted, and is never itself persisted (see
@@ -125,13 +130,22 @@ func run() error {
 	forwardMux := api.NewForwardMux(authStore)
 	protectedForward := auth.Middleware(secretStore, authStore, forwardMux)
 
+	// Authentik-mode config (GET status, PUT url/client id/client secret) —
+	// the post-first-run Settings-switch path (plan §3.4), not first-run
+	// bootstrap (that's carried in the public /api/auth/setup body, see
+	// api.authSetupHandler's "authentik" branch). Session-protected like the
+	// other mode-specific muxes above.
+	authentikMux := api.NewAuthentikMux(authStore, secretStore)
+	protectedAuthentik := auth.Middleware(secretStore, authStore, authentikMux)
+
 	top := http.NewServeMux()
 	top.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("ok"))
 	})
 	top.Handle("/api/auth/mode", protectedAuthMode)
-	top.Handle("/api/auth/forward", protectedForward)  // exact match: GET status
-	top.Handle("/api/auth/forward/", protectedForward) // subtree: POST .../secret, PUT .../headers
+	top.Handle("/api/auth/forward", protectedForward)     // exact match: GET status
+	top.Handle("/api/auth/forward/", protectedForward)    // subtree: POST .../secret, PUT .../headers
+	top.Handle("/api/auth/authentik", protectedAuthentik) // exact match: GET status, PUT config
 	top.Handle("/api/auth/", api.NewAuthMux(authStore, secretStore))
 	top.Handle("/api/apikey", protectedAPIKey)  // exact match: GET status
 	top.Handle("/api/apikey/", protectedAPIKey) // subtree: POST .../regenerate

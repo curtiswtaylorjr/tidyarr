@@ -8,7 +8,6 @@ import (
 	"testing"
 
 	"github.com/curtiswtaylorjr/sakms/internal/db"
-	"github.com/curtiswtaylorjr/sakms/internal/settings"
 )
 
 // newTestStoreWithDB is newTestStore (auth_test.go) plus the raw *sql.DB
@@ -21,7 +20,7 @@ func newTestStoreWithDB(t *testing.T) (*Store, *sql.DB) {
 		t.Fatalf("opening db: %v", err)
 	}
 	t.Cleanup(func() { sqlDB.Close() })
-	return New(settings.New(sqlDB)), sqlDB
+	return newStoreFromDB(t, sqlDB), sqlDB
 }
 
 func TestEnsureAPIKey_GeneratesWhenEmpty(t *testing.T) {

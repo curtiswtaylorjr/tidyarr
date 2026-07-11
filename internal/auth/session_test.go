@@ -6,7 +6,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/curtiswtaylorjr/sakms/internal/secrets"
 )
@@ -597,6 +599,207 @@ func TestMiddleware_ForwardMode(t *testing.T) {
 			t.Error("inner handler must not run — a cookie must never authenticate forward mode")
 		}
 	})
+}
+
+// TestMiddleware_AuthentikMode covers AC4/G5: active introspection passes,
+// inactive/error/timeout all fail closed to 401. Also covers Edge Case #7 —
+// an empty/whitespace bearer must be treated as absent and NEVER trigger an
+// introspection call at all (proven here with a call counter; the
+// amplification-avoidance proof for the STATUS endpoint specifically lives
+// in internal/api/authentik_test.go's TestStatus_AuthentikMode_
+// PresenceOnly_NeverIntrospects — this test is about Middleware's own
+// dispatch, a different code path).
+func TestMiddleware_AuthentikMode(t *testing.T) {
+	enc := testEncryptor(t)
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	var introspectionCalls int32
+	var responseMode atomic.Value // "active" | "inactive" | "error"
+	responseMode.Store("active")
+	fakeIntrospect := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&introspectionCalls, 1)
+		switch responseMode.Load().(string) {
+		case "active":
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"active": true}`))
+		case "inactive":
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"active": false}`))
+		case "error":
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+	}))
+	defer fakeIntrospect.Close()
+
+	cipher, err := enc.Encrypt("the-client-secret")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if err := store.SetAuthentikConfig(ctx, fakeIntrospect.URL, "the-client-id", cipher); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if err := store.SetAuthMode(ctx, ModeAuthentik); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	t.Run("active token passes", func(t *testing.T) {
+		responseMode.Store("active")
+		srv, called := middlewareTestServer(t, enc, store)
+		req, _ := http.NewRequest(http.MethodGet, srv.URL+"/", nil)
+		req.Header.Set("Authorization", "Bearer some-valid-token")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("expected 200 for an active token, got %d", resp.StatusCode)
+		}
+		if !*called {
+			t.Error("expected the inner handler to run for an active token")
+		}
+	})
+
+	t.Run("inactive token 401", func(t *testing.T) {
+		responseMode.Store("inactive")
+		srv, called := middlewareTestServer(t, enc, store)
+		req, _ := http.NewRequest(http.MethodGet, srv.URL+"/", nil)
+		req.Header.Set("Authorization", "Bearer some-inactive-token")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("expected 401 for an inactive token, got %d", resp.StatusCode)
+		}
+		if *called {
+			t.Error("inner handler must not run for an inactive token")
+		}
+	})
+
+	t.Run("introspection error 401", func(t *testing.T) {
+		responseMode.Store("error")
+		srv, called := middlewareTestServer(t, enc, store)
+		req, _ := http.NewRequest(http.MethodGet, srv.URL+"/", nil)
+		req.Header.Set("Authorization", "Bearer any-token")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("expected 401 (fail closed) on an introspection server error, got %d", resp.StatusCode)
+		}
+		if *called {
+			t.Error("inner handler must not run when introspection errors")
+		}
+	})
+
+	t.Run("empty bearer 401, never introspected", func(t *testing.T) {
+		responseMode.Store("active") // would pass if (wrongly) introspected
+		before := atomic.LoadInt32(&introspectionCalls)
+		srv, called := middlewareTestServer(t, enc, store)
+		resp, err := http.Get(srv.URL + "/") // no Authorization header at all
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("expected 401 for an absent bearer, got %d", resp.StatusCode)
+		}
+		if *called {
+			t.Error("inner handler must not run for an absent bearer")
+		}
+		if got := atomic.LoadInt32(&introspectionCalls); got != before {
+			t.Errorf("expected an absent bearer to never trigger introspection (EC7), calls went from %d to %d", before, got)
+		}
+		// A whitespace-only bearer ("Authorization: Bearer   ", no real
+		// token) is covered separately by TestAuthentikAuth_
+		// WhitespaceBearer_NeverIntrospected below, calling AuthentikAuth
+		// directly against an in-memory *http.Request — real HTTP transit
+		// strips trailing OWS from header values (RFC 7230), so a request
+		// sent over an actual httptest.NewServer round trip can't
+		// distinguish "Bearer" from "Bearer   " at the wire level the way
+		// an in-process Request can.
+	})
+
+	t.Run("timeout 401", func(t *testing.T) {
+		slowServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			time.Sleep(200 * time.Millisecond)
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"active": true}`))
+		}))
+		defer slowServer.Close()
+
+		slowStore := New(store.settings, enc, &http.Client{Timeout: 20 * time.Millisecond})
+		cipher, err := enc.Encrypt("the-client-secret")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if err := slowStore.SetAuthentikConfig(ctx, slowServer.URL, "the-client-id", cipher); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if err := slowStore.SetAuthMode(ctx, ModeAuthentik); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		srv, called := middlewareTestServer(t, enc, slowStore)
+		req, _ := http.NewRequest(http.MethodGet, srv.URL+"/", nil)
+		req.Header.Set("Authorization", "Bearer any-token")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("expected 401 (fail closed) on a bounded-timeout introspection call, got %d", resp.StatusCode)
+		}
+		if *called {
+			t.Error("inner handler must not run when introspection times out")
+		}
+	})
+}
+
+// TestAuthentikAuth_WhitespaceBearer_NeverIntrospected covers EC7's other
+// half against AuthentikAuth directly (not through a real HTTP round trip —
+// see the comment in TestMiddleware_AuthentikMode's "empty bearer" subtest
+// for why): "Authorization: Bearer   " (whitespace after the scheme, no
+// real token) must be treated as absent, never introspected.
+func TestAuthentikAuth_WhitespaceBearer_NeverIntrospected(t *testing.T) {
+	enc := testEncryptor(t)
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	var introspected bool
+	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		introspected = true
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"active": true}`))
+	}))
+	defer fake.Close()
+
+	cipher, err := enc.Encrypt("the-client-secret")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if err := store.SetAuthentikConfig(ctx, fake.URL, "the-client-id", cipher); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Authorization", "Bearer    ")
+	allowed, err := AuthentikAuth(ctx, store, req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if allowed {
+		t.Error("expected a whitespace-only bearer to be rejected")
+	}
+	if introspected {
+		t.Error("expected a whitespace-only bearer to never trigger introspection (EC7)")
+	}
 }
 
 func TestMiddleware_StaleCookieIgnoredOutsidePassword(t *testing.T) {
