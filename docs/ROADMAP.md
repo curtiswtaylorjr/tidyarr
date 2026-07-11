@@ -149,6 +149,23 @@ slice. Spec at `.omc/autopilot/spec-player-rescan-trigger.md`.
 
 ---
 
+## Recently shipped (outside this backlog)
+
+### API-key auth (X-Api-Key) — shipped 2026-07-10
+A human-directed addition, not a pre-existing item anywhere in this
+backlog. Any `/api/...` route now accepts either the session cookie or an
+`X-Api-Key: <key>` header, so an out-of-process client (a script, a test
+harness) can call SAK without a browser session. Boot resolves the key
+from `SAKMS_API_KEY` (in-memory, stable across restarts, never persisted)
+or auto-generates and persists a SHA-256 hash on first boot, reusing it on
+every later boot; the raw key is shown in full exactly once, from Settings
+→ API Access (`GET /api/apikey` status, `POST /api/apikey/regenerate`,
+refused with 409 while env-managed). `/healthz` and `/api/auth/*` are
+unchanged and still fully public. See `CHANGELOG.md`'s entry of the same
+date for the full design/honesty-framing detail.
+
+---
+
 ## Backlog (not yet started, roughly in discussion order)
 
 ### Frontend redesign

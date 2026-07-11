@@ -1107,3 +1107,76 @@ unconditional-`chown -R`-afterward logic instead. Per this project's own
 script-verification convention, treat this as unverified end-to-end until
 confirmed with `./scripts/docker-dev.sh` (or a manual `docker run -e
 PUID=... -e PGID=...`) against a real container.
+
+## 2026-07-10 — API-key auth (X-Api-Key), additive to session login
+
+Any `/api/...` route now accepts either the existing session cookie or a
+new `X-Api-Key: <key>` header, so an out-of-process client (a script, a
+test harness) can call SAK without carrying a browser session. This is
+additive — `Authenticated` (cookie verification) is byte-for-byte
+unchanged, and `/healthz` + `/api/auth/*` stay exactly as public as
+before.
+
+**Honest framing of what this actually buys (the point isn't "the API
+couldn't be scripted before"):** a script could already authenticate today
+by `POST`ing `/api/auth/login` and reusing the resulting `Set-Cookie` —
+that path was never blocked. The real value of a dedicated API key is (a)
+keeping the master password out of scripts entirely — a leaked script no
+longer means a leaked login credential, (b) independent rotation — a key
+can be regenerated without touching the session password, and (c)
+avoiding session-cookie lifecycle/expiry in a long-running unattended
+script. It is not "the API previously had no way to be scripted."
+
+**Boot model:** `SAKMS_API_KEY`, if set, is hashed in memory and used for
+the lifetime of the process — never persisted, since it's supplied fresh
+by whoever sets the env var on every boot (and SAK's own server1
+deployment wipes its DB roughly every 15 minutes, so persisting it would
+be pointless). If unset, SAK reuses whatever key hash is already
+persisted in Settings; if none exists yet (first boot ever), it
+auto-generates one, logs the full raw value exactly once, and persists
+only its SHA-256 hash (`crypto/subtle.ConstantTimeCompare` at verify time,
+never a plain `==`) plus a last-4 suffix for masked display. The key is
+managed from Settings → API Access — status (masked, source: env /
+settings / none), Generate/Regenerate, and a one-time full-key reveal
+with a copy affordance. Regenerating while `SAKMS_API_KEY` is active is
+refused with 409 (env precedence would make a freshly regenerated
+settings key a silent no-op, and it would be discarded again on the next
+boot anyway) — the UI disables the button in that state instead of
+sending a request that's certain to fail.
+
+**Operational tradeoff, stated plainly:** on an auto-generated (no
+`SAKMS_API_KEY`) deployment, the generated key appears in full in
+container/stdout logs until it's rotated — confirmed live against the
+real binary during backend development, not just inferred from the code.
+Anyone with log access during that window has the key; rotate it (or set
+`SAKMS_API_KEY` instead) if that log surface isn't trusted.
+
+**Critic minor finding #1 (documented, not re-planned):** removing
+`SAKMS_API_KEY` after it was once set does **not** fall back to "no key"
+— it reactivates whatever key hash was last persisted in the settings KV
+(e.g. an earlier auto-generated key from before the env var was ever
+introduced). Env-set always wins verification precedence over the
+persisted settings hash while it's active, but settings persistence
+itself is untouched during that time, so unsetting the env var falls back
+to that stale persisted hash rather than to nothing. This is a real
+operational surprise on a deployment with a persistent database — it
+cannot manifest on the server1 target, whose ~15-minute auto-wipe means
+no stale persisted hash ever survives that long, but it's worth stating
+plainly rather than leaving as a silent gotcha. It is not a
+double-credential bug (only one hash is ever active at a time verifying
+against `X-Api-Key`), just a "which key" surprise. See README's
+`SAKMS_API_KEY` row for the matching operator-facing note.
+
+Backend: `internal/auth/apikey.go` (new — key generation, hashing,
+verify, status), `internal/auth/session.go`'s `Middleware` (cookie first,
+falls back to the header, fails closed with a 500 on a genuine
+settings-store read error rather than ever falling through to allow),
+`internal/api/apikey.go` (new, session-protected `GET /api/apikey` +
+`POST /api/apikey/regenerate` on their own dedicated mux — kept out of
+`NewMux`, whose 20 existing test call sites and "stays unaware auth
+exists" convention are both preserved untouched), `internal/config`
+(`SAKMS_API_KEY` read), `cmd/sakms/main.go` (boot wiring). Frontend: a
+new "API Access" fieldset in Settings (`internal/web/static/index.html`).
+Full `go build/vet/test -race` green throughout, plus live end-to-end
+verification against the real binary for all three boot paths (fresh
+auto-generate, reuse-on-restart, `SAKMS_API_KEY` precedence).

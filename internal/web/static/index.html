@@ -807,6 +807,7 @@ async function renderSettings(container) {
     } }),
   ]));
   await renderConnections(container);
+  await renderAPIAccess(container);
   await renderAISettings(container);
   await renderLibrarySettings(container, state.mode);
   await renderQualityPrefs(container);
@@ -976,6 +977,70 @@ async function renderConnections(container) {
   }
   table.appendChild(tbody);
   fs.appendChild(table);
+  container.appendChild(fs);
+}
+
+// renderAPIAccess is the "API Access" panel: status of the current key
+// (masked, last-4 only — the full key is never re-fetchable after its
+// one-time reveal), generate/regenerate, and an env-managed note when
+// SAKMS_API_KEY governs the active key (mirrors the backend's 409
+// ErrEnvManaged — the button is disabled here so the doomed request is
+// never even sent). Mode-independent: one key for the whole app, same as
+// session auth, so this isn't gated on state.mode like the naming/quality
+// panels above.
+async function renderAPIAccess(container) {
+  const fs = el("fieldset", {}, [el("legend", { text: "API Access" })]);
+  let s = { hasKey: false, source: "none" };
+  try { s = await api("/api/apikey"); } catch (e) { fs.appendChild(fmtErr(e)); }
+
+  const statusLine = el("div", { class: "muted", text: s.hasKey ? ("Current key: ••••" + (s.keySuffix || "")) : "No API key configured yet." });
+  fs.appendChild(statusLine);
+
+  const reveal = el("div", { class: "muted" });
+  const status = el("span", { class: "muted" });
+
+  const envManaged = s.source === "env";
+  const regenBtn = el("button", {
+    class: "primary",
+    text: s.hasKey ? "Regenerate key" : "Generate key",
+    disabled: envManaged ? true : null,
+    onclick: async () => {
+      if (!confirm("This immediately invalidates the current key. Continue?")) return;
+      try {
+        const r = await api("/api/apikey/regenerate", { method: "POST" });
+        reveal.innerHTML = "";
+        // Full key in a readonly, auto-selected input — NOT navigator.clipboard
+        // alone: SAK's primary deployment is plain HTTP on a LAN IP, where
+        // navigator.clipboard is undefined (Clipboard API requires a secure
+        // context) and would throw silently on a key shown exactly once. A
+        // selectable input guarantees manual Ctrl+C always works; the Copy
+        // button is a same-tier convenience, not the only path.
+        const keyInput = el("input", { type: "text", readonly: "readonly", value: r.apiKey, style: "width:100%" });
+        reveal.appendChild(keyInput);
+        keyInput.select();
+        const copyBtn = el("button", {
+          text: "Copy", onclick: () => {
+            keyInput.select();
+            if (navigator.clipboard) navigator.clipboard.writeText(r.apiKey).catch(() => {});
+          },
+        });
+        reveal.appendChild(copyBtn);
+        reveal.appendChild(el("div", { class: "error", text: "Shown once — copy it now; it cannot be retrieved later." }));
+        // Update the masked status line in place rather than re-rendering the
+        // panel (renderSettings() would wipe this one-time reveal off screen).
+        statusLine.textContent = "Current key: ••••" + (r.keySuffix || "");
+        regenBtn.textContent = "Regenerate key";
+        status.textContent = "";
+      } catch (e) { status.textContent = "✗ " + e.message; status.className = "error"; }
+    },
+  });
+
+  fs.appendChild(el("div", { class: "row", style: "margin-top:0.5rem" }, [regenBtn, status]));
+  if (envManaged) {
+    fs.appendChild(el("div", { class: "muted", text: "This key is supplied by the SAKMS_API_KEY environment variable and is managed outside the app. Regenerate is disabled; unset the variable to manage the key here." }));
+  }
+  fs.appendChild(reveal);
+  fs.appendChild(el("div", { class: "muted", text: "Send this key as the X-Api-Key request header to call /api/... without a browser session." }));
   container.appendChild(fs);
 }
 
