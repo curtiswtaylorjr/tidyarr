@@ -1906,3 +1906,54 @@ Server1 deployment (updating `compose.yml` to add the `ai` target + a
 dedicated model volume) deliberately not done as part of this entry — the
 capability was built and verified locally; deploying it is a separate,
 explicit decision.
+
+## 2026-07-11 — Adult filename date-parsing rules (ParseFilename prompt)
+
+Follow-up to the bundled-Ollama entry above, prompted by live-testing
+`ParseFilename` against a real `qwen2.5:1.5b` instance: adult content
+filenames commonly encode release dates as `YY.MM.DD`/`YYYY.MM.DD` right
+after the studio name (e.g. `tushy.24.03.15...` = 2024-03-15), but the
+prompt gave the model no guidance on that convention — it reliably
+returned `year: null` for a clearly-dated filename instead of extracting
+2024.
+
+Added two guidelines to `internal/identify/qwen_prompts.go`'s
+`ParseFilename` prompt: how to read the date convention (including
+2-digit-year expansion to 20XX), and an explicit "don't guess a year
+from general knowledge if no date token exists in the filename" rule.
+The second rule mattered in practice, not just in theory: without it, a
+numberless test filename (`brazzers.scene442.riley.reid.1080p.mp4`) got
+back a confidently wrong, hallucinated year from the model's own
+knowledge of the performer, rather than the correct `null`.
+
+**Methodology note, worth recording:** the first two live-test rounds
+used the plain `ollama run` CLI, which doesn't set Ollama's
+`format=json` structured-output mode — unlike `internal/ollama`'s
+`ChatJSON`, which always does. That mismatch produced misleading
+results (markdown-fenced output, rambling "Explanation:" prose, and an
+apparent regression where a previously-correct extraction came back
+`null`) that did not reproduce once retested with `ollama run --format
+json`, the accurate stand-in for what sakms actually sends. Both cases
+(date present, no date present) came back correct under the accurate
+test. Lesson for next time: match the real request shape before trusting
+a live-model test result, especially before treating an observed
+"regression" as real.
+
+New test: `TestParseFilename_PromptIncludesDateFormatGuidance`
+(`internal/identify/qwen_prompts_test.go`) — asserts the new guidance
+text is present in the generated prompt, same convention as the existing
+parent-folder-context test. `go build`/`go vet`/`go test ./...` clean;
+`gofmt -l` unaffected. Committed locally only, not pushed/deployed —
+Wade's explicit choice, separate decision from the bundled-Ollama entry
+above.
+
+**Also clarified in this same conversation, no code change:** Adult's
+own identification pipeline (`ParseFilename`/`ExtractFromSearch`) was
+never excluded from the bundled-Ollama AI backend — it shares the exact
+same `AIClient`/`ChatJSON` interface and the same seeded connection/model
+as Movies/Series' title-guess fallback and Adult's own kids-classify.
+Per `mode.buildAIClient`'s own doc comment, Adult identification is
+actually the *primary* ("backbone") consumer of this setting, not a
+secondary one — an earlier summary describing the feature as covering
+"Movies/Series" undersold this and was corrected in conversation, not in
+code.
