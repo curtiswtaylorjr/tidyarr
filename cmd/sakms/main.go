@@ -117,11 +117,21 @@ func run() error {
 	authModeMux := api.NewAuthModeMux(authStore)
 	protectedAuthMode := auth.Middleware(secretStore, authStore, authModeMux)
 
+	// Forward-mode config (GET status, POST-generate secret, PUT header
+	// names) — the post-first-run Settings-switch path (plan §2.3), not
+	// first-run bootstrap (that's carried in the public /api/auth/setup
+	// body, see api.authSetupHandler's "forward" branch). Session-protected
+	// like the other mode-specific muxes above.
+	forwardMux := api.NewForwardMux(authStore)
+	protectedForward := auth.Middleware(secretStore, authStore, forwardMux)
+
 	top := http.NewServeMux()
 	top.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("ok"))
 	})
 	top.Handle("/api/auth/mode", protectedAuthMode)
+	top.Handle("/api/auth/forward", protectedForward)  // exact match: GET status
+	top.Handle("/api/auth/forward/", protectedForward) // subtree: POST .../secret, PUT .../headers
 	top.Handle("/api/auth/", api.NewAuthMux(authStore, secretStore))
 	top.Handle("/api/apikey", protectedAPIKey)  // exact match: GET status
 	top.Handle("/api/apikey/", protectedAPIKey) // subtree: POST .../regenerate

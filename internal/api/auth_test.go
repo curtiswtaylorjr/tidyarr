@@ -254,24 +254,115 @@ func TestSetup_None_NoCookieNoCreds(t *testing.T) {
 	}
 }
 
-func TestSetup_ForwardAndAuthentik_PlaceholderRejected(t *testing.T) {
-	for _, mode := range []string{"forward", "authentik"} {
-		mode := mode
-		t.Run(mode, func(t *testing.T) {
-			authStore, tokenEnc := testAuthStore(t)
-			srv := httptest.NewServer(NewAuthMux(authStore, tokenEnc))
-			defer srv.Close()
+func TestSetup_AuthentikPlaceholderRejected(t *testing.T) {
+	authStore, tokenEnc := testAuthStore(t)
+	srv := httptest.NewServer(NewAuthMux(authStore, tokenEnc))
+	defer srv.Close()
 
-			body, _ := json.Marshal(authCredentialsRequest{Mode: mode})
-			resp, err := http.Post(srv.URL+"/api/auth/setup", "application/json", bytes.NewReader(body))
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			defer resp.Body.Close()
-			if resp.StatusCode != http.StatusBadRequest {
-				t.Fatalf("expected 400 slice-1 placeholder for mode %q, got %d", mode, resp.StatusCode)
-			}
-		})
+	body, _ := json.Marshal(authCredentialsRequest{Mode: "authentik"})
+	resp, err := http.Post(srv.URL+"/api/auth/setup", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 slice-1 placeholder for authentik mode, got %d", resp.StatusCode)
+	}
+}
+
+// TestSetup_ForwardGeneratesSecretAndWritesMode is the first-run bootstrap
+// fix's end-to-end proof (plan §0.7/§2.2b): POST /api/auth/setup with
+// mode:"forward" and NO prior credential must succeed through the PUBLIC
+// setup endpoint, generate a shared secret server-side, persist it, write
+// auth_mode atomically, and reveal the generated secret once in the
+// response body — all in one request, with no protected round-trip needed.
+func TestSetup_ForwardGeneratesSecretAndWritesMode(t *testing.T) {
+	authStore, tokenEnc := testAuthStore(t)
+	srv := httptest.NewServer(NewAuthMux(authStore, tokenEnc))
+	defer srv.Close()
+
+	configuredBefore, err := authStore.Configured(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if configuredBefore {
+		t.Fatal("expected a fresh instance to be unconfigured before setup")
+	}
+
+	body, _ := json.Marshal(authCredentialsRequest{Mode: "forward"})
+	resp, err := http.Post(srv.URL+"/api/auth/setup", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 with a generated secret in the body, got %d", resp.StatusCode)
+	}
+	var setupResp authSetupResponse
+	if err := json.NewDecoder(resp.Body).Decode(&setupResp); err != nil {
+		t.Fatalf("decoding response: %v", err)
+	}
+	if setupResp.ForwardSecret == "" {
+		t.Fatal("expected a generated forward secret in the setup response")
+	}
+	if len(resp.Cookies()) != 0 {
+		t.Errorf("expected no session cookie for forward mode, got %+v", resp.Cookies())
+	}
+
+	mode, err := authStore.AuthMode(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if mode != auth.ModeForward {
+		t.Errorf("expected auth_mode to be written as %q, got %q", auth.ModeForward, mode)
+	}
+	configuredAfter, err := authStore.Configured(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !configuredAfter {
+		t.Fatal("expected the instance to report Configured=true after forward-mode setup")
+	}
+
+	ok, err := authStore.VerifyForwardSecret(context.Background(), setupResp.ForwardSecret)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !ok {
+		t.Error("expected the secret returned in the setup response to verify against what was persisted")
+	}
+}
+
+// TestSetup_ForwardAcceptsProvidedSecret covers the "operator supplies
+// their own secret" branch of the same first-run bootstrap path.
+func TestSetup_ForwardAcceptsProvidedSecret(t *testing.T) {
+	authStore, tokenEnc := testAuthStore(t)
+	srv := httptest.NewServer(NewAuthMux(authStore, tokenEnc))
+	defer srv.Close()
+
+	body, _ := json.Marshal(authCredentialsRequest{Mode: "forward", ForwardSecret: "operator-supplied-secret-value"})
+	resp, err := http.Post(srv.URL+"/api/auth/setup", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	var setupResp authSetupResponse
+	if err := json.NewDecoder(resp.Body).Decode(&setupResp); err != nil {
+		t.Fatalf("decoding response: %v", err)
+	}
+	if setupResp.ForwardSecret != "operator-supplied-secret-value" {
+		t.Errorf("expected the provided secret to be echoed back, got %q", setupResp.ForwardSecret)
+	}
+
+	ok, err := authStore.VerifyForwardSecret(context.Background(), "operator-supplied-secret-value")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !ok {
+		t.Error("expected the operator-provided secret to verify")
 	}
 }
 

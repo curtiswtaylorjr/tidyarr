@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 
 	"github.com/curtiswtaylorjr/sakms/internal/auth"
 )
@@ -28,14 +29,29 @@ type authCredentialsRequest struct {
 	Username string `json:"username"`
 	Password string `json:"password"`
 	// Mode selects the auth strategy at first run — "" means "password"
-	// (today's exact back-compat behavior). "forward"/"authentik" are
-	// accepted here too (per the plan's first-run bootstrap fix: their
-	// config can't go through a protected endpoint before any credential
-	// exists) but return a 400 placeholder until slices 2/3 land.
+	// (today's exact back-compat behavior). "authentik" is accepted here
+	// too (per the plan's first-run bootstrap fix: its config can't go
+	// through a protected endpoint before any credential exists) but
+	// returns a 400 placeholder until slice 3 lands.
 	Mode string `json:"mode"`
 	// AcknowledgeInsecure must be true to select Mode "none" — a genuine
 	// no-auth instance requires an explicit, unmissable opt-in (G2).
 	AcknowledgeInsecure bool `json:"acknowledgeInsecure"`
+	// ForwardSecret is optional for a "forward"-mode setup request — if
+	// empty, the handler generates one server-side (simpler UX than
+	// requiring the frontend to do its own crypto-random generation). If
+	// non-empty, the operator-supplied value is persisted as-is. Ignored
+	// for every other mode.
+	ForwardSecret string `json:"forwardSecret,omitempty"`
+}
+
+// authSetupResponse is the JSON body returned by authSetupHandler for modes
+// that must hand something back to the caller — currently just "forward",
+// whose generated-or-accepted shared secret is revealed here ONCE (G6) so
+// the operator can copy it into their reverse-proxy config immediately.
+// Empty for "password"/"none", which still respond with a bare 204.
+type authSetupResponse struct {
+	ForwardSecret string `json:"forwardSecret,omitempty"`
 }
 
 // authSetupHandler creates SAK's one login — refuses once a login
@@ -95,8 +111,35 @@ func authSetupHandler(authStore *auth.Store, tokenEnc auth.TokenEncryptor) http.
 				return
 			}
 			w.WriteHeader(http.StatusNoContent)
-		case auth.ModeForward, auth.ModeAuthentik:
-			// Slice-1 placeholder (plan §0.7/§1.3): slices 2/3 replace this
+		case auth.ModeForward:
+			// First-run bootstrap (plan §0.7/§2.2b): carried in this same
+			// public setup body, not a protected config endpoint, because
+			// no credential exists yet to authenticate against one. Generate
+			// a secret server-side unless the operator supplied their own;
+			// persist it, THEN write auth_mode — atomically, one request.
+			rawSecret := strings.TrimSpace(req.ForwardSecret)
+			if rawSecret == "" {
+				generated, genErr := authStore.GenerateForwardSecret(ctx)
+				if genErr != nil {
+					http.Error(w, genErr.Error(), http.StatusInternalServerError)
+					return
+				}
+				rawSecret = generated
+			} else if err := authStore.SetForwardSecret(ctx, rawSecret); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			if err := authStore.SetAuthMode(ctx, auth.ModeForward); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			// No cookie — forward mode has no cookie concept. The secret is
+			// shown ONCE here (G6); there is no later endpoint that can ever
+			// retrieve it again.
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(authSetupResponse{ForwardSecret: rawSecret})
+		case auth.ModeAuthentik:
+			// Slice-1 placeholder (plan §0.7/§1.3): slice 3 replaces this
 			// branch with real first-run config handling carried in this
 			// same public setup body.
 			http.Error(w, "mode not selectable yet", http.StatusBadRequest)
@@ -169,10 +212,16 @@ type authStatusResponse struct {
 // anything else about the instance — it decides which of "create your
 // login," "log in," or "proceed" to show. Authenticated is computed
 // relative to the active mode: "none" is always true (nothing to check),
-// "password" is today's cookie check unchanged. forward/authentik aren't
-// reachable as the active mode until slices 2/3 (setup's placeholder
-// branch above refuses to select them), so their status branches land
-// alongside those slices' helpers — the default case below is a safe
+// "password" is today's cookie check unchanged, "forward" calls
+// auth.ForwardAuth directly for a REAL per-request check (plan §3.3's
+// critic-fix: safe here because the check is purely local — a settings
+// read + constant-time compare, no outbound call, no amplification
+// concern — unlike authentik mode's RFC 7662 introspection (slice 3),
+// which will use a presence-only heuristic here instead to avoid handing
+// an unauthenticated caller a free introspection call per request).
+// authentik isn't reachable as the active mode until slice 3 (setup's
+// placeholder branch above refuses to select it), so its status branch
+// lands alongside that slice's helper — the default case below is a safe
 // fallback (today's cookie check) until then.
 func authStatusHandler(authStore *auth.Store, tokenEnc auth.TokenEncryptor) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -194,8 +243,14 @@ func authStatusHandler(authStore *auth.Store, tokenEnc auth.TokenEncryptor) http
 			authenticated = true
 		case auth.ModePassword:
 			authenticated = auth.Authenticated(tokenEnc, r)
+		case auth.ModeForward:
+			authenticated, err = auth.ForwardAuth(authStore, r)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
 		default:
-			// forward/authentik status branches land in slices 2/3.
+			// authentik's presence-only status branch lands in slice 3.
 			authenticated = auth.Authenticated(tokenEnc, r)
 		}
 

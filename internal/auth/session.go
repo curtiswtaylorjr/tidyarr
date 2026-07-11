@@ -161,8 +161,7 @@ func Middleware(enc TokenEncryptor, store *Store, next http.Handler) http.Handle
 		case ModePassword:
 			allowed = passwordAuth(enc, r)
 		case ModeForward:
-			// slice 2 replaces this with: allowed, err = forwardAuth(store, r)
-			allowed = false
+			allowed, err = ForwardAuth(store, r)
 		case ModeAuthentik:
 			// slice 3 replaces this with: allowed, err = authentikAuth(store, r)
 			allowed = false
@@ -188,4 +187,33 @@ func Middleware(enc TokenEncryptor, store *Store, next http.Handler) http.Handle
 // helper ever runs.
 func passwordAuth(enc TokenEncryptor, r *http.Request) bool {
 	return Authenticated(enc, r)
+}
+
+// ForwardAuth is the forward-mode check: a constant-time compare of the
+// configured secret header's value against the stored forward-secret hash.
+// Exported (unlike passwordAuth) because internal/api's status handler also
+// calls it directly for a REAL per-request check — per the plan's §3.3
+// critic-fix, this is safe to do from the public status endpoint because
+// the check is purely local (a settings read + subtle.ConstantTimeCompare,
+// no outbound network call), unlike authentik mode's RFC 7662 introspection
+// (slice 3), which carries an amplification concern the status endpoint
+// must avoid by using a presence-only heuristic instead. Calling the exact
+// same function from both Middleware and the status handler guarantees the
+// status result reflects the real gate, not a parallel reimplementation
+// that could drift into a heuristic.
+func ForwardAuth(store *Store, r *http.Request) (bool, error) {
+	_, secretHeader, err := store.ForwardHeaders(r.Context())
+	if err != nil {
+		return false, err
+	}
+	presented := strings.TrimSpace(r.Header.Get(secretHeader))
+	ok, err := store.VerifyForwardSecret(r.Context(), presented)
+	if err != nil {
+		return false, err // fail closed (G1/G5)
+	}
+	// The identity header is intentionally never read here: its value is
+	// cosmetic in single-operator SAK (Scope Risk #2) — presence/logging
+	// only, never the authorization gate. Authorization is entirely
+	// determined by the secret-header compare above.
+	return ok, nil
 }

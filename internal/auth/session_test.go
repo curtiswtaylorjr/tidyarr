@@ -501,6 +501,104 @@ func TestMiddleware_PasswordMode_CookieOrKey(t *testing.T) {
 // non-password mode (where the cookie must be ignored and the request
 // rejected, since no mode-specific helper honors it and no key is
 // presented).
+// TestMiddleware_ForwardMode covers AC3/Edge Case #3 for forward mode: a
+// correct secret header (with an identity header also present) passes;
+// a wrong or absent secret header — even with an identity header present —
+// is rejected; and a valid session cookie never substitutes for the
+// secret header outside password mode.
+func TestMiddleware_ForwardMode(t *testing.T) {
+	enc := testEncryptor(t)
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	raw, err := store.GenerateForwardSecret(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if err := store.SetAuthMode(ctx, ModeForward); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	userHeader, secretHeader, err := store.ForwardHeaders(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	t.Run("correct secret and identity passes", func(t *testing.T) {
+		srv, called := middlewareTestServer(t, enc, store)
+		req, _ := http.NewRequest(http.MethodGet, srv.URL+"/", nil)
+		req.Header.Set(secretHeader, raw)
+		req.Header.Set(userHeader, "wade")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("expected 200, got %d", resp.StatusCode)
+		}
+		if !*called {
+			t.Error("expected the inner handler to run for a correct secret")
+		}
+	})
+
+	t.Run("wrong secret with identity present is rejected", func(t *testing.T) {
+		srv, called := middlewareTestServer(t, enc, store)
+		req, _ := http.NewRequest(http.MethodGet, srv.URL+"/", nil)
+		req.Header.Set(secretHeader, "definitely-the-wrong-secret")
+		req.Header.Set(userHeader, "wade")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("expected 401, got %d", resp.StatusCode)
+		}
+		if *called {
+			t.Error("inner handler must not run for a wrong secret, even with identity present")
+		}
+	})
+
+	t.Run("absent secret with identity present is rejected", func(t *testing.T) {
+		srv, called := middlewareTestServer(t, enc, store)
+		req, _ := http.NewRequest(http.MethodGet, srv.URL+"/", nil)
+		req.Header.Set(userHeader, "wade")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("expected 401, got %d", resp.StatusCode)
+		}
+		if *called {
+			t.Error("inner handler must not run for an absent secret, even with identity present")
+		}
+	})
+
+	t.Run("stale cookie present but wrong secret is rejected", func(t *testing.T) {
+		token, err := IssueToken(enc)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		srv, called := middlewareTestServer(t, enc, store)
+		req, _ := http.NewRequest(http.MethodGet, srv.URL+"/", nil)
+		req.AddCookie(&http.Cookie{Name: CookieName, Value: token})
+		req.Header.Set(secretHeader, "definitely-the-wrong-secret")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("expected a stale cookie to never substitute for a wrong forward secret (401), got %d", resp.StatusCode)
+		}
+		if *called {
+			t.Error("inner handler must not run — a cookie must never authenticate forward mode")
+		}
+	})
+}
+
 func TestMiddleware_StaleCookieIgnoredOutsidePassword(t *testing.T) {
 	enc := testEncryptor(t)
 	store := newTestStore(t)

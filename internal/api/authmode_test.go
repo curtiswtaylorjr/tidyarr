@@ -109,25 +109,20 @@ func TestPutMode_PasswordWithoutHash_400(t *testing.T) {
 	}
 }
 
-func TestPutMode_ForwardAndAuthentik_NotAvailableYet_400(t *testing.T) {
-	for _, mode := range []string{auth.ModeForward, auth.ModeAuthentik} {
-		mode := mode
-		t.Run(mode, func(t *testing.T) {
-			authStore, _ := testAuthStore(t)
-			srv := httptest.NewServer(NewAuthModeMux(authStore))
-			defer srv.Close()
+func TestPutMode_AuthentikNotAvailableYet_400(t *testing.T) {
+	authStore, _ := testAuthStore(t)
+	srv := httptest.NewServer(NewAuthModeMux(authStore))
+	defer srv.Close()
 
-			body, _ := json.Marshal(authModeRequest{Mode: mode})
-			req, _ := http.NewRequest(http.MethodPut, srv.URL+"/api/auth/mode", bytes.NewReader(body))
-			resp, err := http.DefaultClient.Do(req)
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			defer resp.Body.Close()
-			if resp.StatusCode != http.StatusBadRequest {
-				t.Fatalf("expected 400 slice-1 placeholder for mode %q, got %d", mode, resp.StatusCode)
-			}
-		})
+	body, _ := json.Marshal(authModeRequest{Mode: auth.ModeAuthentik})
+	req, _ := http.NewRequest(http.MethodPut, srv.URL+"/api/auth/mode", bytes.NewReader(body))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 slice-1 placeholder for authentik mode, got %d", resp.StatusCode)
 	}
 }
 
