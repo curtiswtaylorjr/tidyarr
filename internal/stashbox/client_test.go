@@ -238,3 +238,77 @@ func TestMe_UnauthorizedKey(t *testing.T) {
 		t.Fatal("expected an error for an unauthorized key")
 	}
 }
+
+func TestSearchPerformer_ParsesResults(t *testing.T) {
+	c, closeSrv := newTestClient(t, Config{APIKey: "k"}, func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Variables struct {
+				Term  string `json:"term"`
+				Limit int    `json:"limit"`
+			} `json:"variables"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if req.Variables.Term != "riley reid" || req.Variables.Limit != 5 {
+			t.Errorf("unexpected variables: %+v", req.Variables)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"searchPerformer":[{"id":"p1","name":"Riley Reid"}]}}`))
+	})
+	defer closeSrv()
+
+	out, err := c.SearchPerformer(context.Background(), "riley reid", 5)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(out) != 1 || out[0].Name != "Riley Reid" || out[0].ID != "p1" {
+		t.Fatalf("unexpected result: %+v", out)
+	}
+}
+
+func TestSearchPerformer_EmptyResults(t *testing.T) {
+	c, closeSrv := newTestClient(t, Config{APIKey: "k"}, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"searchPerformer":[]}}`))
+	})
+	defer closeSrv()
+
+	out, err := c.SearchPerformer(context.Background(), "nobody", 5)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(out) != 0 {
+		t.Fatalf("expected no results, got %+v", out)
+	}
+}
+
+func TestFindStudio_Found(t *testing.T) {
+	c, closeSrv := newTestClient(t, Config{APIKey: "k"}, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"findStudio":{"id":"s1","name":"Tushy"}}}`))
+	})
+	defer closeSrv()
+
+	studio, err := c.FindStudio(context.Background(), "Tushy")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if studio == nil || studio.Name != "Tushy" || studio.ID != "s1" {
+		t.Fatalf("unexpected result: %+v", studio)
+	}
+}
+
+func TestFindStudio_NotFound(t *testing.T) {
+	c, closeSrv := newTestClient(t, Config{APIKey: "k"}, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"findStudio":null}}`))
+	})
+	defer closeSrv()
+
+	studio, err := c.FindStudio(context.Background(), "Nonexistent Studio")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if studio != nil {
+		t.Fatalf("expected nil for no match, got %+v", studio)
+	}
+}

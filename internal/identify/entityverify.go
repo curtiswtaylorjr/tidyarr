@@ -1,0 +1,184 @@
+package identify
+
+import (
+	"context"
+	"strings"
+
+	"github.com/curtiswtaylorjr/sakms/internal/stashbox"
+	"github.com/curtiswtaylorjr/sakms/internal/tpdbrest"
+)
+
+// performerMatchThreshold/studioMatchThreshold: person/studio names are
+// short (often just 1-2 tokens), so the scene-title similarity threshold
+// (0.4, tuned for long multi-word titles) is too loose here — a looser bar
+// risks confidently "correcting" a name to a different, similarly-spelled
+// real performer/studio. Bumped to require most/all tokens to actually
+// overlap.
+const (
+	performerMatchThreshold = 0.6
+	studioMatchThreshold    = 0.6
+)
+
+// normalizeForSearch replaces filename-style separators (dots, dashes,
+// underscores) with spaces before using an AI-extracted guess as a search
+// term. TitleSimilarity's own tokenizer already splits on dots/dashes, but
+// NOT underscores (treated as part of a word character, see similarity.go's
+// wordRe) — and a raw dotted/underscored string sent as a literal search
+// term to StashDB/FansDB/TPDB's own search may not match as well
+// server-side as a clean, space-separated one. A cheap, deterministic
+// transform — not dependent on the AI reliably doing this itself (see
+// ParseFilename's separator-normalization prompt guidance, which this
+// backstops rather than replaces: prompt-level formatting proved unreliable
+// under repeated live testing, see CHANGELOG.md).
+func normalizeForSearch(s string) string {
+	replacer := strings.NewReplacer(".", " ", "-", " ", "_", " ")
+	return strings.Join(strings.Fields(replacer.Replace(s)), " ")
+}
+
+// bestMatch returns the candidate name with the highest TitleSimilarity to
+// guess, if that score clears threshold — or ("", false) if nothing does.
+func bestMatch(guess string, candidateNames []string, threshold float64) (string, bool) {
+	bestName := ""
+	bestScore := 0.0
+	for _, name := range candidateNames {
+		if score := TitleSimilarity(guess, name); score > bestScore {
+			bestScore = score
+			bestName = name
+		}
+	}
+	if bestScore >= threshold {
+		return bestName, true
+	}
+	return "", false
+}
+
+func performerNames(performers []stashbox.Performer) []string {
+	out := make([]string, len(performers))
+	for i, p := range performers {
+		out[i] = p.Name
+	}
+	return out
+}
+
+func tpdbPerformerNames(performers []tpdbrest.Performer) []string {
+	out := make([]string, len(performers))
+	for i, p := range performers {
+		out[i] = p.Name
+	}
+	return out
+}
+
+func tpdbSiteNames(sites []tpdbrest.Site) []string {
+	out := make([]string, len(sites))
+	for i, s := range sites {
+		out[i] = s.Name
+	}
+	return out
+}
+
+// verifyStudio checks an AI-guessed studio name (ParseFilename's raw
+// extraction) against StashDB/FansDB/TPDB and returns the database's own
+// canonical name where a confident match exists — correctness comes from
+// real data instead of hoping the AI formats text perfectly. Falls back to
+// a deterministically-cleaned version of the guess (still better than the
+// AI's raw, possibly dot/underscore-separated text) if nothing matches.
+// Every external call goes through the same per-host throttle every other
+// StashDB/FansDB/TPDB call in this package uses, and the same FansDB
+// fansite-hint gate as searchInternalDBs (see IsFansiteHinted's doc
+// comment) — querying FansDB's mostly-generic-clip catalog for every
+// mainstream file's studio/performers would be both wasteful and prone to
+// spurious corrections.
+func (id *Identifier) verifyStudio(ctx context.Context, guess, stem string) string {
+	if guess == "" {
+		return guess
+	}
+	cleaned := normalizeForSearch(guess)
+
+	boxes := []string{"stashdb"}
+	if IsFansiteHinted(stem, guess) {
+		boxes = append(boxes, "fansdb")
+	}
+	for _, box := range boxes {
+		client := id.Boxes.stashBoxes[box]
+		if client == nil {
+			continue
+		}
+		if err := id.Throttle.Wait(ctx, box); err != nil {
+			return cleaned
+		}
+		studio, err := client.FindStudio(ctx, cleaned)
+		if err != nil {
+			continue // best-effort: try the next box rather than aborting verification
+		}
+		if studio != nil && studio.Name != "" {
+			return studio.Name
+		}
+	}
+
+	if id.Boxes.tpdb != nil {
+		if err := id.Throttle.Wait(ctx, "tpdb"); err != nil {
+			return cleaned
+		}
+		if candidates, err := id.Boxes.tpdb.SearchSites(ctx, cleaned); err == nil {
+			if best, ok := bestMatch(cleaned, tpdbSiteNames(candidates), studioMatchThreshold); ok {
+				return best
+			}
+		}
+	}
+
+	return cleaned
+}
+
+// verifyPerformers is verifyStudio's sibling for the performers array —
+// each guess is independently checked/corrected the same way. studioGuess
+// is the same fansite-hint signal searchInternalDBs and verifyStudio use
+// (the raw AI studio guess, not yet DB-corrected — the hint only cares
+// about keyword presence, not canonical spelling).
+func (id *Identifier) verifyPerformers(ctx context.Context, guesses []string, stem, studioGuess string) []string {
+	out := make([]string, len(guesses))
+	for i, g := range guesses {
+		out[i] = id.verifyOnePerformer(ctx, g, stem, studioGuess)
+	}
+	return out
+}
+
+func (id *Identifier) verifyOnePerformer(ctx context.Context, guess, stem, studioGuess string) string {
+	if guess == "" {
+		return guess
+	}
+	cleaned := normalizeForSearch(guess)
+
+	boxes := []string{"stashdb"}
+	if IsFansiteHinted(stem, studioGuess) {
+		boxes = append(boxes, "fansdb")
+	}
+	for _, box := range boxes {
+		client := id.Boxes.stashBoxes[box]
+		if client == nil {
+			continue
+		}
+		if err := id.Throttle.Wait(ctx, box); err != nil {
+			return cleaned
+		}
+		candidates, err := client.SearchPerformer(ctx, cleaned, 5)
+		if err != nil {
+			continue
+		}
+		if best, ok := bestMatch(cleaned, performerNames(candidates), performerMatchThreshold); ok {
+			return best
+		}
+	}
+
+	if id.Boxes.tpdb != nil {
+		if err := id.Throttle.Wait(ctx, "tpdb"); err != nil {
+			return cleaned
+		}
+		if candidates, err := id.Boxes.tpdb.SearchPerformers(ctx, cleaned); err == nil {
+			if best, ok := bestMatch(cleaned, tpdbPerformerNames(candidates), performerMatchThreshold); ok {
+				return best
+			}
+		}
+	}
+
+	return cleaned
+}

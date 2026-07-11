@@ -53,16 +53,22 @@ type scenesResponse struct {
 	Data []rawScene `json:"data"`
 }
 
-func (c *Client) get(ctx context.Context, params url.Values) ([]Scene, error) {
-	u := c.baseURL + "/scenes?" + params.Encode()
+// doGet is the shared GET+decode mechanics every REST lookup (scenes,
+// performers, sites) uses — path-scoped so each gets its own typed wrapper
+// below rather than every caller reaching into a shared /scenes endpoint.
+func (c *Client) doGet(ctx context.Context, path string, params url.Values, out any) error {
+	u := c.baseURL + path + "?" + params.Encode()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
-		return nil, fmt.Errorf("building request: %w", err)
+		return fmt.Errorf("building request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	return httpx.DoJSON(c.http, req, httpx.MaxResponseBodySize, out)
+}
 
+func (c *Client) get(ctx context.Context, params url.Values) ([]Scene, error) {
 	var sr scenesResponse
-	if err := httpx.DoJSON(c.http, req, httpx.MaxResponseBodySize, &sr); err != nil {
+	if err := c.doGet(ctx, "/scenes", params, &sr); err != nil {
 		return nil, err
 	}
 	out := make([]Scene, len(sr.Data))
@@ -99,4 +105,62 @@ func (c *Client) SearchByTitle(ctx context.Context, title, site string) ([]Scene
 		params.Set("site", site)
 	}
 	return c.get(ctx, params)
+}
+
+// Performer mirrors a subset of ThePornDB's REST performer response shape.
+type Performer struct {
+	ID   string
+	Name string
+}
+
+type rawPerformer struct {
+	ID   string `json:"_id"`
+	Name string `json:"name"`
+}
+
+type performersResponse struct {
+	Data []rawPerformer `json:"data"`
+}
+
+// SearchPerformers text-searches performers by name. Similarity filtering of
+// results is business logic that belongs in internal/identify, not here —
+// same convention as SearchByTitle.
+func (c *Client) SearchPerformers(ctx context.Context, term string) ([]Performer, error) {
+	var pr performersResponse
+	if err := c.doGet(ctx, "/performers", url.Values{"q": {term}}, &pr); err != nil {
+		return nil, err
+	}
+	out := make([]Performer, len(pr.Data))
+	for i, rp := range pr.Data {
+		out[i] = Performer{ID: rp.ID, Name: rp.Name}
+	}
+	return out, nil
+}
+
+// Site mirrors a subset of ThePornDB's REST site (studio) response shape.
+type Site struct {
+	ID   string
+	Name string
+}
+
+type rawSiteEntry struct {
+	ID   string `json:"_id"`
+	Name string `json:"name"`
+}
+
+type sitesResponse struct {
+	Data []rawSiteEntry `json:"data"`
+}
+
+// SearchSites text-searches sites (studios) by name.
+func (c *Client) SearchSites(ctx context.Context, term string) ([]Site, error) {
+	var sr sitesResponse
+	if err := c.doGet(ctx, "/sites", url.Values{"q": {term}}, &sr); err != nil {
+		return nil, err
+	}
+	out := make([]Site, len(sr.Data))
+	for i, rs := range sr.Data {
+		out[i] = Site{ID: rs.ID, Name: rs.Name}
+	}
+	return out, nil
 }

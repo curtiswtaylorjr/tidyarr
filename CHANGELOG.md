@@ -1957,3 +1957,75 @@ actually the *primary* ("backbone") consumer of this setting, not a
 secondary one — an earlier summary describing the feature as covering
 "Movies/Series" undersold this and was corrected in conversation, not in
 code.
+
+## 2026-07-11 — Real StashDB/FansDB/TPDB performer+studio lookups replace prompt-only formatting
+
+Follow-up to the date-parsing entry above. Live testing kept surfacing the
+same class of problem: `ParseFilename`'s AI extraction (studio/performer
+name capitalization, dots-as-separators, title/performer boundaries) was
+inconsistent across repeated runs on the same input — each individual
+prompt fix worked in isolation but the model didn't reliably apply every
+guideline simultaneously. Rather than continuing to chase this with prompt
+wording, moved correctness downstream to real data: a new verification
+step now searches the AI's raw studio/performer guess against
+StashDB/FansDB/TPDB's own performer/studio databases and uses the
+database's canonical name when a confident match exists — the same
+"search then trust the database's own record" pattern already used for
+scene identification (`internal/identify/boxlookup.go`'s
+`SearchStashBox`/`SearchTPDB`), just applied one level down.
+
+**Confirmed feasible before building anything:** neither client had a
+performer/studio lookup capability (only scene search existed), but the
+underlying networks do — confirmed via `stash-box`'s public GraphQL schema
+(`searchPerformer(term, limit)`, `findStudio(id, name)`) and ThePornDB's
+documented REST endpoints (`GET /performers?q=`, `GET /sites?q=`).
+
+**What shipped:**
+- `internal/stashbox/client.go`: `SearchPerformer`/`FindStudio` — new
+  GraphQL queries, same `rawX`/`X` conversion pattern as the existing
+  `SearchScene`/`FindScene`.
+- `internal/tpdbrest/client.go`: `SearchPerformers`/`SearchSites` — new
+  REST methods; `get()` refactored into a shared `doGet(path, params, out)`
+  helper so these could reuse the existing HTTP mechanics instead of
+  duplicating them (existing `/scenes` behavior unchanged, verified by
+  full test suite passing before and after).
+- `internal/identify/entityverify.go` (new file): `normalizeForSearch`
+  (deterministic dot/dash/underscore-to-space cleanup — TitleSimilarity's
+  own tokenizer already splits on dots/dashes but not underscores, and a
+  raw separator-laden string may not match well as a literal search term
+  server-side either) + `verifyStudio`/`verifyPerformers`, wired into
+  `Identify()` right after `ParseFilename`. Reuses the existing
+  `TitleSimilarity` fuzzy matcher, at a higher threshold (0.6, vs scene
+  titles' 0.4) since short person/studio names need less token overlap to
+  false-positive-match a different real entity. Respects the same FansDB
+  fansite-hint gate (`IsFansiteHinted`) `searchInternalDBs` already
+  uses — a real regression caught by the existing
+  `TestIdentify_FansiteHintGatesFansDB` test on first pass, fixed by
+  threading the hint signal through rather than querying FansDB
+  unconditionally. No match anywhere → falls back to the
+  deterministically-cleaned guess (still strictly better than the AI's raw
+  text, even unconfirmed).
+
+**Honest limitation:** StashDB/FansDB's query shapes are confirmed against
+the official public `stash-box` GraphQL schema. TPDB's REST field names
+(`_id`/`name` for `/performers` and `/sites`) are inferred from
+documentation, not confirmed against a live authenticated call — an
+attempt to live-verify this session was abandoned after a credential-
+handling mistake (see `feedback_secret_bearing_log_queries.md` in memory,
+third occurrence of that incident class) rather than retried carelessly.
+If TPDB's actual field names differ, `SearchPerformers`/`SearchSites`
+degrade safely to returning empty results (JSON unmarshal tolerates
+missing keys) rather than erroring — the pipeline falls through to the
+next box or the cleaned-guess fallback, never breaks identification.
+Verify against a real TPDB key before trusting its corrections in
+production.
+
+New tests: `internal/stashbox/client_test.go` (4 new),
+`internal/tpdbrest/client_test.go` (2 new),
+`internal/identify/entityverify_test.go` (new file, 11 tests covering
+normalization, fuzzy matching, both verify functions' match/no-match/
+empty-guess/fansite-gate/TPDB-fallback paths). Full repo `go build`/
+`go vet`/`go test ./...` clean; `gofmt -l` shows only the same
+pre-existing unrelated files as every other entry this session. Committed
+locally only — not pushed/deployed, pending the live-verification
+question above.

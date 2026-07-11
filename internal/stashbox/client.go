@@ -242,6 +242,51 @@ func (c *Client) SubmitSceneDraft(ctx context.Context, title, studio, date strin
 	return data.SubmitSceneDraft.ID, nil
 }
 
+type Performer struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+const searchPerformerQuery = `query SearchPerformer($term: String!, $limit: Int) {
+  searchPerformer(term: $term, limit: $limit) { id name }
+}`
+
+// SearchPerformer text-searches performers by name/alias. Similarity
+// filtering of results is business logic that belongs in internal/identify,
+// not here — same convention as SearchScene.
+func (c *Client) SearchPerformer(ctx context.Context, term string, limit int) ([]Performer, error) {
+	var data struct {
+		SearchPerformer []Performer `json:"searchPerformer"`
+	}
+	if err := c.do(ctx, searchPerformerQuery, map[string]any{"term": term, "limit": limit}, &data); err != nil {
+		return nil, err
+	}
+	return data.SearchPerformer, nil
+}
+
+type Studio struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+const findStudioQuery = `query FindStudio($name: String) {
+  findStudio(name: $name) { id name }
+}`
+
+// FindStudio looks up a studio by name. This is stash-box's own "find by
+// name" query (not a fuzzy search like SearchPerformer) — callers should
+// pass an already-cleaned name (see identify.normalizeForSearch) and treat a
+// nil result as "no exact match" rather than assuming fuzzy tolerance.
+func (c *Client) FindStudio(ctx context.Context, name string) (*Studio, error) {
+	var data struct {
+		FindStudio *Studio `json:"findStudio"`
+	}
+	if err := c.do(ctx, findStudioQuery, map[string]any{"name": name}, &data); err != nil {
+		return nil, err
+	}
+	return data.FindStudio, nil
+}
+
 const meQuery = `{ me { id name } }`
 
 // Me is the authenticated user stash-box's own "me" query returns — real per

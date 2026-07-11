@@ -57,6 +57,25 @@ func TestParseFilename_IncludesParentFolderContext(t *testing.T) {
 	}
 }
 
+func TestParseFilename_PromptIncludesSeparatorNormalizationGuidance(t *testing.T) {
+	var seenPrompt string
+	client, closeSrv := fakeOllama(t, func(prompt string) string {
+		seenPrompt = prompt
+		return `{"studio":"Tushy","title":"Deep Desires","year":"2024","performers":["Riley Reid"]}`
+	})
+	defer closeSrv()
+
+	if _, err := ParseFilename(context.Background(), client, "tushy.24.03.15.riley.reid.deep.desires.1080p", ""); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(seenPrompt, "word separators") {
+		t.Error("expected the prompt to explain dots/dashes/underscores are word separators")
+	}
+	if !strings.Contains(seenPrompt, "'riley.reid' becomes 'Riley Reid'") {
+		t.Error("expected the prompt to give a concrete separator-normalization example")
+	}
+}
+
 func TestParseFilename_PromptIncludesDateFormatGuidance(t *testing.T) {
 	var seenPrompt string
 	client, closeSrv := fakeOllama(t, func(prompt string) string {

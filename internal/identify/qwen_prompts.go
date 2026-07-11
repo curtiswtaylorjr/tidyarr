@@ -35,14 +35,15 @@ func ParseFilename(ctx context.Context, client AIClient, stem, parentName string
 		"Analyze the filename stem and extract:\n" +
 		"1. studio: The production company/site/label (usually at the very beginning of the filename or matching the parent folder name, e.g., 'Tushy', 'Wow Girls', 'Brazzers', 'Candygirl Video').\n" +
 		"2. title: The main descriptive name/title of the scene.\n" +
-		"3. year: The release year (4 digits), or null if not found.\n" +
+		"3. year: The release year (4 digits), or null if not found — see the date rule below.\n" +
 		"4. performers: A JSON array of performer/actor names mentioned in the filename or parent folder name, or null/empty array if none.\n\n" +
 		"Guidelines:\n" +
-		"- Clean up the title and studio names (remove extra tags like resolution, video quality, site domains, etc.).\n" +
+		"- Clean up the title, studio, and performer names (remove extra tags like resolution, video quality, site domains, etc.).\n" +
+		"- Dots, dashes, and underscores in the filename are typically word separators, not literal characters — when extracting studio, title, or performer names, replace them with spaces and capitalize each word normally (e.g., 'riley.reid' becomes 'Riley Reid', 'deep-desires' becomes 'Deep Desires'). Only keep punctuation that's a genuine part of a name (e.g., a hyphenated surname).\n" +
 		"- For studio, do NOT return names of aggregator/tube sites or host sites if there is a real studio name.\n" +
-		"- Release dates are commonly embedded right after the studio name as YY.MM.DD or YYYY.MM.DD (e.g., 'tushy.24.03.15...' means 2024-03-15, so year = 2024) — a 2-digit year should be read as 20XX, since this content is virtually always from 2000 onward.\n" +
-		"- Only treat a numeric token as part of a date if it plausibly is one (a middle value 01-12 and a following value 01-31, positioned right after the studio name) — do not extract a year from resolution (1080p, 4k), scene/episode numbers, or video ID tags that happen to be numeric.\n" +
-		"- If the filename does NOT contain a YY.MM.DD/YYYY.MM.DD-style date token, return null for year. Never guess or infer a year from your own general knowledge of the studio, performers, or scene — only extract a year that is actually written in the filename.\n" +
+		"- DATE RULE (read carefully): a year may ONLY come from a YY.MM.DD or YYYY.MM.DD-style date token actually present in the filename — never from your own knowledge of the studio, performers, or scene. Such a token is usually right after the studio name, with a middle value 01-12 (month) and a following value 01-31 (day); a 2-digit year reads as 20XX.\n" +
+		"  * Example WITH a date token: 'tushy.24.03.15.riley.reid.deep.desires.1080p' → '24.03.15' is a date token (03 = month, 15 = day) → year = \"2024\".\n" +
+		"  * Example WITHOUT a date token: 'brazzers.scene442.riley.reid.1080p' → there is no date token ('scene442' is a scene number, '1080p' is a resolution — neither has a valid month/day pair) → year = null. Do NOT fill this in from what you know about Riley Reid or Brazzers — you must return null here.\n" +
 		"Return ONLY valid JSON with exactly these keys: studio, title, year, performers.\n" +
 		"Use null for any field you cannot determine.\n\n" +
 		fmt.Sprintf("Filename: %s\n\nJSON:", stem)

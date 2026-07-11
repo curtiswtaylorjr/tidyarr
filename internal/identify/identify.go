@@ -60,6 +60,15 @@ func (id *Identifier) Identify(ctx context.Context, stem, parentName string) (*M
 		return nil, nil
 	}
 
+	// Correct the AI's raw studio/performer guess against real StashDB/
+	// FansDB/TPDB data before using it any further (as a scene-search term,
+	// a web-search query, or the final fallback value) — see
+	// entityverify.go's doc comments for why this replaces relying on the
+	// AI's own text formatting.
+	studioGuess := parsed.Studio
+	parsed.Studio = id.verifyStudio(ctx, studioGuess, stem)
+	parsed.Performers = id.verifyPerformers(ctx, parsed.Performers, stem, studioGuess)
+
 	if result, err := id.searchInternalDBs(ctx, parsed.Title, parsed.Studio, stem); err != nil {
 		return nil, err
 	} else if result != nil {
