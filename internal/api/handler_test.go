@@ -147,7 +147,8 @@ func TestConnectionsCRUD_EndToEnd(t *testing.T) {
 	defer srv.Close()
 
 	// Save a connection.
-	body, _ := json.Marshal(upsertConnectionRequest{URL: "http://192.168.1.12:7878", APIKey: "abcd1234"})
+	key := "abcd1234"
+	body, _ := json.Marshal(upsertConnectionRequest{URL: "http://192.168.1.12:7878", APIKey: &key})
 	req, _ := http.NewRequest(http.MethodPut, srv.URL+"/api/connections/radarr", bytes.NewReader(body))
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -200,7 +201,8 @@ func TestUpsertConnectionHandler_RequiresURL(t *testing.T) {
 	srv := httptest.NewServer(NewMux(testHTTPClient(), connStore, propStore, allowStore, testProber(t), testPHasher(t), testVideoHasher(t), settingsStore, grabsStore, libStore))
 	defer srv.Close()
 
-	body, _ := json.Marshal(upsertConnectionRequest{APIKey: "key-with-no-url"})
+	noURLKey := "key-with-no-url"
+	body, _ := json.Marshal(upsertConnectionRequest{APIKey: &noURLKey})
 	req, _ := http.NewRequest(http.MethodPut, srv.URL+"/api/connections/radarr", bytes.NewReader(body))
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -209,5 +211,75 @@ func TestUpsertConnectionHandler_RequiresURL(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("expected 400 when url is missing, got %d", resp.StatusCode)
+	}
+}
+
+// TestUpsertConnectionHandler_OmittedAPIKeyPreservesSecret locks the data-loss
+// fix: a PUT with apiKey absent from the JSON entirely (what the frontend sends
+// when the operator edits only the URL, leaving the blank "unchanged (••••)"
+// key field untouched) must preserve the stored secret, not wipe it.
+func TestUpsertConnectionHandler_OmittedAPIKeyPreservesSecret(t *testing.T) {
+	connStore, propStore, allowStore, settingsStore, grabsStore, libStore := testStores(t)
+	srv := httptest.NewServer(NewMux(testHTTPClient(), connStore, propStore, allowStore, testProber(t), testPHasher(t), testVideoHasher(t), settingsStore, grabsStore, libStore))
+	defer srv.Close()
+
+	if err := connStore.Upsert(context.Background(), "radarr", "http://old:7878", "my-secret-key"); err != nil {
+		t.Fatalf("seeding connection: %v", err)
+	}
+
+	// apiKey nil → omitted from the JSON body (omitempty on a nil pointer).
+	body, _ := json.Marshal(upsertConnectionRequest{URL: "http://new:7878"})
+	req, _ := http.NewRequest(http.MethodPut, srv.URL+"/api/connections/radarr", bytes.NewReader(body))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("PUT failed: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("expected 204 from PUT, got %d", resp.StatusCode)
+	}
+
+	got, err := connStore.Get(context.Background(), "radarr")
+	if err != nil {
+		t.Fatalf("loading connection: %v", err)
+	}
+	if got.URL != "http://new:7878" {
+		t.Errorf("expected url to update, got %q", got.URL)
+	}
+	if got.APIKey != "my-secret-key" {
+		t.Errorf("expected the stored secret to be preserved when apiKey is omitted, got %q", got.APIKey)
+	}
+}
+
+// TestUpsertConnectionHandler_ExplicitEmptyAPIKeyClearsSecret regression-locks
+// today's existing behavior: apiKey present as "" still clears the stored
+// secret (e.g. switching a service to one that needs no key).
+func TestUpsertConnectionHandler_ExplicitEmptyAPIKeyClearsSecret(t *testing.T) {
+	connStore, propStore, allowStore, settingsStore, grabsStore, libStore := testStores(t)
+	srv := httptest.NewServer(NewMux(testHTTPClient(), connStore, propStore, allowStore, testProber(t), testPHasher(t), testVideoHasher(t), settingsStore, grabsStore, libStore))
+	defer srv.Close()
+
+	if err := connStore.Upsert(context.Background(), "radarr", "http://radarr:7878", "my-secret-key"); err != nil {
+		t.Fatalf("seeding connection: %v", err)
+	}
+
+	empty := ""
+	body, _ := json.Marshal(upsertConnectionRequest{URL: "http://radarr:7878", APIKey: &empty})
+	req, _ := http.NewRequest(http.MethodPut, srv.URL+"/api/connections/radarr", bytes.NewReader(body))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("PUT failed: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("expected 204 from PUT, got %d", resp.StatusCode)
+	}
+
+	got, err := connStore.Get(context.Background(), "radarr")
+	if err != nil {
+		t.Fatalf("loading connection: %v", err)
+	}
+	if got.APIKey != "" {
+		t.Errorf("expected an explicit empty apiKey to clear the stored secret, got %q", got.APIKey)
 	}
 }

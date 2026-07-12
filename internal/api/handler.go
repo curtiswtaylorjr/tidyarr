@@ -185,7 +185,14 @@ func listConnectionsHandler(store *connections.Store) http.HandlerFunc {
 type upsertConnectionRequest struct {
 	URL      string `json:"url"`
 	Username string `json:"username,omitempty"` // only qbittorrent/nzbget use this
-	APIKey   string `json:"apiKey,omitempty"`
+	// APIKey is a pointer so the handler can distinguish three states the UI
+	// needs to express (json.Decode sets it accordingly; omitempty only affects
+	// marshaling, not decoding): nil = field absent from the JSON entirely →
+	// preserve the stored secret (the client is never sent the real key back —
+	// see connections.Store.List/Get — so a blank untouched key field must not
+	// wipe it); non-nil pointing at "" → explicitly clear it (e.g. Ollama needs
+	// none); non-nil non-empty → set/replace it.
+	APIKey *string `json:"apiKey,omitempty"`
 }
 
 func upsertConnectionHandler(store *connections.Store) http.HandlerFunc {
@@ -200,7 +207,7 @@ func upsertConnectionHandler(store *connections.Store) http.HandlerFunc {
 			http.Error(w, "url is required", http.StatusBadRequest)
 			return
 		}
-		if err := store.UpsertWithUsername(r.Context(), service, req.URL, req.Username, req.APIKey); err != nil {
+		if err := store.UpsertPreservingSecret(r.Context(), service, req.URL, req.Username, req.APIKey); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}

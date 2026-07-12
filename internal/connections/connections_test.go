@@ -173,6 +173,106 @@ func TestList_RedactsKeysButShowsSuffixAndPresence(t *testing.T) {
 	}
 }
 
+func TestUpsertPreservingSecret_NilPreservesExistingSecret(t *testing.T) {
+	// Editing only url/username on an already-configured connection must not
+	// wipe its stored secret — the client can't round-trip the real key, so it
+	// passes nil to mean "leave the secret as it is".
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	if err := s.Upsert(ctx, "radarr", "http://old:7878", "my-secret-key"); err != nil {
+		t.Fatalf("unexpected error seeding connection: %v", err)
+	}
+
+	if err := s.UpsertPreservingSecret(ctx, "radarr", "http://new:7878", "", nil); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got, err := s.Get(ctx, "radarr")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.URL != "http://new:7878" {
+		t.Errorf("expected url to update, got %q", got.URL)
+	}
+	if got.APIKey != "my-secret-key" {
+		t.Errorf("expected secret to be preserved across a nil-secret upsert, got %q", got.APIKey)
+	}
+}
+
+func TestUpsertPreservingSecret_NilOnNewServiceLeavesNoSecret(t *testing.T) {
+	// A brand-new service with nil secret has nothing to preserve — it should
+	// end up with no stored secret, reported as such by List/Get.
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	if err := s.UpsertPreservingSecret(ctx, "ollama", "http://127.0.0.1:11434", "", nil); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got, err := s.Get(ctx, "ollama")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.APIKey != "" {
+		t.Errorf("expected no secret for a brand-new nil-secret service, got %q", got.APIKey)
+	}
+
+	list, err := s.List(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(list) != 1 || list[0].HasAPIKey || list[0].KeySuffix != "" {
+		t.Errorf("expected list to report no key set, got %+v", list)
+	}
+}
+
+func TestUpsertPreservingSecret_EmptyStringClearsSecret(t *testing.T) {
+	// A non-nil secret pointing at "" still explicitly clears the stored
+	// secret — exactly UpsertWithUsername's existing behavior, regression-locked.
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	if err := s.Upsert(ctx, "radarr", "http://radarr:7878", "my-secret-key"); err != nil {
+		t.Fatalf("unexpected error seeding connection: %v", err)
+	}
+
+	empty := ""
+	if err := s.UpsertPreservingSecret(ctx, "radarr", "http://radarr:7878", "", &empty); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got, err := s.Get(ctx, "radarr")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.APIKey != "" {
+		t.Errorf("expected an explicit empty-string secret to clear the key, got %q", got.APIKey)
+	}
+}
+
+func TestUpsertPreservingSecret_NonEmptyReplacesSecret(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	if err := s.Upsert(ctx, "radarr", "http://radarr:7878", "old-key"); err != nil {
+		t.Fatalf("unexpected error seeding connection: %v", err)
+	}
+
+	newKey := "new-key"
+	if err := s.UpsertPreservingSecret(ctx, "radarr", "http://radarr:7878", "", &newKey); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got, err := s.Get(ctx, "radarr")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.APIKey != "new-key" {
+		t.Errorf("expected a non-empty secret to replace the key, got %q", got.APIKey)
+	}
+}
+
 func TestDelete_RemovesConnection(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()

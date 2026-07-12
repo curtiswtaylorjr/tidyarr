@@ -331,7 +331,15 @@ const SERVICES_WITH_USERNAME = ["qbittorrent", "nzbget"];
 // and the Wizard (a plain row) can arrange them differently. needsUsername
 // is exposed so callers can decide whether to lay out a username field at
 // all (most services don't need one).
-function buildConnectionControls(service, existingConn, onSaved) {
+function buildConnectionControls(service, existingConn, onSaved, opts) {
+  opts = opts || {};
+  // When embedded in a combined multi-service form (the Setup Wizard's
+  // consolidated "Connected services" and "AI setup" steps), this control must
+  // NOT wire its own Enter-to-save keydown listener: the outer <form onsubmit>
+  // already persists every service at once, so a per-field keydown would race a
+  // second, single-service PUT against it. Embedded callers drive persistence
+  // themselves via the exposed requestBody()/save().
+  const embedded = !!opts.embedded;
   const needsUsername = SERVICES_WITH_USERNAME.includes(service);
   const usernameInput = el("input", { type: "text", value: existingConn ? (existingConn.username || "") : "", placeholder: "username" });
   const urlInput = el("input", { type: "text", value: existingConn ? existingConn.url : "", placeholder: "https://..." });
@@ -339,9 +347,48 @@ function buildConnectionControls(service, existingConn, onSaved) {
   const keyInput = el("input", { type: "password", placeholder: keyPlaceholder });
   const status = el("span", { class: "muted" });
 
+  // dirty tracks whether the operator actually touched any field since load —
+  // ONLY meaningful when embedded. An embedded combined-save must never re-PUT
+  // an untouched, already-configured connection: the real API key is never
+  // sent to the client (Store.List/Get redact it to hasApiKey/keySuffix only —
+  // see internal/connections' Summary), so keyInput starts and stays blank for
+  // an already-configured service. A naive "URL is non-empty, so save it" skip
+  // check (what the non-embedded per-service Save button gets away with,
+  // because clicking it IS the deliberate per-service action) would silently
+  // overwrite that real key with "" the moment a combined save touches every
+  // pre-filled service at once — a real data-loss bug caught in review.
+  // Untouched services must be skipped entirely, not just blank-URL ones.
+  let dirty = false;
+  if (embedded) {
+    const markDirty = () => { dirty = true; };
+    urlInput.addEventListener("input", markDirty);
+    usernameInput.addEventListener("input", markDirty);
+    keyInput.addEventListener("input", markDirty);
+  }
+
+  // keyTouched tracks whether the operator actually edited the KEY/PASSWORD
+  // field specifically — separate from and finer-grained than `dirty` above,
+  // and wired ALWAYS (not just embedded), since Settings' own per-service Save
+  // button has the same data-loss bug. keyInput starts blank for an
+  // already-configured connection (the real key is never sent to the client —
+  // see Store.List/Get), so an untouched blank key must NOT be sent as "": the
+  // backend would treat "" as "clear the stored secret" and silently wipe a
+  // working key, contradicting the "unchanged (••••)" placeholder.
+  let keyTouched = false;
+  keyInput.addEventListener("input", () => { keyTouched = true; });
+
   const requestBody = () => {
-    const body = { url: urlInput.value, apiKey: keyInput.value };
+    const body = { url: urlInput.value };
     if (needsUsername) body.username = usernameInput.value;
+    // Only send apiKey when the operator actually touched the key field, or
+    // there's no existing key to preserve (first-time save — always include
+    // it, even if empty, so a service that genuinely needs no key like Ollama
+    // can still be saved). Omitting apiKey from the JSON entirely tells the
+    // backend to preserve the stored secret; sending it (even "") sets/clears
+    // it explicitly.
+    if (keyTouched || !(existingConn && existingConn.hasApiKey)) {
+      body.apiKey = keyInput.value;
+    }
     return body;
   };
 
@@ -364,11 +411,14 @@ function buildConnectionControls(service, existingConn, onSaved) {
   // Enter in any of this connection's fields saves it. These controls are
   // laid out across separate table cells (Settings' Connections table), so a
   // <form> wrapper can't span them — a per-input keydown is the layout-agnostic
-  // equivalent, and works identically in the Wizard's row layout too.
-  const saveOnEnter = (e) => { if (e.key === "Enter") { e.preventDefault(); save(); } };
-  urlInput.addEventListener("keydown", saveOnEnter);
-  usernameInput.addEventListener("keydown", saveOnEnter);
-  keyInput.addEventListener("keydown", saveOnEnter);
+  // equivalent. Skipped when embedded, where an outer <form> owns Enter-to-save
+  // for the whole step (see the embedded note above).
+  if (!embedded) {
+    const saveOnEnter = (e) => { if (e.key === "Enter") { e.preventDefault(); save(); } };
+    urlInput.addEventListener("keydown", saveOnEnter);
+    usernameInput.addEventListener("keydown", saveOnEnter);
+    keyInput.addEventListener("keydown", saveOnEnter);
+  }
   const deleteBtn = el("button", { class: "danger", text: "Delete", disabled: !existingConn, onclick: async () => {
     if (!confirm("Remove the " + service + " connection?")) return;
     try {
@@ -377,21 +427,28 @@ function buildConnectionControls(service, existingConn, onSaved) {
     } catch (e) { status.textContent = "✗ " + e.message; status.className = "error"; }
   } });
 
-  return { urlInput, usernameInput, keyInput, testBtn, saveBtn, deleteBtn, status, needsUsername };
+  // dirty is exposed as a getter, not a plain property snapshot — the
+  // underlying `dirty` variable is mutated later by the input listeners above,
+  // so a plain `dirty` shorthand here would freeze the false it held at
+  // construction time and never reflect a later edit.
+  return { urlInput, usernameInput, keyInput, testBtn, saveBtn, deleteBtn, status, needsUsername, requestBody, save, get dirty() { return dirty; } };
 }
 
 // ---- Setup Wizard ----
-// Walks through Movies' and Series' library root folders (both required to
-// do anything at all — neither proxies a *arr app anymore), Whisparr and an
-// AI provider (both optional — Adult and AI-assisted features are opt-in),
-// then hands off to the normal app. Shown automatically until dismissed
-// (see boot()); reachable afterward from Settings' "Re-run setup wizard"
-// link.
+// Three steps, each with exactly one Save: (1) all three library root folders
+// (Movies/Series required to do anything at all — neither proxies a *arr app
+// anymore — Adult optional), (2) every service connection (Prowlarr, download
+// clients, Jellyfin, Whisparr — all optional, one combined save), (3) the AI
+// provider + model + its connection (optional). Then hands off to the normal
+// app. Shown automatically until dismissed (see boot()); reachable afterward
+// from Settings' "Re-run setup wizard" link. Full per-connection Test/Save/
+// Delete CRUD lives in Settings' Connections table — the wizard is first-run
+// setup only, so it collapses each step to a single persist action.
 
 async function renderWizard(container) {
   container.innerHTML = "";
   container.appendChild(el("h2", { text: "Set up SAK" }));
-  container.appendChild(el("p", { class: "muted", text: "Movies and Series each need a library root folder to do anything at all — Whisparr (Adult) and an AI provider are optional." }));
+  container.appendChild(el("p", { class: "muted", text: "Movies and Series each need a library root folder to do anything at all — the Adult path, every service connection, and an AI provider are all optional." }));
 
   let status, connections;
   try {
@@ -415,23 +472,21 @@ async function renderWizard(container) {
   } catch (e) { /* no scan results — steps just show no hint */ }
 
   let step = 1;
-  container.appendChild(await buildLibraryWizardStep("movies", step++, modeStatusByMode.movies && modeStatusByMode.movies.arrConfigured, container));
-  container.appendChild(await buildLibraryWizardStep("series", step++, modeStatusByMode.series && modeStatusByMode.series.arrConfigured, container));
 
-  // Search + download-client + player connections (all optional). These four
-  // are where LAN scan slots in: Prowlarr/qBittorrent/NZBGet are reachable by
-  // conventional container hostname on SAK's own docker network (so their
-  // hints come from the pre-fetched known-host scan), while Jellyfin lives on
-  // a different host and gets a "probe a specific host" input instead.
-  container.appendChild(buildWizardStep(step++, "Search — connect Prowlarr", true, !!byService.prowlarr, "prowlarr", byService.prowlarr, container, { finding: findingByService.prowlarr }));
-  container.appendChild(buildWizardStep(step++, "Downloads — connect qBittorrent (torrents)", true, !!byService.qbittorrent, "qbittorrent", byService.qbittorrent, container, { finding: findingByService.qbittorrent }));
-  container.appendChild(buildWizardStep(step++, "Downloads — connect NZBGet (usenet)", true, !!byService.nzbget, "nzbget", byService.nzbget, container, { finding: findingByService.nzbget }));
-  container.appendChild(buildWizardStep(step++, "Player — connect Jellyfin", true, !!byService.jellyfin, "jellyfin", byService.jellyfin, container, { finding: findingByService.jellyfin, allowHostProbe: true }));
+  // Step 1 — all three library root folders in one fieldset, one Save. Movies
+  // and Series stay effectively required (they gate "Continue to SAK" below via
+  // /api/setup/status); Adult is optional.
+  container.appendChild(await buildMediaPathsWizardStep(step++, modeStatusByMode, container));
 
-  {
-    const configured = modeStatusByMode.adult && modeStatusByMode.adult.arrConfigured;
-    container.appendChild(buildWizardStep(step++, "Adult — connect whisparr", true, configured, "whisparr", byService.whisparr, container));
-  }
+  // Step 2 — every service connection (all optional) in one fieldset, one Save.
+  // The netscan hints ride along per-service, exactly as before: Prowlarr/
+  // qBittorrent/NZBGet are reachable by conventional container hostname on SAK's
+  // own docker network (hints from the pre-fetched known-host scan), while
+  // Jellyfin lives on a different host and gets a "probe a specific host" input.
+  // Whisparr is a plain connection with no netscan hint (not a scan target).
+  container.appendChild(buildConnectedServicesWizardStep(step++, byService, findingByService, container));
+
+  // Step 3 — AI provider + model + that provider's connection, one Save.
   container.appendChild(await buildWizardAIStep(step++, byService, container));
 
   // Movies and Series can't do anything at all without a library root
@@ -454,24 +509,83 @@ async function renderWizard(container) {
   container.appendChild(footer);
 }
 
-function buildWizardStep(n, title, optional, configured, service, existingConn, wizardContainer, netscanOpts) {
+// buildConnectedServicesWizardStep is Step 2: every service connection in one
+// fieldset behind a single "Save connected services" button. Each service is a
+// labeled sub-section reusing buildConnectionControls' field construction in
+// embedded mode (no per-service Test/Save/keydown — those would race the one
+// combined save; full CRUD lives in Settings' Connections table). Persistence
+// is driven here: every service whose URL is non-empty is PUT, blank ones are
+// skipped (all optional), and each service shows its own inline status so a
+// partial failure names the offender.
+function buildConnectedServicesWizardStep(n, byService, findingByService, wizardContainer) {
+  // Netscan hints ride along exactly as before: the docker-DNS-reachable
+  // services get a pre-fetched known-host finding; Jellyfin (different host)
+  // gets a probe-a-host input; Whisparr isn't a scan target, so no hint.
+  const services = [
+    { service: "prowlarr", label: "Prowlarr — search indexers", netscanOpts: { finding: findingByService.prowlarr } },
+    { service: "qbittorrent", label: "qBittorrent — torrent downloads", netscanOpts: { finding: findingByService.qbittorrent } },
+    { service: "nzbget", label: "NZBGet — usenet downloads", netscanOpts: { finding: findingByService.nzbget } },
+    { service: "jellyfin", label: "Jellyfin — media player", netscanOpts: { finding: findingByService.jellyfin, allowHostProbe: true } },
+    { service: "whisparr", label: "Whisparr — Adult", netscanOpts: null },
+  ];
+
   const fs = el("fieldset", {}, [
-    el("legend", { text: n + ". " + title + (optional ? " (optional)" : "") + (configured ? " ✓" : "") }),
+    el("legend", { text: n + ". Connected services (optional)" }),
   ]);
-  const c = buildConnectionControls(service, existingConn, () => renderWizard(wizardContainer));
-  // Username/password services (qBittorrent, NZBGet) get a Username field; the
-  // key field is a "Password" for them. Everything else is URL + API Key.
-  const fields = [el("label", {}, [document.createTextNode("URL"), c.urlInput])];
-  if (c.needsUsername) fields.push(el("label", {}, [document.createTextNode("Username"), c.usernameInput]));
-  fields.push(el("label", {}, [document.createTextNode(c.needsUsername ? "Password" : "API Key"), c.keyInput]));
-  fs.appendChild(el("div", { class: "grid2" }, fields));
-  // LAN-scan hint (optional): a "possible instance found" prompt with a
-  // Use-this-URL button that only ever pre-fills the URL — never auto-saves.
-  if (netscanOpts) {
-    const hint = buildNetscanHint(service, c, netscanOpts);
-    if (hint) fs.appendChild(hint);
+  fs.appendChild(el("p", { class: "muted", text: "Fill in only the services you use — each is optional and blank ones are skipped on save. Test and Delete for these live in Settings later." }));
+
+  const controls = [];
+  const form = el("form");
+  for (const svc of services) {
+    const c = buildConnectionControls(svc.service, byService[svc.service], null, { embedded: true });
+    controls.push({ service: svc.service, c });
+    const sub = el("div", { style: "margin-top:0.75rem" });
+    sub.appendChild(el("strong", { text: svc.label + (byService[svc.service] ? " ✓" : "") }));
+    // Username/password services (qBittorrent, NZBGet) get a Username field and
+    // a "Password" key label; everything else is URL + API Key.
+    const fields = [el("label", {}, [document.createTextNode("URL"), c.urlInput])];
+    if (c.needsUsername) fields.push(el("label", {}, [document.createTextNode("Username"), c.usernameInput]));
+    fields.push(el("label", {}, [document.createTextNode(c.needsUsername ? "Password" : "API Key"), c.keyInput]));
+    sub.appendChild(el("div", { class: "grid2" }, fields));
+    if (svc.netscanOpts) {
+      const hint = buildNetscanHint(svc.service, c, svc.netscanOpts);
+      if (hint) sub.appendChild(hint);
+    }
+    sub.appendChild(el("div", { class: "row", style: "margin-top:0.35rem" }, [c.status]));
+    form.appendChild(sub);
   }
-  fs.appendChild(el("div", { class: "row", style: "margin-top:0.5rem" }, [c.testBtn, c.saveBtn, c.status]));
+
+  const status = el("span", { class: "muted" });
+  const saveBtn = el("button", { class: "primary", type: "submit", text: "Save connected services" });
+  const saveAll = async () => {
+    saveBtn.disabled = true;
+    let anyFailed = false, anySaved = false;
+    for (const { service, c } of controls) {
+      // Skip anything the operator didn't actually touch — an already-
+      // configured service's key field is always blank on load (the real key
+      // is never sent to the client), so re-PUTting an untouched service would
+      // silently overwrite its real key with "". Also skip a blank URL (either
+      // untouched, or touched-then-cleared) — nothing usable to save either way.
+      if (!c.dirty || !c.urlInput.value.trim()) { c.status.textContent = ""; continue; }
+      try {
+        await api("/api/connections/" + service, { method: "PUT", body: JSON.stringify(c.requestBody()) });
+        c.status.textContent = "✓ saved"; c.status.className = "muted"; anySaved = true;
+      } catch (e) { c.status.textContent = "✗ " + e.message; c.status.className = "error"; anyFailed = true; }
+    }
+    saveBtn.disabled = false;
+    if (anyFailed) {
+      // Leave the marked per-service statuses in place (no re-render, which
+      // would wipe them) so the operator can see which service to fix.
+      status.textContent = "Some services failed to save — see the marked ones above."; status.className = "error";
+      return;
+    }
+    if (!anySaved) { status.textContent = "Nothing to save yet — fill in at least one service."; status.className = "muted"; return; }
+    // All clean — re-render so legends/✓ markers and downstream reads refresh.
+    await renderWizard(wizardContainer);
+  };
+  form.addEventListener("submit", (e) => { e.preventDefault(); saveAll(); });
+  form.appendChild(el("div", { class: "row", style: "margin-top:0.75rem" }, [saveBtn, status]));
+  fs.appendChild(form);
   return fs;
 }
 
@@ -492,17 +606,29 @@ function buildNetscanHint(service, c, opts) {
     const block = el("div", {});
     block.appendChild(el("div", { text: "Possible " + service + " instance found at " + finding.url + " — this is only a hint; verify it's really yours before saving." }));
     const btnRow = el("div", { class: "row", style: "margin-top:0.35rem" });
-    btnRow.appendChild(el("button", { text: "Use this URL", onclick: () => {
+    btnRow.appendChild(el("button", { type: "button", text: "Use this URL", onclick: () => {
       c.urlInput.value = finding.url;
-      status.textContent = "URL pre-filled — verify, then Test and Save below.";
+      // A programmatic .value assignment does NOT fire an "input" event, so
+      // buildConnectionControls' dirty/keyTouched listeners would never see
+      // this fill — the wizard's combined save would then skip this service
+      // entirely (dirty stays false) and silently do nothing. Dispatch the
+      // event manually so pre-filling via this button behaves exactly like
+      // the operator having typed the URL themselves.
+      c.urlInput.dispatchEvent(new Event("input", { bubbles: true }));
+      status.textContent = "URL pre-filled — verify, then Save connected services below.";
       status.className = "muted";
     } }));
     if (service === "prowlarr") {
-      btnRow.appendChild(el("button", { text: "Fetch API key from this instance", onclick: async () => {
+      btnRow.appendChild(el("button", { type: "button", text: "Fetch API key from this instance", onclick: async () => {
         status.textContent = "fetching key…"; status.className = "muted";
         try {
           const res = await api("/api/netscan/prowlarr-key", { method: "POST", body: JSON.stringify({ url: finding.url }) });
           c.keyInput.value = res.apiKey;
+          // Same reasoning as "Use this URL" above — without this, keyTouched
+          // never flips true, so requestBody() would omit apiKey entirely
+          // (treating a freshly-fetched key as "untouched, preserve old
+          // value") and the combined save would silently discard it.
+          c.keyInput.dispatchEvent(new Event("input", { bubbles: true }));
           status.textContent = "API key retrieved live from " + finding.url + "/initialize.json — verify this is your instance before saving.";
           status.className = "muted";
         } catch (e) { status.textContent = "✗ " + e.message; status.className = "error"; }
@@ -525,7 +651,7 @@ function buildNetscanHint(service, c, opts) {
   if (opts.allowHostProbe) {
     const hostInput = el("input", { type: "text", placeholder: "Jellyfin host or LAN IP, e.g. 10.1.10.4" });
     const findingSlot = el("div", { style: "margin-top:0.35rem" });
-    const probeBtn = el("button", { text: "Probe this host", onclick: async () => {
+    const probeBtn = el("button", { type: "button", text: "Probe this host", onclick: async () => {
       findingSlot.innerHTML = "";
       status.textContent = "probing…"; status.className = "muted";
       try {
@@ -558,30 +684,68 @@ function buildNetscanHint(service, c, opts) {
   return wrap;
 }
 
-// buildLibraryWizardStep is Movies'/Series' counterpart to buildWizardStep —
-// neither has a *arr connection to test/save anymore (see internal/library's
-// package doc), just a free-typed path SAK will scan/import into directly.
-async function buildLibraryWizardStep(m, n, configured, wizardContainer) {
-  let current = "";
-  try { current = (await api("/api/modes/" + m + "/library/root-folder")).path; } catch (e) {}
+// buildMediaPathsWizardStep is Step 1: all three modes' library root folders in
+// one fieldset behind a single Save. Each mode has a free-typed path SAK will
+// scan/import into directly (no *arr connection to test — see internal/library's
+// package doc); the GET/PUT /api/modes/{mode}/library/root-folder endpoint is
+// already generic per mode. Movies/Series are effectively required (they gate
+// "Continue to SAK" via /api/setup/status); Adult is optional. Each path shows
+// its own inline status so one button never silently swallows a partial failure.
+async function buildMediaPathsWizardStep(n, modeStatusByMode, wizardContainer) {
+  const modeList = ["movies", "series", "adult"];
+  // Fetch all three current root folders in parallel; any may 404/blank.
+  const currents = {};
+  await Promise.all(modeList.map(async (m) => {
+    try { currents[m] = (await api("/api/modes/" + m + "/library/root-folder")).path; } catch (e) { currents[m] = ""; }
+  }));
 
   const fs = el("fieldset", {}, [
-    el("legend", { text: n + ". " + MODE_LABELS[m] + " — library root folder" + (configured ? " ✓" : "") }),
+    el("legend", { text: n + ". Media paths" }),
   ]);
-  const { wrapper, input: pathInput } = pathInputWithBrowse(current, "/path/to/" + MODE_LABELS[m]);
-  const status = el("span", { class: "muted" });
-  const save = async () => {
-    try {
-      await api("/api/modes/" + m + "/library/root-folder", { method: "PUT", body: JSON.stringify({ path: pathInput.value }) });
-      status.textContent = "✓ saved"; status.className = "muted";
-      await renderWizard(wizardContainer);
-    } catch (e) { status.textContent = "✗ " + e.message; status.className = "error"; }
-  };
+  fs.appendChild(el("p", { class: "muted", text: "Movies and Series are required; Adult is optional (leave it blank to skip)." }));
+
+  const rows = [];
+  const labelEls = [];
+  for (const m of modeList) {
+    const configured = modeStatusByMode[m] && modeStatusByMode[m].arrConfigured;
+    const optional = m === "adult";
+    const { wrapper, input } = pathInputWithBrowse(currents[m], "/path/to/" + MODE_LABELS[m]);
+    const status = el("span", { class: "muted", style: "margin-left:0.5rem" });
+    rows.push({ mode: m, input, status });
+    labelEls.push(el("label", {}, [
+      document.createTextNode(MODE_LABELS[m] + (optional ? " (optional)" : "") + (configured ? " ✓" : "")),
+      wrapper,
+      status,
+    ]));
+  }
+
+  const aggStatus = el("span", { class: "muted" });
   const saveBtn = el("button", { class: "primary", type: "submit", text: "Save" });
-  fs.appendChild(el("form", { onsubmit: (e) => { e.preventDefault(); save(); } }, [
-    el("label", {}, [document.createTextNode("Root folder"), wrapper]),
-    el("div", { class: "row", style: "margin-top:0.5rem" }, [saveBtn, status]),
-  ]));
+  const saveAll = async () => {
+    saveBtn.disabled = true;
+    let anyFailed = false;
+    for (const r of rows) {
+      const path = r.input.value.trim();
+      // Adult (optional) may be left blank — skip it silently. A blank
+      // Movies/Series just stays unconfigured, keeping Continue disabled below.
+      if (!path) { r.status.textContent = ""; continue; }
+      try {
+        await api("/api/modes/" + r.mode + "/library/root-folder", { method: "PUT", body: JSON.stringify({ path }) });
+        r.status.textContent = "✓ saved"; r.status.className = "muted";
+      } catch (e) { r.status.textContent = "✗ " + e.message; r.status.className = "error"; anyFailed = true; }
+    }
+    saveBtn.disabled = false;
+    if (anyFailed) {
+      // Leave per-path statuses visible (no re-render) so the failing mode
+      // stays identifiable.
+      aggStatus.textContent = "Some paths failed to save — see the marked ones above."; aggStatus.className = "error";
+      return;
+    }
+    // All clean — re-render so legends/✓ and the Continue gating refresh.
+    await renderWizard(wizardContainer);
+  };
+  fs.appendChild(el("form", { onsubmit: (e) => { e.preventDefault(); saveAll(); } },
+    labelEls.concat([el("div", { class: "row", style: "margin-top:0.5rem" }, [saveBtn, aggStatus])])));
   return fs;
 }
 
@@ -602,37 +766,54 @@ async function buildWizardAIStep(n, byService, wizardContainer) {
   const providerSelect = el("select", {});
   for (const p of AI_PROVIDERS) providerSelect.appendChild(el("option", { value: p, text: p, selected: p === provider ? "selected" : null }));
   const modelInput = el("input", { type: "text", value: model, placeholder: "e.g. qwen2.5vl:7b, gpt-4o-mini, gemini-2.5-flash, claude-haiku-4-5" });
-  const modelStatus = el("span", { class: "muted" });
-  const saveModel = async () => {
-    try {
-      await api("/api/settings/ai-provider", { method: "PUT", body: JSON.stringify({ provider: providerSelect.value }) });
-      await api("/api/settings/ai-model", { method: "PUT", body: JSON.stringify({ model: modelInput.value }) });
-      modelStatus.textContent = "✓ saved"; modelStatus.className = "muted";
-    } catch (e) { modelStatus.textContent = "✗ " + e.message; modelStatus.className = "error"; }
-  };
-  const saveModelBtn = el("button", { type: "submit", text: "Save provider + model" });
+  const status = el("span", { class: "muted" });
 
+  // The selected provider's connection fields, re-rendered when the provider
+  // changes. buildConnectionControls is embedded (no own Test/Save/keydown) so
+  // the one outer form owns Enter-to-save; the single Save below reads whichever
+  // controls are currently mounted via currentConn.
   const connectionSlot = el("div");
+  let currentConn = null;
   function renderConnectionFields() {
     connectionSlot.innerHTML = "";
     const service = providerSelect.value;
-    const c = buildConnectionControls(service, byService[service], () => renderWizard(wizardContainer));
+    currentConn = buildConnectionControls(service, byService[service], null, { embedded: true });
     connectionSlot.appendChild(el("div", { class: "grid2", style: "margin-top:0.5rem" }, [
-      el("label", {}, [document.createTextNode("URL"), c.urlInput]),
-      el("label", {}, [document.createTextNode("API Key"), c.keyInput]),
+      el("label", {}, [document.createTextNode("URL"), currentConn.urlInput]),
+      el("label", {}, [document.createTextNode("API Key"), currentConn.keyInput]),
     ]));
-    connectionSlot.appendChild(el("div", { class: "row", style: "margin-top:0.5rem" }, [c.testBtn, c.saveBtn, c.status]));
   }
   providerSelect.addEventListener("change", renderConnectionFields);
 
-  fs.appendChild(el("form", { onsubmit: (e) => { e.preventDefault(); saveModel(); } }, [
+  const saveBtn = el("button", { class: "primary", type: "submit", text: "Save" });
+  // One Save persists provider + model AND — only if the operator actually
+  // filled it in — that provider's connection, merging what used to be two
+  // separate save buttons in this step.
+  const save = async () => {
+    saveBtn.disabled = true;
+    try {
+      await api("/api/settings/ai-provider", { method: "PUT", body: JSON.stringify({ provider: providerSelect.value }) });
+      await api("/api/settings/ai-model", { method: "PUT", body: JSON.stringify({ model: modelInput.value }) });
+      // currentConn.dirty, not "URL/key non-empty" — an already-configured
+      // provider's URL is pre-filled and its key field is always blank (the
+      // real key is never sent to the client), so a non-empty-URL check alone
+      // would re-PUT an untouched connection and silently wipe its real key.
+      if (currentConn && currentConn.dirty && currentConn.urlInput.value.trim()) {
+        await api("/api/connections/" + providerSelect.value, { method: "PUT", body: JSON.stringify(currentConn.requestBody()) });
+      }
+      status.textContent = "✓ saved"; status.className = "muted";
+      await renderWizard(wizardContainer);
+    } catch (e) { status.textContent = "✗ " + e.message; status.className = "error"; saveBtn.disabled = false; }
+  };
+
+  fs.appendChild(el("form", { onsubmit: (e) => { e.preventDefault(); save(); } }, [
     el("div", { class: "grid2" }, [
       el("label", {}, [document.createTextNode("Provider"), providerSelect]),
       el("label", {}, [document.createTextNode("Model"), modelInput]),
     ]),
-    el("div", { class: "row", style: "margin-top:0.5rem" }, [saveModelBtn, modelStatus]),
+    connectionSlot,
+    el("div", { class: "row", style: "margin-top:0.5rem" }, [saveBtn, status]),
   ]));
-  fs.appendChild(connectionSlot);
   renderConnectionFields();
   return fs;
 }

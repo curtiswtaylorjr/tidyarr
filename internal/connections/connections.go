@@ -95,6 +95,37 @@ func (s *Store) UpsertWithUsername(ctx context.Context, service, url, username, 
 	return nil
 }
 
+// UpsertPreservingSecret is UpsertWithUsername, but a nil secret preserves
+// whatever secret (if any) is already stored instead of clearing it. The HTTP
+// API needs this because a connection's real secret is never sent back to the
+// client once set (see Summary/List/Get) — the client's key field is always
+// blank for an already-configured connection, so saving it again after editing
+// only the URL would otherwise send "" and silently wipe the working key. nil
+// is the only way for the client to express "leave the secret as it is". A
+// secret pointing at "" still clears it explicitly (e.g. switching to a
+// service that needs no key, like Ollama), and a non-empty *secret still
+// sets/replaces it — both exactly as UpsertWithUsername already does.
+func (s *Store) UpsertPreservingSecret(ctx context.Context, service, url, username string, secret *string) error {
+	if secret != nil {
+		return s.UpsertWithUsername(ctx, service, url, username, *secret)
+	}
+	// secret == nil: preserve the existing api_key_encrypted by omitting it
+	// from the ON CONFLICT SET clause entirely. A brand-new row (no prior
+	// secret to preserve) correctly gets '' — there's nothing to keep yet.
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO connections (service, url, username, api_key_encrypted, updated_at)
+		VALUES (?, ?, ?, '', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+		ON CONFLICT(service) DO UPDATE SET
+			url = excluded.url,
+			username = excluded.username,
+			updated_at = excluded.updated_at
+	`, service, url, username)
+	if err != nil {
+		return fmt.Errorf("saving connection %q: %w", service, err)
+	}
+	return nil
+}
+
 // Get returns the connection for service with its secret decrypted.
 // Returns ErrNotFound if service isn't configured.
 func (s *Store) Get(ctx context.Context, service string) (*Connection, error) {
