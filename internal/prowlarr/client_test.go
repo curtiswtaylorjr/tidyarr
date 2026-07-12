@@ -101,3 +101,106 @@ func TestSearch_PropagatesErrorStatus(t *testing.T) {
 		t.Fatal("expected an error for a 401 response")
 	}
 }
+
+// TestSearch_QueryStringUnaffectedByStructuredSearch guards the refactor:
+// factoring the shared do+parse helper must leave Search's exact wire
+// contract (type=search + query + no structured params) byte-identical.
+func TestSearch_QueryStringUnaffectedByStructuredSearch(t *testing.T) {
+	var gotPath string
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.String()
+		w.Write([]byte(`[]`))
+	})
+
+	if _, err := c.Search(context.Background(), "Some Movie", []int{2000}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(gotPath, "type=search") {
+		t.Errorf("expected type=search, got %q", gotPath)
+	}
+	if !strings.Contains(gotPath, "query=Some+Movie") {
+		t.Errorf("expected query param, got %q", gotPath)
+	}
+	for _, structured := range []string{"tmdbid", "imdbid", "tvdbid", "season", "ep="} {
+		if strings.Contains(gotPath, structured) {
+			t.Errorf("free-text Search leaked structured param %q: %q", structured, gotPath)
+		}
+	}
+}
+
+func TestSearchByID(t *testing.T) {
+	tests := []struct {
+		name        string
+		params      SearchByIDParams
+		wantType    string
+		wantPresent []string // substrings that must appear in the query string
+		wantAbsent  []string // substrings that must NOT appear
+	}{
+		{
+			name:        "TMDBID only routes to movie search",
+			params:      SearchByIDParams{TMDBID: 550, Categories: []int{2000}},
+			wantType:    "type=movie",
+			wantPresent: []string{"tmdbid=550", "categories=2000"},
+			wantAbsent:  []string{"type=tvsearch", "imdbid", "tvdbid", "season", "ep="},
+		},
+		{
+			name:        "IMDBID only strips tt prefix and routes to movie search",
+			params:      SearchByIDParams{IMDBID: "tt0137523"},
+			wantType:    "type=movie",
+			wantPresent: []string{"imdbid=0137523"},
+			wantAbsent:  []string{"imdbid=tt0137523", "tmdbid", "tvdbid", "type=tvsearch"},
+		},
+		{
+			name:        "TVDBID with season and episode routes to tv search",
+			params:      SearchByIDParams{TVDBID: 81189, Season: 2, Episode: 5},
+			wantType:    "type=tvsearch",
+			wantPresent: []string{"tvdbid=81189", "season=2", "ep=5"},
+			wantAbsent:  []string{"type=movie", "tmdbid", "imdbid"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var gotPath string
+			c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+				gotPath = r.URL.String()
+				if r.Header.Get("X-Api-Key") != "test-key" {
+					t.Error("missing X-Api-Key header")
+				}
+				w.Write([]byte(searchFixture))
+			})
+
+			releases, err := c.SearchByID(context.Background(), tt.params)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			// Shared parse path must yield the same Release shape as Search.
+			if len(releases) != 2 || releases[0].Protocol != Torrent || releases[1].Protocol != Usenet {
+				t.Errorf("unexpected releases from shared parse path: %+v", releases)
+			}
+			if !strings.Contains(gotPath, tt.wantType) {
+				t.Errorf("expected %q in %q", tt.wantType, gotPath)
+			}
+			for _, want := range tt.wantPresent {
+				if !strings.Contains(gotPath, want) {
+					t.Errorf("expected %q in %q", want, gotPath)
+				}
+			}
+			for _, absent := range tt.wantAbsent {
+				if strings.Contains(gotPath, absent) {
+					t.Errorf("did not expect %q in %q", absent, gotPath)
+				}
+			}
+		})
+	}
+}
+
+func TestSearchByID_PropagatesErrorStatus(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	})
+
+	if _, err := c.SearchByID(context.Background(), SearchByIDParams{TMDBID: 1}); err == nil {
+		t.Fatal("expected an error for a 401 response")
+	}
+}

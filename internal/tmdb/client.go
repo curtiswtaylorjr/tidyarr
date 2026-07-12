@@ -13,9 +13,10 @@
 // by TVDB id but SAK's library keys everything by TMDB id.
 //
 // SearchMovies/Trending/Popular/ExternalIDs are exercised live by this
-// project's Discover flow. SeasonDetails and FindByTVDBID are NOT — their
-// response shapes are modeled from TMDB's public API documentation only,
-// per this project's honesty-about-unverified-assumptions convention.
+// project's Discover flow. SeasonDetails, FindByTVDBID, MovieDetails, and
+// TVDetails are NOT — their response shapes are modeled from TMDB's public
+// API documentation only, per this project's
+// honesty-about-unverified-assumptions convention.
 package tmdb
 
 import (
@@ -185,6 +186,92 @@ func (c *Client) ExternalIDs(ctx context.Context, tmdbTVID int) (tvdbID int, err
 		return 0, err
 	}
 	return resp.TVDBID, nil
+}
+
+// MovieDetails is the subset of TMDB's /movie/{id} response SAK needs to
+// turn a picked TMDB id into a precise, id-based indexer query — chiefly
+// IMDBID, which /movie/{id} carries natively at the top level (no separate
+// external_ids round-trip, unlike TV — see TVDetails). Runtime/Genres are
+// cheap extras from the same response.
+type MovieDetails struct {
+	ID      int
+	Title   string
+	IMDBID  string // "" if TMDB has none on file
+	Runtime int    // minutes; 0 if TMDB reports null
+	Genres  []string
+}
+
+type movieDetailsResponse struct {
+	ID      int    `json:"id"`
+	Title   string `json:"title"`
+	IMDBID  string `json:"imdb_id"`
+	Runtime int    `json:"runtime"`
+	Genres  []struct {
+		Name string `json:"name"`
+	} `json:"genres"`
+}
+
+// MovieDetails fetches TMDB's /movie/{id} — the details-by-id lookup that
+// resolves a browsed/picked TMDB movie id into the structured ids
+// (especially imdb_id) an id-based Prowlarr search wants. Direct sibling of
+// ExternalIDs in request-build/response-decode style; a null runtime or
+// absent imdb_id decodes to the zero value without erroring.
+func (c *Client) MovieDetails(ctx context.Context, tmdbID int) (MovieDetails, error) {
+	var resp movieDetailsResponse
+	if err := c.do(ctx, fmt.Sprintf("/movie/%d", tmdbID), nil, &resp); err != nil {
+		return MovieDetails{}, err
+	}
+	details := MovieDetails{
+		ID:      resp.ID,
+		Title:   resp.Title,
+		IMDBID:  resp.IMDBID,
+		Runtime: resp.Runtime,
+		Genres:  make([]string, len(resp.Genres)),
+	}
+	for i, g := range resp.Genres {
+		details.Genres[i] = g.Name
+	}
+	return details, nil
+}
+
+// TVDetails is the subset of TMDB's /tv/{id} response SAK needs. Note the
+// deliberate asymmetry with MovieDetails: TMDB's /tv/{id} has NO top-level
+// imdb_id field — a TV show's IMDB id lives only under /tv/{id}/external_ids
+// (the same endpoint ExternalIDs already hits for tvdb_id). Rather than fake
+// parity with a bound-to-be-empty IMDBID field, this type omits it; a caller
+// that needs a TV show's IMDB id must fetch external_ids separately.
+type TVDetails struct {
+	ID     int
+	Title  string
+	Genres []string
+}
+
+type tvDetailsResponse struct {
+	ID     int    `json:"id"`
+	Name   string `json:"name"`
+	Genres []struct {
+		Name string `json:"name"`
+	} `json:"genres"`
+}
+
+// TVDetails fetches TMDB's /tv/{id} — the details-by-id sibling of
+// MovieDetails for the TV catalog (title normalized from TMDB's `name`
+// field, matching normalize's convention). See TVDetails' type doc for why
+// no IMDBID is returned here.
+func (c *Client) TVDetails(ctx context.Context, tmdbID int) (TVDetails, error) {
+	var resp tvDetailsResponse
+	if err := c.do(ctx, fmt.Sprintf("/tv/%d", tmdbID), nil, &resp); err != nil {
+		return TVDetails{}, err
+	}
+	details := TVDetails{
+		ID:     resp.ID,
+		Title:  resp.Name,
+		Genres: make([]string, len(resp.Genres)),
+	}
+	for i, g := range resp.Genres {
+		details.Genres[i] = g.Name
+	}
+	return details, nil
 }
 
 // SeasonEpisode is one episode as TMDB's season-details endpoint reports

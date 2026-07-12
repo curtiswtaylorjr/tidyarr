@@ -167,6 +167,91 @@ func TestSearchTV_NormalizesAndSendsQuery(t *testing.T) {
 	}
 }
 
+func TestMovieDetails_ParsesIMDBRuntimeGenres(t *testing.T) {
+	var gotPath string
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id": 550, "title": "Fight Club", "imdb_id": "tt0137523", "runtime": 139,
+		  "genres": [{"id": 18, "name": "Drama"}, {"id": 53, "name": "Thriller"}]}`))
+	})
+
+	details, err := c.MovieDetails(context.Background(), 550)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if gotPath != "/movie/550" {
+		t.Errorf("unexpected path: %s", gotPath)
+	}
+	if details.ID != 550 || details.Title != "Fight Club" || details.IMDBID != "tt0137523" || details.Runtime != 139 {
+		t.Errorf("unexpected details: %+v", details)
+	}
+	if len(details.Genres) != 2 || details.Genres[0] != "Drama" || details.Genres[1] != "Thriller" {
+		t.Errorf("unexpected genres: %+v", details.Genres)
+	}
+}
+
+func TestMovieDetails_HandlesNullOptionalFields(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		// TMDB returns null for a not-yet-known runtime and an absent imdb_id.
+		w.Write([]byte(`{"id": 999, "title": "Unreleased", "imdb_id": null, "runtime": null, "genres": null}`))
+	})
+
+	details, err := c.MovieDetails(context.Background(), 999)
+	if err != nil {
+		t.Fatalf("unexpected error decoding null fields: %v", err)
+	}
+	if details.ID != 999 || details.Title != "Unreleased" {
+		t.Errorf("unexpected details: %+v", details)
+	}
+	if details.IMDBID != "" || details.Runtime != 0 {
+		t.Errorf("expected zero-valued optional fields, got %+v", details)
+	}
+	if len(details.Genres) != 0 {
+		t.Errorf("expected no genres for null, got %+v", details.Genres)
+	}
+}
+
+func TestTVDetails_NormalizesNameToTitle(t *testing.T) {
+	var gotPath string
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id": 1396, "name": "Breaking Bad",
+		  "genres": [{"id": 18, "name": "Drama"}]}`))
+	})
+
+	details, err := c.TVDetails(context.Background(), 1396)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if gotPath != "/tv/1396" {
+		t.Errorf("unexpected path: %s", gotPath)
+	}
+	if details.ID != 1396 || details.Title != "Breaking Bad" {
+		t.Errorf("unexpected details: %+v", details)
+	}
+	if len(details.Genres) != 1 || details.Genres[0] != "Drama" {
+		t.Errorf("unexpected genres: %+v", details.Genres)
+	}
+}
+
+func TestTVDetails_HandlesNullGenres(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id": 1, "name": "Sparse Show", "genres": null}`))
+	})
+
+	details, err := c.TVDetails(context.Background(), 1)
+	if err != nil {
+		t.Fatalf("unexpected error decoding null genres: %v", err)
+	}
+	if details.Title != "Sparse Show" || len(details.Genres) != 0 {
+		t.Errorf("unexpected details: %+v", details)
+	}
+}
+
 func TestSeasonDetails_NormalizesEpisodes(t *testing.T) {
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/tv/2/season/1" {
