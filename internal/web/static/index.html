@@ -435,20 +435,35 @@ function buildConnectionControls(service, existingConn, onSaved, opts) {
 }
 
 // ---- Setup Wizard ----
-// Three steps, each with exactly one Save: (1) all three library root folders
-// (Movies/Series required to do anything at all — neither proxies a *arr app
-// anymore — Adult optional), (2) every service connection (Prowlarr, download
-// clients, Jellyfin, Whisparr — all optional, one combined save), (3) the AI
-// provider + model + its connection (optional). Then hands off to the normal
-// app. Shown automatically until dismissed (see boot()); reachable afterward
-// from Settings' "Re-run setup wizard" link. Full per-connection Test/Save/
+// Three PAGES, one visible at a time, each with exactly one Save: (1) all
+// three library root folders (Movies/Series required to do anything at all —
+// neither proxies a *arr app anymore — Adult optional), (2) every service
+// connection (Prowlarr, download clients, Jellyfin, Whisparr — all optional,
+// one combined save), (3) the AI provider + model + its connection (optional).
+// Saving a page auto-advances to the next one (an empty/skip save on an
+// optional page still advances — Save doubles as "done with this page", there
+// is no separate Skip button); "Continue to SAK" lives ONLY on page 3, so
+// finishing setup always means paging through all three, even to skip the
+// optional ones. Shown automatically until dismissed (see boot()); reachable
+// afterward from Settings' "Re-run setup wizard" link (always restarts at
+// page 1 — no deep link to a specific page). Full per-connection Test/Save/
 // Delete CRUD lives in Settings' Connections table — the wizard is first-run
-// setup only, so it collapses each step to a single persist action.
+// setup only, so it collapses each page to a single persist action.
 
-async function renderWizard(container) {
+const WIZARD_PAGE_INTROS = {
+  1: "Movies and Series each need a library root folder to do anything at all — the Adult path is optional.",
+  2: "Every service connection here is optional — fill in only what you use.",
+  3: "An AI provider is optional — it powers Adult identification, the Movies/Series title-guess fallback, and Kids classification.",
+};
+
+async function renderWizard(container, page) {
+  page = page || 1;
   container.innerHTML = "";
   container.appendChild(el("h2", { text: "Set up SAK" }));
-  container.appendChild(el("p", { class: "muted", text: "Movies and Series each need a library root folder to do anything at all — the Adult path, every service connection, and an AI provider are all optional." }));
+  container.appendChild(el("p", { class: "muted", text: "Step " + page + " of 3. " + WIZARD_PAGE_INTROS[page] }));
+  if (page > 1) {
+    container.appendChild(el("button", { type: "button", text: "← Back", style: "margin-bottom:0.75rem", onclick: async () => { await renderWizard(container, page - 1); } }));
+  }
 
   let status, connections;
   try {
@@ -459,35 +474,38 @@ async function renderWizard(container) {
   const modeStatusByMode = {};
   for (const ms of status.modes) modeStatusByMode[ms.mode] = ms;
 
-  // LAN scan for the docker-DNS-reachable services — fetched ONCE here and
-  // passed down to each step, so the three known-host steps don't each
-  // re-probe. A findings is only ever a HINT to verify (an unauthenticated
-  // identity response is spoofable) — the UI copy and the "Use this URL"
-  // (never auto-save) flow reflect that. A scan failure must never break the
-  // wizard, so this is best-effort.
-  let findingByService = {};
-  try {
-    const known = await api("/api/netscan/known");
-    for (const f of known) findingByService[f.service] = f;
-  } catch (e) { /* no scan results — steps just show no hint */ }
+  if (page === 1) {
+    // Page 1 — all three library root folders in one fieldset, one Save.
+    // Movies and Series stay effectively required (they gate "Continue to
+    // SAK" on page 3 via /api/setup/status); Adult is optional. Saving
+    // advances to page 2 regardless of what was filled in.
+    container.appendChild(await buildMediaPathsWizardStep(1, modeStatusByMode, container));
+    return;
+  }
 
-  let step = 1;
+  if (page === 2) {
+    // Page 2 — every service connection (all optional) in one fieldset, one
+    // Save. The netscan hints ride along per-service exactly as before:
+    // Prowlarr/qBittorrent/NZBGet are reachable by conventional container
+    // hostname on SAK's own docker network (hints from a known-host scan,
+    // fetched only on this page), while Jellyfin lives on a different host
+    // and gets a "probe a specific host" input. Whisparr is a plain
+    // connection with no netscan hint (not a scan target). Saving advances
+    // to page 3 regardless of how many (if any) services were filled in.
+    let findingByService = {};
+    try {
+      const known = await api("/api/netscan/known");
+      for (const f of known) findingByService[f.service] = f;
+    } catch (e) { /* no scan results — page just shows no hints */ }
+    container.appendChild(buildConnectedServicesWizardStep(2, byService, findingByService, container));
+    return;
+  }
 
-  // Step 1 — all three library root folders in one fieldset, one Save. Movies
-  // and Series stay effectively required (they gate "Continue to SAK" below via
-  // /api/setup/status); Adult is optional.
-  container.appendChild(await buildMediaPathsWizardStep(step++, modeStatusByMode, container));
-
-  // Step 2 — every service connection (all optional) in one fieldset, one Save.
-  // The netscan hints ride along per-service, exactly as before: Prowlarr/
-  // qBittorrent/NZBGet are reachable by conventional container hostname on SAK's
-  // own docker network (hints from the pre-fetched known-host scan), while
-  // Jellyfin lives on a different host and gets a "probe a specific host" input.
-  // Whisparr is a plain connection with no netscan hint (not a scan target).
-  container.appendChild(buildConnectedServicesWizardStep(step++, byService, findingByService, container));
-
-  // Step 3 — AI provider + model + that provider's connection, one Save.
-  container.appendChild(await buildWizardAIStep(step++, byService, container));
+  // Page 3 — AI provider + model + that provider's connection, one Save (this
+  // re-renders page 3 itself on success, refreshing its own ✓ marker, rather
+  // than advancing further — there is no page 4). "Continue to SAK" lives
+  // here and only here.
+  container.appendChild(await buildWizardAIStep(3, byService, container));
 
   // Movies and Series can't do anything at all without a library root
   // folder configured, so "Continue to SAK" stays disabled until both are
@@ -504,7 +522,7 @@ async function renderWizard(container) {
     } }),
     el("span", { class: canContinue ? "muted" : "error", text: canContinue
       ? "You can revisit any of this later in Settings."
-      : "Set Movies' and Series' library root folders above to continue — SAK can't review anything without them." }),
+      : "Go back to page 1 and set Movies' and Series' library root folders to continue — SAK can't review anything without them." }),
   ]);
   container.appendChild(footer);
 }
@@ -559,7 +577,7 @@ function buildConnectedServicesWizardStep(n, byService, findingByService, wizard
   const saveBtn = el("button", { class: "primary", type: "submit", text: "Save connected services" });
   const saveAll = async () => {
     saveBtn.disabled = true;
-    let anyFailed = false, anySaved = false;
+    let anyFailed = false;
     for (const { service, c } of controls) {
       // Skip anything the operator didn't actually touch — an already-
       // configured service's key field is always blank on load (the real key
@@ -569,7 +587,7 @@ function buildConnectedServicesWizardStep(n, byService, findingByService, wizard
       if (!c.dirty || !c.urlInput.value.trim()) { c.status.textContent = ""; continue; }
       try {
         await api("/api/connections/" + service, { method: "PUT", body: JSON.stringify(c.requestBody()) });
-        c.status.textContent = "✓ saved"; c.status.className = "muted"; anySaved = true;
+        c.status.textContent = "✓ saved"; c.status.className = "muted";
       } catch (e) { c.status.textContent = "✗ " + e.message; c.status.className = "error"; anyFailed = true; }
     }
     saveBtn.disabled = false;
@@ -579,9 +597,11 @@ function buildConnectedServicesWizardStep(n, byService, findingByService, wizard
       status.textContent = "Some services failed to save — see the marked ones above."; status.className = "error";
       return;
     }
-    if (!anySaved) { status.textContent = "Nothing to save yet — fill in at least one service."; status.className = "muted"; return; }
-    // All clean — re-render so legends/✓ markers and downstream reads refresh.
-    await renderWizard(wizardContainer);
+    // No failures — advance to page 3, whether or not anything was actually
+    // filled in. Every service here is optional, so clicking Save with
+    // nothing entered is a valid, deliberate "skip this page" action; there's
+    // no separate Skip button, Save doubles as it.
+    await renderWizard(wizardContainer, 3);
   };
   form.addEventListener("submit", (e) => { e.preventDefault(); saveAll(); });
   form.appendChild(el("div", { class: "row", style: "margin-top:0.75rem" }, [saveBtn, status]));
@@ -741,8 +761,11 @@ async function buildMediaPathsWizardStep(n, modeStatusByMode, wizardContainer) {
       aggStatus.textContent = "Some paths failed to save — see the marked ones above."; aggStatus.className = "error";
       return;
     }
-    // All clean — re-render so legends/✓ and the Continue gating refresh.
-    await renderWizard(wizardContainer);
+    // No failures — advance to page 2, whether or not Adult (optional) was
+    // filled in. A blank Movies/Series simply stays unconfigured, which keeps
+    // "Continue to SAK" disabled later on page 3 — paging forward doesn't
+    // enforce required fields itself, only finishing does.
+    await renderWizard(wizardContainer, 2);
   };
   fs.appendChild(el("form", { onsubmit: (e) => { e.preventDefault(); saveAll(); } },
     labelEls.concat([el("div", { class: "row", style: "margin-top:0.5rem" }, [saveBtn, aggStatus])])));
@@ -802,7 +825,9 @@ async function buildWizardAIStep(n, byService, wizardContainer) {
         await api("/api/connections/" + providerSelect.value, { method: "PUT", body: JSON.stringify(currentConn.requestBody()) });
       }
       status.textContent = "✓ saved"; status.className = "muted";
-      await renderWizard(wizardContainer);
+      // Re-render page 3 itself (not page 4 — there isn't one) so its own ✓
+      // marker refreshes; "Continue to SAK" lives on this same page already.
+      await renderWizard(wizardContainer, 3);
     } catch (e) { status.textContent = "✗ " + e.message; status.className = "error"; saveBtn.disabled = false; }
   };
 
