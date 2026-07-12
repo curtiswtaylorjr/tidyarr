@@ -25,6 +25,7 @@ import (
 	"github.com/curtiswtaylorjr/sakms/internal/mode"
 	"github.com/curtiswtaylorjr/sakms/internal/phash"
 	"github.com/curtiswtaylorjr/sakms/internal/proposals"
+	"github.com/curtiswtaylorjr/sakms/internal/recheck"
 	"github.com/curtiswtaylorjr/sakms/internal/secrets"
 	"github.com/curtiswtaylorjr/sakms/internal/settings"
 	"github.com/curtiswtaylorjr/sakms/internal/videophash"
@@ -74,6 +75,10 @@ func run() error {
 	settingsStore := settings.New(sqlDB)
 	grabsStore := grabs.New(sqlDB)
 	libStore := library.New(sqlDB)
+	// watchStore backs the opt-in background recheck job (internal/recheck) —
+	// its own table, shared with nothing else. Constructed here only so the one
+	// start-call below can be handed it; nothing else in the program reads it.
+	watchStore := recheck.NewWatchStore(sqlDB)
 	// secretStore doubles as authStore's OIDC-client-secret decryptor, and
 	// the outbound HTTP client is the same outboundTimeout-bounded one every
 	// other external client in this program uses — it bounds OIDC discovery,
@@ -178,6 +183,14 @@ func run() error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	// DELIBERATE, opt-in exception to this project's "manual by default, no
+	// background pollers" rule (see internal/recheck's package doc + CLAUDE.md):
+	// one background availability-recheck loop, gated OFF by default (interval
+	// 0). Reuses the same signal-driven ctx as the HTTP server, so shutdown
+	// cancels it too. To remove the feature entirely: delete internal/recheck,
+	// this line, and watchStore's construction above.
+	go recheck.Run(ctx, recheck.LoadInterval(ctx, settingsStore), connStore, settingsStore, watchStore)
 
 	select {
 	case err := <-errCh:

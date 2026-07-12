@@ -133,6 +133,12 @@ func NewMux(httpClient *http.Client, connStore *connections.Store, propStore *pr
 	mux.HandleFunc("GET /api/settings/ai-model", getOllamaModelHandler(settingsStore, mode.AIModelKey))
 	mux.HandleFunc("PUT /api/settings/ai-model", putOllamaModelHandler(settingsStore, mode.AIModelKey))
 
+	// Interval for the opt-in background availability recheck job (see
+	// internal/recheck) — 0/off by default. Just a settings scalar here; the
+	// job itself lives in its own package, started once from main.
+	mux.HandleFunc("GET /api/settings/recheck-interval", getRecheckIntervalHandler(settingsStore))
+	mux.HandleFunc("PUT /api/settings/recheck-interval", putRecheckIntervalHandler(settingsStore))
+
 	mux.HandleFunc("POST /api/proposals/{id}/apply", applyProposalHandler(httpClient, connStore, settingsStore, propStore, libStore))
 	mux.HandleFunc("POST /api/proposals/{id}/submit-draft", submitDraftHandler(httpClient, connStore, settingsStore, propStore))
 	mux.HandleFunc("POST /api/proposals/{id}/dismiss", dismissProposalHandler(propStore))
