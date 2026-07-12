@@ -32,6 +32,47 @@ func TestSearchByHash_ParsesResponse(t *testing.T) {
 	}
 }
 
+func TestBrowseScenes_PaginatesWithoutSearchTerm(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		if q.Get("per_page") != "10" || q.Get("page") != "3" {
+			t.Errorf("expected per_page=10 page=3, got %v", q)
+		}
+		if _, hasQ := q["q"]; hasQ {
+			t.Errorf("expected no search term on a browse, got %v", q)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"_id":"s9","title":"Browsed Scene","date":"2024-02-02","site":{"name":"BrowseSite"}}]}`))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "testkey", &http.Client{Timeout: 5 * time.Second})
+	out, err := c.BrowseScenes(context.Background(), 3, 10)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(out) != 1 || out[0].Title != "Browsed Scene" || out[0].Site != "BrowseSite" {
+		t.Fatalf("got %+v", out)
+	}
+}
+
+func TestBrowseScenes_ClampsBadPagination(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		if q.Get("per_page") != "20" || q.Get("page") != "1" {
+			t.Errorf("expected defaulted per_page=20 page=1, got %v", q)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[]}`))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "testkey", &http.Client{Timeout: 5 * time.Second})
+	if _, err := c.BrowseScenes(context.Background(), 0, -5); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestSearchByTitle_OmitsSiteWhenEmpty(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()

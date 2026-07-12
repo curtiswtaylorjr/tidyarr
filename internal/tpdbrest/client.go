@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 
 	"github.com/curtiswtaylorjr/sakms/internal/httpx"
 )
@@ -87,6 +88,31 @@ func (c *Client) get(ctx context.Context, params url.Values) ([]Scene, error) {
 func (c *Client) Ping(ctx context.Context) error {
 	_, err := c.get(ctx, url.Values{"per_page": {"1"}})
 	return err
+}
+
+// defaultBrowsePerPage is BrowseScenes' page size when the caller passes a
+// non-positive per-page count — a sane default for a Discover grid.
+const defaultBrowsePerPage = 20
+
+// BrowseScenes returns one page of ThePornDB's scene catalog with NO search
+// term — the plain paginated browse backing Adult's Discover screen, reusing
+// the exact bare-pagination call shape Ping already proved works (per_page/page,
+// no q). page and perPage are clamped to sane minimums (page >= 1; perPage
+// defaults to defaultBrowsePerPage when non-positive) so a bad client value can
+// never produce a malformed query. Ordering/trending params are deliberately
+// NOT sent — v1 is plain browse only (see the plan's Stage 7 deferral).
+func (c *Client) BrowseScenes(ctx context.Context, page, perPage int) ([]Scene, error) {
+	if perPage <= 0 {
+		perPage = defaultBrowsePerPage
+	}
+	if page <= 0 {
+		page = 1
+	}
+	params := url.Values{
+		"per_page": {strconv.Itoa(perPage)},
+		"page":     {strconv.Itoa(page)},
+	}
+	return c.get(ctx, params)
 }
 
 // SearchByHash looks up scenes by perceptual hash (TPDB's GraphQL fingerprint

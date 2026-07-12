@@ -6,15 +6,21 @@
 // tmdb.Client's details-by-id calls) and runs one id-scoped prowlarr.SearchByID,
 // reporting only whether anything came back.
 //
+// Adult is the one asymmetric case: an Adult scene has no tmdb/imdb/tvdb id, so
+// CheckAdultScene skips TMDB entirely and probes prowlarr with a free-text
+// studio+title query over the XXX category (see its doc).
+//
 // It deliberately does not import internal/api (that would be a cycle — api
 // imports this), so the Newznab category values below are local constants that
-// MUST mirror internal/api's categoriesForSearch (Movies=2000, Series=5000);
-// they're kept in sync by convention, not a shared symbol.
+// mirror internal/api's categoriesForSearch (Movies=2000, Series=5000), kept in
+// sync by convention, not a shared symbol — with the Adult category (6000) the
+// one deliberate exception, see adultCategory.
 package availability
 
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/curtiswtaylorjr/sakms/internal/prowlarr"
@@ -28,6 +34,11 @@ import (
 const (
 	moviesCategory = 2000
 	seriesCategory = 5000
+	// adultCategory is the XXX Newznab range (6000). This deliberately does
+	// NOT mirror categoriesForSearch, which still gives Adult 2000 — a
+	// pre-existing imprecision Stage 6 left untouched; CheckAdultScene is new
+	// code with no existing behavior to preserve, so it uses the correct range.
+	adultCategory = 6000
 )
 
 // Result is one availability probe's outcome — an existence check, never a
@@ -125,6 +136,31 @@ func CheckSeries(ctx context.Context, tmdbClient *tmdb.Client, prowlarrClient *p
 	})
 	if err != nil {
 		return Result{}, fmt.Errorf("probing prowlarr for tmdb id %d: %w", tmdbID, err)
+	}
+	return newResult(releases), nil
+}
+
+// CheckAdultScene probes whether any release exists for an Adult scene. Unlike
+// CheckMovie/CheckSeries, an Adult scene has no tmdb/imdb/tvdb id to search by —
+// its identity is a stash-box/TPDB scene (see identify.MatchResult's Box/SceneID)
+// and Adult releases aren't id-indexed on the trackers — so this is deliberately
+// the one asymmetric case that uses the free-text prowlarr.Search path (a
+// studio+title query) rather than the id-scoped SearchByID every other mode
+// uses. It probes the XXX (6000-range) Newznab category (see adultCategory).
+//
+// There is no tmdbClient parameter: Adult never touches TMDB. A nil
+// prowlarrClient yields a clear "not configured" error rather than a panic,
+// matching CheckMovie/CheckSeries' tolerant-nil convention — so a caller
+// reaching this directly (e.g. a future recheck job) gets an honest error.
+func CheckAdultScene(ctx context.Context, prowlarrClient *prowlarr.Client, studio, title string) (Result, error) {
+	if prowlarrClient == nil {
+		return Result{}, fmt.Errorf("prowlarr isn't configured — add it in Settings first")
+	}
+
+	query := strings.TrimSpace(strings.TrimSpace(studio) + " " + strings.TrimSpace(title))
+	releases, err := prowlarrClient.Search(ctx, query, []int{adultCategory})
+	if err != nil {
+		return Result{}, fmt.Errorf("probing prowlarr for adult scene %q: %w", query, err)
 	}
 	return newResult(releases), nil
 }

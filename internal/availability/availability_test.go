@@ -251,6 +251,108 @@ func TestCheckSeries_DegenerateQueryShortCircuits(t *testing.T) {
 	assertCheckedAt(t, res.CheckedAt)
 }
 
+func TestCheckAdultScene(t *testing.T) {
+	tests := []struct {
+		name          string
+		prowlarr      *prowlarr.Client
+		wantErr       bool
+		wantAvailable bool
+		wantCount     int
+	}{
+		{
+			name:          "available",
+			prowlarr:      fakeProwlarr(t, oneRelease, false),
+			wantAvailable: true,
+			wantCount:     1,
+		},
+		{
+			name:          "not available",
+			prowlarr:      fakeProwlarr(t, noReleases, false),
+			wantAvailable: false,
+			wantCount:     0,
+		},
+		{
+			name:     "prowlarr error",
+			prowlarr: fakeProwlarr(t, "", true),
+			wantErr:  true,
+		},
+		{
+			name:     "nil prowlarr client",
+			prowlarr: nil,
+			wantErr:  true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			res, err := CheckAdultScene(context.Background(), tt.prowlarr, "Tushy", "Some Scene")
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("expected an error, got none (result %+v)", res)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if res.Available != tt.wantAvailable || res.ReleaseCount != tt.wantCount {
+				t.Errorf("got available=%v count=%d, want available=%v count=%d", res.Available, res.ReleaseCount, tt.wantAvailable, tt.wantCount)
+			}
+			assertCheckedAt(t, res.CheckedAt)
+		})
+	}
+}
+
+// TestCheckAdultScene_FreeTextStudioTitleQuery proves the probe combines
+// studio+title into one free-text query over the XXX (6000) category via the
+// existing free-text Search path (type=search) — NOT SearchByID — since Adult
+// releases have no tmdb/imdb/tvdb id to search by.
+func TestCheckAdultScene_FreeTextStudioTitleQuery(t *testing.T) {
+	var gotQuery, gotType, gotCats string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.Query().Get("query")
+		gotType = r.URL.Query().Get("type")
+		gotCats = r.URL.Query().Get("categories")
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(oneRelease))
+	}))
+	t.Cleanup(srv.Close)
+	prowlarrClient := prowlarr.New(prowlarr.Config{BaseURL: srv.URL, APIKey: "k"}, srv.Client())
+
+	if _, err := CheckAdultScene(context.Background(), prowlarrClient, "Tushy", "Some Scene"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if gotQuery != "Tushy Some Scene" {
+		t.Errorf("expected query=%q, got %q", "Tushy Some Scene", gotQuery)
+	}
+	if gotType != "search" {
+		t.Errorf("expected free-text type=search, got %q", gotType)
+	}
+	if gotCats != "6000" {
+		t.Errorf("expected categories=6000 (XXX range), got %q", gotCats)
+	}
+}
+
+// TestCheckAdultScene_TrimsBlankStudio proves an empty studio doesn't leave a
+// leading space in the query — the title alone is used.
+func TestCheckAdultScene_TrimsBlankStudio(t *testing.T) {
+	var gotQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.Query().Get("query")
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(noReleases))
+	}))
+	t.Cleanup(srv.Close)
+	prowlarrClient := prowlarr.New(prowlarr.Config{BaseURL: srv.URL, APIKey: "k"}, srv.Client())
+
+	if _, err := CheckAdultScene(context.Background(), prowlarrClient, "", "Just A Title"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if gotQuery != "Just A Title" {
+		t.Errorf("expected query=%q with no leading space, got %q", "Just A Title", gotQuery)
+	}
+}
+
 // TestCheckSeries_PassesTVDBIDAndSeasonEpisode proves the resolved TVDB id and
 // the season/episode scope flow into the Prowlarr tvsearch query.
 func TestCheckSeries_PassesTVDBIDAndSeasonEpisode(t *testing.T) {

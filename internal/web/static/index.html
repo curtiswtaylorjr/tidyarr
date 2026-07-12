@@ -103,14 +103,15 @@ const MODES = ["movies", "series", "adult"];
 const MODE_LABELS = { movies: "Movies", series: "Series", adult: "Adult" };
 // Which workflows apply to which mode — matches the backend's own wiring
 // (Dedup groups duplicates by TMDB id for Movies, by (show, season,
-// episode) for Series, by foreignID for Adult — see internal/dedup's
-// package doc; Tag is live for all three; Search/Discover is Movies/Series
-// only — Prowlarr/qBittorrent/NZBGet/TMDB replace Radarr/Sonarr's own
-// acquisition loop, not Whisparr's).
+// episode) for Series, by (box, scene_id) for Adult — see internal/dedup's
+// package doc; Tag is live for all three). The "search" tab is Movies/Series'
+// TMDB Discover + Prowlarr grab flow; for Adult it's a TPDB-backed Discover
+// browse + availability badge only (no grab flow yet — an Adult scene's grab
+// identity is a later stage), see renderSearch's adult branch.
 const MODE_WORKFLOWS = {
   movies: ["search", "rename", "purge", "dedup", "tag", "settings"],
   series: ["search", "rename", "purge", "dedup", "tag", "settings"],
-  adult:  ["rename", "purge", "dedup", "tag", "settings"],
+  adult:  ["search", "rename", "purge", "dedup", "tag", "settings"],
 };
 const VIEW_LABELS = { search: "Search", rename: "Rename", purge: "Purge", dedup: "Dedup", tag: "Tag", settings: "Settings" };
 
@@ -541,6 +542,10 @@ function episodeSearchQuery(title, seasonNumber, episodeNumber) {
 
 async function renderSearch(container) {
   const m = state.mode;
+  // Adult has no TMDB titles or Prowlarr-id grab flow — its "search" tab is a
+  // TPDB-backed Discover browse + search-by-term with an availability badge
+  // only (see renderAdultDiscover). Bail before the Movies/Series machinery.
+  if (m === "adult") { await renderAdultDiscover(container); return; }
   container.innerHTML = "";
   container.appendChild(el("h2", { text: "Search" }));
 
@@ -648,11 +653,70 @@ async function renderSearch(container) {
   await renderGrabs(grabsSlot, m);
 }
 
-// renderDiscover shows TMDB's trending titles as clickable poster cards.
-// onPick receives the raw discover item (id/title/mediaType) so the caller
-// can decide what to do — here, kick off a search prefilled with its title.
-async function renderDiscover(container, m, onPick) {
+// renderAdultDiscover is Adult's "search" view — a TPDB-backed Discover browse
+// with a search-by-term box, the Adult analogue of Movies/Series' TMDB Discover.
+// There is no release-search/grab flow here yet (an Adult scene's grab identity
+// is a different, later-stage concern); Stage 7 is browse + availability only.
+async function renderAdultDiscover(container) {
   container.innerHTML = "";
+  container.appendChild(el("h2", { text: "Discover" }));
+  const queryInput = el("input", { type: "text", placeholder: "Search scenes by title…", style: "max-width:20rem" });
+  const grid = el("div");
+  const load = (term) => renderDiscover(grid, "adult", null, { term });
+  queryInput.addEventListener("keydown", (e) => { if (e.key === "Enter") load(queryInput.value.trim()); });
+  container.appendChild(el("div", { class: "row" }, [
+    queryInput,
+    el("button", { class: "primary", text: "Search", onclick: () => load(queryInput.value.trim()) }),
+    el("button", { text: "Browse all", onclick: () => { queryInput.value = ""; load(""); } }),
+  ]));
+  container.appendChild(grid);
+  await load("");
+}
+
+// renderDiscover shows a browsable grid of pickable cards. For Movies/Series
+// it's TMDB's trending titles as poster cards; onPick receives the raw discover
+// item (id/title/mediaType) to kick off a search prefilled with its title. For
+// Adult it's TPDB scenes (Title/Studio/Date, no poster art and no click-to-grab
+// — see the adult branch), driven by opts.term ("" = browse, non-empty = title
+// search).
+async function renderDiscover(container, m, onPick, opts) {
+  container.innerHTML = "";
+  if (m === "adult") {
+    // Adult Discover is TPDB-backed: Title/Studio/Date cards (tpdbrest.Scene
+    // has no poster), no click-to-grab, and a per-card availability badge keyed
+    // on studio+title instead of a tmdbId (Adult releases aren't id-indexed).
+    const term = (opts && opts.term) || "";
+    let items;
+    const url = "/api/modes/adult/discover" + (term ? "?q=" + encodeURIComponent(term) : "");
+    try { items = await api(url); }
+    catch (e) { container.appendChild(el("div", { class: "muted", text: "Connect tpdb in Settings to browse scenes." })); return; }
+    if (!items.length) { container.appendChild(el("div", { class: "empty", text: term ? "No scenes match that search." : "No scenes to browse right now." })); return; }
+
+    const grid = el("div", { class: "poster-grid" });
+    for (const item of items) {
+      const subtitle = [item.studio, item.date].filter(Boolean).join(" · ");
+      const card = el("div", { class: "poster-card" }, [
+        el("div", { class: "poster-placeholder", text: item.title }),
+        el("div", { class: "poster-title", text: item.title }),
+      ]);
+      if (subtitle) card.appendChild(el("div", { class: "muted", text: subtitle }));
+      // Same deferred, fail-silently-by-removal availability pattern as
+      // Movies/Series, but Adult's probe takes studio+title (no tmdbId exists) —
+      // both free-text, so both are encodeURIComponent'd.
+      const badge = el("div", { class: "poster-avail muted", text: "checking…" });
+      card.appendChild(badge);
+      api("/api/modes/adult/availability?studio=" + encodeURIComponent(item.studio || "") + "&title=" + encodeURIComponent(item.title || ""))
+        .then((a) => {
+          badge.textContent = a.available ? ("✓ " + a.releaseCount + " found") : "— not found yet";
+          badge.style.color = a.available ? "var(--ok)" : "var(--muted)";
+        })
+        .catch(() => { badge.remove(); });
+      grid.appendChild(card);
+    }
+    container.appendChild(grid);
+    return;
+  }
+
   let items;
   try { items = await api("/api/modes/" + m + "/discover"); }
   catch (e) {
@@ -672,18 +736,16 @@ async function renderDiscover(container, m, onPick) {
     // Availability badge: a lightweight, non-blocking id-based indexer probe
     // fired once per card AFTER render (never eagerly for the whole list before
     // it paints) — the same deferred-per-item posture the tvdb-id resolve uses.
-    // Movies/Series only: the /availability endpoint 400s for Adult (its check
-    // is a later stage), so don't fire it there.
-    if (m !== "adult") {
-      const badge = el("div", { class: "poster-avail muted", text: "checking…" });
-      card.appendChild(badge);
-      api("/api/modes/" + m + "/availability?tmdbId=" + item.id)
-        .then((a) => {
-          badge.textContent = a.available ? ("✓ " + a.releaseCount + " found") : "— not found yet";
-          badge.style.color = a.available ? "var(--ok)" : "var(--muted)";
-        })
-        .catch(() => { badge.remove(); }); // probe failed (e.g. no prowlarr) — say nothing rather than a false negative
-    }
+    // (Adult never reaches here — it returns from its own branch above with a
+    // studio/title-based badge instead of this tmdbId one.)
+    const badge = el("div", { class: "poster-avail muted", text: "checking…" });
+    card.appendChild(badge);
+    api("/api/modes/" + m + "/availability?tmdbId=" + item.id)
+      .then((a) => {
+        badge.textContent = a.available ? ("✓ " + a.releaseCount + " found") : "— not found yet";
+        badge.style.color = a.available ? "var(--ok)" : "var(--muted)";
+      })
+      .catch(() => { badge.remove(); }); // probe failed (e.g. no prowlarr) — say nothing rather than a false negative
     grid.appendChild(card);
   }
   container.appendChild(grid);

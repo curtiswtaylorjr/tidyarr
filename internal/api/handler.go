@@ -95,6 +95,12 @@ func NewMux(httpClient *http.Client, connStore *connections.Store, propStore *pr
 	// tracked in grabsStore rather than propStore (see internal/grabs'
 	// package doc for why this isn't a proposals.Kind).
 	mux.HandleFunc("GET /api/modes/{mode}/discover", discoverHandler(httpClient, connStore, settingsStore))
+	// Adult Discover is TPDB-backed (browse + search-by-term), not TMDB — the
+	// concrete path wins over the {mode} wildcard above for Adult (see
+	// adultDiscoverHandler). Availability for Adult goes through the same
+	// {mode}/availability route below, which branches internally on the
+	// studio/title identity shape.
+	mux.HandleFunc("GET /api/modes/adult/discover", adultDiscoverHandler(httpClient, connStore))
 	mux.HandleFunc("GET /api/modes/{mode}/discover/tvdb-id", resolveTVDBIDHandler(httpClient, connStore, settingsStore))
 	mux.HandleFunc("GET /api/modes/{mode}/availability", availabilityHandler(httpClient, connStore, settingsStore))
 	mux.HandleFunc("GET /api/modes/{mode}/tmdb-search", tmdbSearchHandler(httpClient, connStore, settingsStore))
