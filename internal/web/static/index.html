@@ -54,6 +54,7 @@
   .poster-card img { width: 100%; aspect-ratio: 2/3; object-fit: cover; display: block; }
   .poster-placeholder { width: 100%; aspect-ratio: 2/3; background: var(--border); display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: 0.75rem; text-align: center; padding: 0.5rem; }
   .poster-title { padding: 0.4rem 0.5rem; font-size: 0.8rem; }
+  .poster-avail { padding: 0 0.5rem 0.4rem; font-size: 0.72rem; }
   .chip { display: inline-flex; align-items: center; gap: 0.3rem; background: var(--bg); border: 1px solid var(--border); border-radius: 999px; padding: 0.1rem 0.5rem; font-size: 0.8rem; margin: 0.1rem; }
   .chip button { border: none; background: none; padding: 0; margin: 0; line-height: 1; color: var(--muted); font-size: 0.85rem; }
   .error { color: var(--danger); font-size: 0.85rem; }
@@ -662,12 +663,28 @@ async function renderDiscover(container, m, onPick) {
 
   const grid = el("div", { class: "poster-grid" });
   for (const item of items) {
-    grid.appendChild(el("div", { class: "poster-card", onclick: () => onPick(item) }, [
+    const card = el("div", { class: "poster-card", onclick: () => onPick(item) }, [
       item.posterPath
         ? el("img", { src: posterURL(item.posterPath), alt: item.title })
         : el("div", { class: "poster-placeholder", text: item.title }),
       el("div", { class: "poster-title", text: item.title }),
-    ]));
+    ]);
+    // Availability badge: a lightweight, non-blocking id-based indexer probe
+    // fired once per card AFTER render (never eagerly for the whole list before
+    // it paints) — the same deferred-per-item posture the tvdb-id resolve uses.
+    // Movies/Series only: the /availability endpoint 400s for Adult (its check
+    // is a later stage), so don't fire it there.
+    if (m !== "adult") {
+      const badge = el("div", { class: "poster-avail muted", text: "checking…" });
+      card.appendChild(badge);
+      api("/api/modes/" + m + "/availability?tmdbId=" + item.id)
+        .then((a) => {
+          badge.textContent = a.available ? ("✓ " + a.releaseCount + " found") : "— not found yet";
+          badge.style.color = a.available ? "var(--ok)" : "var(--muted)";
+        })
+        .catch(() => { badge.remove(); }); // probe failed (e.g. no prowlarr) — say nothing rather than a false negative
+    }
+    grid.appendChild(card);
   }
   container.appendChild(grid);
 }
