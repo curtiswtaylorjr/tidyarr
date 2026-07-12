@@ -171,7 +171,10 @@ function fmtErr(err) {
 function pathInputWithBrowse(current, placeholder) {
   const input = el("input", { type: "text", value: current || "", placeholder: placeholder });
   const ac = el("div", { class: "autocomplete", style: "display:none" });
-  const browseBtn = el("button", { text: "Browse…", onclick: () => openBrowseModal(input) });
+  // type:"button" is required because this control now lives inside <form>
+  // wrappers (root-folder Save sections) — without it, a default-type button
+  // acts as the form's submit button and clicking Browse would submit the form.
+  const browseBtn = el("button", { type: "button", text: "Browse…", onclick: () => openBrowseModal(input) });
   const wrapper = el("div", { class: "path-field" }, [input, browseBtn, ac]);
 
   const closeAC = () => { ac.style.display = "none"; ac.innerHTML = ""; };
@@ -334,13 +337,22 @@ function buildConnectionControls(service, existingConn, onSaved) {
       status.className = result.ok ? "muted" : "error";
     } catch (e) { status.textContent = "✗ " + e.message; status.className = "error"; }
   } });
-  const saveBtn = el("button", { class: "primary", text: "Save", onclick: async () => {
+  const save = async () => {
     try {
       await api("/api/connections/" + service, { method: "PUT", body: JSON.stringify(requestBody()) });
       status.textContent = "✓ saved"; status.className = "muted";
       if (onSaved) await onSaved();
     } catch (e) { status.textContent = "✗ " + e.message; status.className = "error"; }
-  } });
+  };
+  const saveBtn = el("button", { class: "primary", text: "Save", onclick: save });
+  // Enter in any of this connection's fields saves it. These controls are
+  // laid out across separate table cells (Settings' Connections table), so a
+  // <form> wrapper can't span them — a per-input keydown is the layout-agnostic
+  // equivalent, and works identically in the Wizard's row layout too.
+  const saveOnEnter = (e) => { if (e.key === "Enter") { e.preventDefault(); save(); } };
+  urlInput.addEventListener("keydown", saveOnEnter);
+  usernameInput.addEventListener("keydown", saveOnEnter);
+  keyInput.addEventListener("keydown", saveOnEnter);
   const deleteBtn = el("button", { class: "danger", text: "Delete", disabled: !existingConn, onclick: async () => {
     if (!confirm("Remove the " + service + " connection?")) return;
     try {
@@ -428,15 +440,18 @@ async function buildLibraryWizardStep(m, n, configured, wizardContainer) {
   ]);
   const { wrapper, input: pathInput } = pathInputWithBrowse(current, "/path/to/" + MODE_LABELS[m]);
   const status = el("span", { class: "muted" });
-  const saveBtn = el("button", { class: "primary", text: "Save", onclick: async () => {
+  const save = async () => {
     try {
       await api("/api/modes/" + m + "/library/root-folder", { method: "PUT", body: JSON.stringify({ path: pathInput.value }) });
       status.textContent = "✓ saved"; status.className = "muted";
       await renderWizard(wizardContainer);
     } catch (e) { status.textContent = "✗ " + e.message; status.className = "error"; }
-  } });
-  fs.appendChild(el("label", {}, [document.createTextNode("Root folder"), wrapper]));
-  fs.appendChild(el("div", { class: "row", style: "margin-top:0.5rem" }, [saveBtn, status]));
+  };
+  const saveBtn = el("button", { class: "primary", type: "submit", text: "Save" });
+  fs.appendChild(el("form", { onsubmit: (e) => { e.preventDefault(); save(); } }, [
+    el("label", {}, [document.createTextNode("Root folder"), wrapper]),
+    el("div", { class: "row", style: "margin-top:0.5rem" }, [saveBtn, status]),
+  ]));
   return fs;
 }
 
@@ -458,13 +473,14 @@ async function buildWizardAIStep(n, byService, wizardContainer) {
   for (const p of AI_PROVIDERS) providerSelect.appendChild(el("option", { value: p, text: p, selected: p === provider ? "selected" : null }));
   const modelInput = el("input", { type: "text", value: model, placeholder: "e.g. qwen2.5vl:7b, gpt-4o-mini, gemini-2.5-flash, claude-haiku-4-5" });
   const modelStatus = el("span", { class: "muted" });
-  const saveModelBtn = el("button", { text: "Save provider + model", onclick: async () => {
+  const saveModel = async () => {
     try {
       await api("/api/settings/ai-provider", { method: "PUT", body: JSON.stringify({ provider: providerSelect.value }) });
       await api("/api/settings/ai-model", { method: "PUT", body: JSON.stringify({ model: modelInput.value }) });
       modelStatus.textContent = "✓ saved"; modelStatus.className = "muted";
     } catch (e) { modelStatus.textContent = "✗ " + e.message; modelStatus.className = "error"; }
-  } });
+  };
+  const saveModelBtn = el("button", { type: "submit", text: "Save provider + model" });
 
   const connectionSlot = el("div");
   function renderConnectionFields() {
@@ -479,11 +495,13 @@ async function buildWizardAIStep(n, byService, wizardContainer) {
   }
   providerSelect.addEventListener("change", renderConnectionFields);
 
-  fs.appendChild(el("div", { class: "grid2" }, [
-    el("label", {}, [document.createTextNode("Provider"), providerSelect]),
-    el("label", {}, [document.createTextNode("Model"), modelInput]),
+  fs.appendChild(el("form", { onsubmit: (e) => { e.preventDefault(); saveModel(); } }, [
+    el("div", { class: "grid2" }, [
+      el("label", {}, [document.createTextNode("Provider"), providerSelect]),
+      el("label", {}, [document.createTextNode("Model"), modelInput]),
+    ]),
+    el("div", { class: "row", style: "margin-top:0.5rem" }, [saveModelBtn, modelStatus]),
   ]));
-  fs.appendChild(el("div", { class: "row", style: "margin-top:0.5rem" }, [saveModelBtn, modelStatus]));
   fs.appendChild(connectionSlot);
   renderConnectionFields();
   return fs;
@@ -1053,7 +1071,12 @@ async function renderTag(container) {
       ]));
     }
     const addInput = el("input", { type: "text", list: datalistId, placeholder: "tag label", style: "width:10rem" });
-    const addCell = el("td", { class: "row" }, [addInput, el("button", { text: "Add", onclick: async () => { if (!addInput.value) return; try { await api("/api/modes/" + m + "/items/" + item.id + "/tags", { method: "POST", body: JSON.stringify({ label: addInput.value }) }); } catch (e) { container.appendChild(fmtErr(e)); } await renderTag(container); } })]);
+    const addTag = async () => { if (!addInput.value) return; try { await api("/api/modes/" + m + "/items/" + item.id + "/tags", { method: "POST", body: JSON.stringify({ label: addInput.value }) }); } catch (e) { container.appendChild(fmtErr(e)); } await renderTag(container); };
+    // Enter in the tag field adds the tag. Input + button share one table
+    // cell, so a <form> could fit, but keydown keeps the "table-row inputs →
+    // keydown" convention uniform with the Connections table above.
+    addInput.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); addTag(); } });
+    const addCell = el("td", { class: "row" }, [addInput, el("button", { text: "Add", onclick: addTag })]);
     tbody.appendChild(el("tr", {}, [el("td", { text: item.title }), tagsCell, addCell]));
   }
   table.appendChild(tbody);
@@ -1108,15 +1131,18 @@ async function renderLibrarySettings(container, m) {
 
   const { wrapper, input: pathInput } = pathInputWithBrowse(current, "/path/to/" + MODE_LABELS[m]);
   const status = el("span", { class: "muted" });
-  const saveBtn = el("button", { class: "primary", text: "Save", onclick: async () => {
+  const save = async () => {
     try {
       await api("/api/modes/" + m + "/library/root-folder", { method: "PUT", body: JSON.stringify({ path: pathInput.value }) });
       status.textContent = "saved"; status.className = "muted";
     } catch (e) { status.textContent = "✗ " + e.message; status.className = "error"; }
-  } });
+  };
+  const saveBtn = el("button", { class: "primary", type: "submit", text: "Save" });
 
-  fs.appendChild(el("label", {}, [document.createTextNode("Root folder"), wrapper]));
-  fs.appendChild(el("div", { class: "row", style: "margin-top:0.5rem" }, [saveBtn, status]));
+  fs.appendChild(el("form", { onsubmit: (e) => { e.preventDefault(); save(); } }, [
+    el("label", {}, [document.createTextNode("Root folder"), wrapper]),
+    el("div", { class: "row", style: "margin-top:0.5rem" }, [saveBtn, status]),
+  ]));
   fs.appendChild(el("div", { class: "muted", text: "Where Rename/Purge/Dedup and Search's Check & Import look for and place " + MODE_LABELS[m] + " files — no " + (m === "movies" ? "Radarr" : "Sonarr") + " involved." }));
   container.appendChild(fs);
 }
@@ -1190,18 +1216,21 @@ async function renderQualityPrefs(container) {
   const maxResSelect = el("select", {});
   for (const r of MAX_RESOLUTIONS) maxResSelect.appendChild(el("option", { value: String(r), text: r === 0 ? "no cap" : (r + "p"), selected: r === maxResolution ? "selected" : null }));
   const status = el("span", { class: "muted" });
-  const saveBtn = el("button", { class: "primary", text: "Save", onclick: async () => {
+  const save = async () => {
     try {
       await api("/api/modes/" + m + "/quality-prefs", { method: "PUT", body: JSON.stringify({ tier: tierSelect.value, maxResolution: Number(maxResSelect.value) }) });
       status.textContent = "saved"; status.className = "muted";
     } catch (e) { status.textContent = "✗ " + e.message; status.className = "error"; }
-  } });
+  };
+  const saveBtn = el("button", { class: "primary", type: "submit", text: "Save" });
 
-  fs.appendChild(el("div", { class: "grid2" }, [
-    el("label", {}, [document.createTextNode("Tier (bitrate/codec)"), el("div", {}, [tierSelect])]),
-    el("label", {}, [document.createTextNode("Maximum resolution"), el("div", {}, [maxResSelect])]),
+  fs.appendChild(el("form", { onsubmit: (e) => { e.preventDefault(); save(); } }, [
+    el("div", { class: "grid2" }, [
+      el("label", {}, [document.createTextNode("Tier (bitrate/codec)"), el("div", {}, [tierSelect])]),
+      el("label", {}, [document.createTextNode("Maximum resolution"), el("div", {}, [maxResSelect])]),
+    ]),
+    el("div", { class: "row", style: "margin-top:0.5rem" }, [saveBtn, status]),
   ]));
-  fs.appendChild(el("div", { class: "row", style: "margin-top:0.5rem" }, [saveBtn, status]));
   fs.appendChild(el("div", { class: "muted", text: "Tier prefers smaller/more-compressed releases (Low) up to the least-compressed remux/Blu-ray (Lossless) — it never changes what resolution is preferred. Maximum resolution softly prefers at-or-below-cap results, falling back to whatever's available if nothing meets it." }));
   container.appendChild(fs);
 }
@@ -1220,15 +1249,18 @@ async function renderNamingPreset(container) {
   const presetSelect = el("select", {});
   for (const p of NAMING_PRESETS) presetSelect.appendChild(el("option", { value: p.value, text: p.label, selected: p.value === preset ? "selected" : null }));
   const status = el("span", { class: "muted" });
-  const saveBtn = el("button", { class: "primary", text: "Save", onclick: async () => {
+  const save = async () => {
     try {
       await api("/api/modes/" + m + "/naming-preset", { method: "PUT", body: JSON.stringify({ preset: presetSelect.value }) });
       status.textContent = "saved"; status.className = "muted";
     } catch (e) { status.textContent = "✗ " + e.message; status.className = "error"; }
-  } });
+  };
+  const saveBtn = el("button", { class: "primary", type: "submit", text: "Save" });
 
-  fs.appendChild(el("label", {}, [document.createTextNode("Naming convention"), el("div", {}, [presetSelect])]));
-  fs.appendChild(el("div", { class: "row", style: "margin-top:0.5rem" }, [saveBtn, status]));
+  fs.appendChild(el("form", { onsubmit: (e) => { e.preventDefault(); save(); } }, [
+    el("label", {}, [document.createTextNode("Naming convention"), el("div", {}, [presetSelect])]),
+    el("div", { class: "row", style: "margin-top:0.5rem" }, [saveBtn, status]),
+  ]));
   fs.appendChild(el("div", { class: "muted", text: "Jellyfin/Emby standard renames into \"Title (Year) [tmdbid-N]\" folders/files. Legacy keeps this project's original convention, so an already-renamed library's shape never silently changes after an upgrade." }));
   container.appendChild(fs);
 }
@@ -1363,24 +1395,25 @@ async function renderAuthMode(container) {
   const oidcClientSecretInput = el("input", { type: "password", placeholder: oidcStatus.hasSecret ? "unchanged (configured)" : "client secret" });
   const oidcRedirectInput = el("input", { type: "text", value: oidcStatus.redirectUrl, placeholder: "https://media-admin.example.com/api/auth/oidc/callback" });
   const oidcSaveStatus = el("span", { class: "muted" });
-  const oidcSaveBtn = el("button", {
-    text: "Save OIDC config", onclick: async () => {
-      try {
-        await api("/api/auth/oidc", { method: "PUT", body: JSON.stringify({ issuerUrl: oidcIssuerInput.value, clientId: oidcClientIdInput.value, clientSecret: oidcClientSecretInput.value, redirectUrl: oidcRedirectInput.value }) });
-        oidcSaveStatus.textContent = "saved"; oidcSaveStatus.className = "muted";
-        oidcStatus.hasSecret = true;
-        oidcClientSecretInput.value = "";
-        oidcClientSecretInput.placeholder = "unchanged (configured)";
-      } catch (e) { oidcSaveStatus.textContent = "✗ " + e.message; oidcSaveStatus.className = "error"; }
-    },
-  });
+  const saveOidc = async () => {
+    try {
+      await api("/api/auth/oidc", { method: "PUT", body: JSON.stringify({ issuerUrl: oidcIssuerInput.value, clientId: oidcClientIdInput.value, clientSecret: oidcClientSecretInput.value, redirectUrl: oidcRedirectInput.value }) });
+      oidcSaveStatus.textContent = "saved"; oidcSaveStatus.className = "muted";
+      oidcStatus.hasSecret = true;
+      oidcClientSecretInput.value = "";
+      oidcClientSecretInput.placeholder = "unchanged (configured)";
+    } catch (e) { oidcSaveStatus.textContent = "✗ " + e.message; oidcSaveStatus.className = "error"; }
+  };
+  const oidcSaveBtn = el("button", { type: "submit", text: "Save OIDC config" });
   const oidcGroup = el("div", {}, [
     el("div", { class: "muted", text: "sakms runs a real OpenID Connect Authorization Code flow (with PKCE) as the Relying Party — it verifies the IdP's signed ID token against its published JWKS, so no proxy-held shared secret is needed. Restricting who may complete the IdP login is the IdP's own job (its application/provider policy)." }),
-    el("label", {}, [document.createTextNode("Issuer URL"), oidcIssuerInput]),
-    el("label", {}, [document.createTextNode("Client ID"), oidcClientIdInput]),
-    el("label", {}, [document.createTextNode("Client secret"), oidcClientSecretInput]),
-    el("label", {}, [document.createTextNode("Redirect URL"), oidcRedirectInput]),
-    el("div", { class: "row", style: "margin-top:0.5rem" }, [oidcSaveBtn, oidcSaveStatus]),
+    el("form", { onsubmit: (e) => { e.preventDefault(); saveOidc(); } }, [
+      el("label", {}, [document.createTextNode("Issuer URL"), oidcIssuerInput]),
+      el("label", {}, [document.createTextNode("Client ID"), oidcClientIdInput]),
+      el("label", {}, [document.createTextNode("Client secret"), oidcClientSecretInput]),
+      el("label", {}, [document.createTextNode("Redirect URL"), oidcRedirectInput]),
+      el("div", { class: "row", style: "margin-top:0.5rem" }, [oidcSaveBtn, oidcSaveStatus]),
+    ]),
     el("div", { class: "muted", style: "margin-top:0.5rem", text: "The redirect URL must be registered as an allowed callback in your IdP's client config, and must point at this instance's /api/auth/oidc/callback." }),
   ]);
 
@@ -1437,20 +1470,22 @@ async function renderAISettings(container) {
   const modelInput = el("input", { type: "text", value: model, placeholder: "e.g. qwen2.5vl:7b, gpt-4o-mini, gemini-2.5-flash, claude-haiku-4-5" });
   const status = el("span", { class: "muted" });
 
-  const saveBtn = el("button", { class: "primary", text: "Save", onclick: async () => {
+  const save = async () => {
     try {
       await api("/api/settings/ai-provider", { method: "PUT", body: JSON.stringify({ provider: providerSelect.value }) });
       await api("/api/settings/ai-model", { method: "PUT", body: JSON.stringify({ model: modelInput.value }) });
       status.textContent = "saved"; status.className = "muted";
     } catch (e) { status.textContent = "✗ " + e.message; status.className = "error"; }
-  } });
+  };
+  const saveBtn = el("button", { class: "primary", type: "submit", text: "Save" });
 
-  const grid = el("div", { class: "grid2" }, [
-    el("label", {}, [document.createTextNode("Provider"), el("div", {}, [providerSelect])]),
-    el("label", {}, [document.createTextNode("Model"), el("div", {}, [modelInput])]),
-  ]);
-  fs.appendChild(grid);
-  fs.appendChild(el("div", { class: "row", style: "margin-top:0.5rem" }, [saveBtn, status]));
+  fs.appendChild(el("form", { onsubmit: (e) => { e.preventDefault(); save(); } }, [
+    el("div", { class: "grid2" }, [
+      el("label", {}, [document.createTextNode("Provider"), el("div", {}, [providerSelect])]),
+      el("label", {}, [document.createTextNode("Model"), el("div", {}, [modelInput])]),
+    ]),
+    el("div", { class: "row", style: "margin-top:0.5rem" }, [saveBtn, status]),
+  ]));
   fs.appendChild(el("div", { class: "muted", text: "Configure a connection for whichever provider you pick above (same Connections table) — the model must be able to return structured JSON." }));
   container.appendChild(fs);
 }
@@ -1469,14 +1504,17 @@ async function renderKidsRootPath(container) {
 
   const { wrapper, input } = pathInputWithBrowse(current, "/path/to/" + MODE_LABELS[m] + " (Kids)");
   const status = el("span", { class: "muted" });
-  const saveBtn = el("button", { class: "primary", text: "Save", onclick: async () => {
+  const save = async () => {
     try {
       await api("/api/modes/" + m + "/rename/kids-root-path", { method: "PUT", body: JSON.stringify({ path: input.value }) });
       status.textContent = "saved"; status.className = "muted";
     } catch (e) { status.textContent = "✗ " + e.message; status.className = "error"; }
-  } });
-  fs.appendChild(el("label", { class: "row" }, [document.createTextNode("Kids root folder path"), wrapper]));
-  fs.appendChild(el("div", { class: "row", style: "margin-top:0.5rem" }, [saveBtn, status]));
+  };
+  const saveBtn = el("button", { class: "primary", type: "submit", text: "Save" });
+  fs.appendChild(el("form", { onsubmit: (e) => { e.preventDefault(); save(); } }, [
+    el("label", { class: "row" }, [document.createTextNode("Kids root folder path"), wrapper]),
+    el("div", { class: "row", style: "margin-top:0.5rem" }, [saveBtn, status]),
+  ]));
   fs.appendChild(el("div", { class: "muted", text: "Leave blank to turn Kids classification off. Applies to both newly-found files and already-tracked items whose classification has drifted." }));
   container.appendChild(fs);
 }
