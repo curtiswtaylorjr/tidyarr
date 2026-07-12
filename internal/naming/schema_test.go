@@ -136,3 +136,24 @@ func TestMatchesSeriesSchema(t *testing.T) {
 		}
 	})
 }
+
+func TestMatchesAdultSchema(t *testing.T) {
+	cases := []struct {
+		name string
+		path string
+		want bool
+	}{
+		{"AdultFileName output matches", "/media/Adult/Brazzers - Scene Title (2021-03-04) [phash-abc123].mp4", true},
+		{"tag with no studio/date still matches", "/media/Adult/Scene Title [phash-abc123].mkv", true},
+		{"a raw scene-release name does not match", "/media/Adult/some.scene.1080p.XXX-GROUP.mp4", false},
+		{"a movie tmdbid tag is not a phash tag", "/media/Adult/Some Movie (2020) [tmdbid-42].mkv", false},
+		{"an empty phash tag is malformed and does not match", "/media/Adult/Scene Title [phash-].mp4", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := MatchesAdultSchema(c.path); got != c.want {
+				t.Errorf("MatchesAdultSchema(%q) = %v, want %v", c.path, got, c.want)
+			}
+		})
+	}
+}

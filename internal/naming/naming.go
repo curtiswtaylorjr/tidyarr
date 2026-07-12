@@ -84,6 +84,32 @@ func SeasonDirName(seasonNumber int) string {
 	return fmt.Sprintf("Season %02d", seasonNumber)
 }
 
+// AdultFileName formats an Adult scene's target file name. Unlike Movies/
+// Series, Adult has no user-chosen Preset — there's no external convention
+// (like Jellyfin's) to align with, so it gets one fixed scheme:
+// "Studio - Title (Date) [phash-HASH].ext", with the phash embedded directly
+// per this project's documented intent (a filename-embedded phash for fast
+// rescans; see CLAUDE.md). Optional fields are omitted gracefully rather than
+// rendering placeholders — the same convention MovieFolderName follows for a
+// zero year/tmdbID: an empty studio drops the "Studio - " prefix, an empty
+// date drops the " (Date)" segment, and an empty phash drops the
+// "[phash-...]" tag (so a scene that couldn't be hashed is still named, just
+// without the tag, and is simply re-proposed on the next scan). ext is
+// threaded and appended exactly as MovieFileName does.
+func AdultFileName(studio, title, date, phash, ext string) string {
+	name := title
+	if studio != "" {
+		name = fmt.Sprintf("%s - %s", studio, name)
+	}
+	if date != "" {
+		name = fmt.Sprintf("%s (%s)", name, date)
+	}
+	if phash != "" {
+		name = fmt.Sprintf("%s [phash-%s]", name, phash)
+	}
+	return name + ext
+}
+
 // EpisodeFileName formats one episode's target file name: Jellyfin's
 // documented convention is space-separated ("Series Title S03E05 Episode
 // Title.ext"); Legacy keeps this project's original dash-separated shape

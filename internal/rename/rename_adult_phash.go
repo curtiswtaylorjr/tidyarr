@@ -2,8 +2,10 @@ package rename
 
 import (
 	"context"
+	"path/filepath"
 	"sync"
 
+	"github.com/curtiswtaylorjr/sakms/internal/identify"
 	"github.com/curtiswtaylorjr/sakms/internal/mediainfo"
 	"github.com/curtiswtaylorjr/sakms/internal/mode"
 	"github.com/curtiswtaylorjr/sakms/internal/proposals"
@@ -87,13 +89,74 @@ func scanAdultPhashFirst(
 	ctx context.Context, sess *mode.Session, hasher PHasher, prober Prober,
 	candidates []adultCandidate, tracked []servarr.TrackedItem, profiles []servarr.QualityProfile,
 ) []proposals.Proposal {
-	// Bounded concurrent hash+probe phase. Each goroutine writes only to its
-	// own results[i] index (no shared map, no mutex) so ordering is
-	// deterministic and the phase is race-free.
-	results := make([]hashResult, len(candidates))
+	files := make([]adultFileID, len(candidates))
+	for i, c := range candidates {
+		// stem/parentName exactly reproduce proposeOneAdult's own
+		// ident.Identify(ctx, uf.Name, filepath.Base(root.Path)) call, so the
+		// cascade-miss fallback behaves identically to before this extraction.
+		files[i] = adultFileID{path: c.uf.Path, stem: c.uf.Name, parentName: filepath.Base(c.root.Path)}
+	}
+	ids := identifyAdultFiles(ctx, sess, hasher, prober, files)
+
+	// Single order-preserving loop over candidates; stamp phash/duration on
+	// EVERY hashed candidate — cascade hit or legacy/text fallback alike.
+	out := make([]proposals.Proposal, 0, len(candidates))
+	for i, c := range candidates {
+		id := ids[i]
+		p := buildAdultProposal(sess.Mode, c.root, c.uf, id.match, id.err, tracked, profiles)
+		if id.hashed {
+			p.PHash = id.phash
+			p.DurationSeconds = id.duration
+		}
+		out = append(out, p)
+	}
+	return out
+}
+
+// adultFileID names one file to run through the phash-first identification
+// cascade: path is hashed+probed locally, and (stem, parentName) feed the
+// legacy AI/text Identify fallback used for a fingerprint-cascade miss.
+type adultFileID struct {
+	path       string
+	stem       string
+	parentName string
+}
+
+// adultIdentification is the resolved identity for one adultFileID: the
+// MatchResult (nil if nothing resolved it), any error from the legacy Identify
+// fallback, and the locally-computed phash/duration. hashed is false when the
+// file couldn't be hashed at all — that file degraded straight to the legacy
+// pipeline and carries no phash (so give-back and the filename tag are skipped
+// for it downstream). Both the Servarr-backed scanAdultPhashFirst and the
+// library-backed ScanLibraryAdult build proposals from this one shape, so the
+// phash-first-then-Identify cascade lives in exactly one place.
+type adultIdentification struct {
+	match    *identify.MatchResult
+	err      error
+	phash    string
+	duration int
+	hashed   bool
+}
+
+// identifyAdultFiles runs the phash-first cascade over files: a bounded
+// concurrent local hash+probe phase, one batched StashDB->FansDB->TPDB
+// fingerprint lookup, then the legacy AI/text Identify fallback for anything
+// the cascade couldn't resolve. Extracted from scanAdultPhashFirst (rather
+// than duplicated) so the library-backed path calls the exact same cascade —
+// see rename_adult_library.go. Output is candidate-index order.
+//
+// Concurrency/fail-open semantics are unchanged from the original inline
+// implementation: each goroutine writes only its own results[i] (no shared
+// map, no mutex), a file that fails to hash falls open to the legacy pipeline
+// for THAT file only, a file that hashes but fails to probe carries duration 0
+// (give-back fails open for it), and a LookupFingerprints error fails the
+// whole batch open into the legacy fallback while every file still keeps its
+// local phash. sess.Identify is guaranteed non-nil by every caller.
+func identifyAdultFiles(ctx context.Context, sess *mode.Session, hasher PHasher, prober Prober, files []adultFileID) []adultIdentification {
+	results := make([]hashResult, len(files))
 	sem := make(chan struct{}, adultHashWorkers)
 	var wg sync.WaitGroup
-	for i := range candidates {
+	for i := range files {
 		wg.Add(1)
 		sem <- struct{}{}
 		go func(i int, path string) {
@@ -101,7 +164,7 @@ func scanAdultPhashFirst(
 			defer func() { <-sem }()
 			h, err := hasher.Hash(ctx, path)
 			if err != nil {
-				return // ok stays false -> this candidate routes to legacy
+				return // ok stays false -> this file routes to legacy
 			}
 			r := hashResult{phash: h, ok: true}
 			if pr, perr := prober.Probe(ctx, path); perr == nil {
@@ -109,12 +172,12 @@ func scanAdultPhashFirst(
 				r.duration = int(pr.Duration)
 			}
 			results[i] = r
-		}(i, candidates[i].uf.Path)
+		}(i, files[i].path)
 	}
 	wg.Wait()
 
 	var phashes []string
-	for i := range candidates {
+	for i := range files {
 		if results[i].ok {
 			phashes = append(phashes, results[i].phash)
 		}
@@ -125,22 +188,16 @@ func scanAdultPhashFirst(
 		matches = nil // fail open: everything falls back, but still carries its local phash
 	}
 
-	// Single order-preserving loop over candidates; stamp phash/duration on
-	// EVERY r.ok candidate — cascade hit or legacy/text fallback alike.
-	out := make([]proposals.Proposal, 0, len(candidates))
-	for i, c := range candidates {
+	out := make([]adultIdentification, len(files))
+	for i, f := range files {
 		r := results[i]
-		var p proposals.Proposal
+		id := adultIdentification{phash: r.phash, duration: r.duration, hashed: r.ok}
 		if match, hit := matches[r.phash]; r.ok && hit {
-			p = buildAdultProposal(sess.Mode, c.root, c.uf, match, nil, tracked, profiles)
+			id.match = match
 		} else {
-			p = proposeOneAdult(ctx, sess.Identify, sess.Mode, c.root, c.uf, tracked, profiles)
+			id.match, id.err = sess.Identify.Identify(ctx, f.stem, f.parentName)
 		}
-		if r.ok {
-			p.PHash = r.phash
-			p.DurationSeconds = r.duration
-		}
-		out = append(out, p)
+		out[i] = id
 	}
 	return out
 }

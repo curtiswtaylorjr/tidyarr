@@ -25,6 +25,10 @@ var (
 	episodeFileJellyfin  = regexp.MustCompile(`^.+[^-] S\d{2}E\d{2}(?: .+)?$`)
 	episodeFileLegacy    = regexp.MustCompile(`^.+ - S\d{2}E\d{2}(?: - .+)?$`)
 	seriesFolderJellyfin = regexp.MustCompile(`^.+(?: \(\d{4}\))? \[tmdbid-\d+\]$`)
+	// adultPhashTag matches AdultFileName's embedded "[phash-HASH]" tag anywhere
+	// in a filename — Adult has one fixed scheme, not a per-preset shape, so
+	// this is the sole conformance marker MatchesAdultSchema checks for.
+	adultPhashTag = regexp.MustCompile(`\[phash-[^\]]+\]`)
 )
 
 // MatchesMovieSchema reports whether entryPath — as found by
@@ -73,4 +77,15 @@ func MatchesSeriesSchema(videoPath string, preset Preset) bool {
 	}
 	seriesDir := filepath.Base(filepath.Dir(filepath.Dir(videoPath)))
 	return episodeFileJellyfin.MatchString(fileBase) && seriesFolderJellyfin.MatchString(seriesDir)
+}
+
+// MatchesAdultSchema reports whether path's filename already carries the
+// "[phash-HASH]" tag AdultFileName embeds — the Adult counterpart to
+// MatchesMovieSchema's [tmdbid-N] check, wired into ScanLibraryAdult so a
+// scene already named to SAK's fixed Adult scheme is never re-proposed. A
+// scene is a flat one-file thing (no wrapping folder to verify against, unlike
+// Movies), so this is a pure name check on the basename — structural only, it
+// never confirms the embedded hash is actually correct for this content.
+func MatchesAdultSchema(path string) bool {
+	return adultPhashTag.MatchString(filepath.Base(path))
 }

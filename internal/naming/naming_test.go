@@ -55,6 +55,32 @@ func TestSeasonDirName(t *testing.T) {
 	}
 }
 
+func TestAdultFileName(t *testing.T) {
+	cases := []struct {
+		name                       string
+		studio, title, date, phash string
+		ext                        string
+		want                       string
+	}{
+		{"all fields", "Brazzers", "Scene Title", "2021-03-04", "abc123", ".mp4",
+			"Brazzers - Scene Title (2021-03-04) [phash-abc123].mp4"},
+		{"missing studio drops the prefix", "", "Scene Title", "2021-03-04", "abc123", ".mkv",
+			"Scene Title (2021-03-04) [phash-abc123].mkv"},
+		{"missing date drops the segment", "Brazzers", "Scene Title", "", "abc123", ".mp4",
+			"Brazzers - Scene Title [phash-abc123].mp4"},
+		{"missing phash drops the tag", "Brazzers", "Scene Title", "2021-03-04", "", ".mp4",
+			"Brazzers - Scene Title (2021-03-04).mp4"},
+		{"title only", "", "Scene Title", "", "", ".avi", "Scene Title.avi"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := AdultFileName(c.studio, c.title, c.date, c.phash, c.ext); got != c.want {
+				t.Errorf("AdultFileName(%q, %q, %q, %q, %q) = %q, want %q", c.studio, c.title, c.date, c.phash, c.ext, got, c.want)
+			}
+		})
+	}
+}
+
 func TestEpisodeFileName(t *testing.T) {
 	if got := EpisodeFileName(Jellyfin, "Show Name", 3, 5, "Episode Title", ".mkv"); got != "Show Name S03E05 Episode Title.mkv" {
 		t.Errorf("unexpected jellyfin file name: %q", got)
