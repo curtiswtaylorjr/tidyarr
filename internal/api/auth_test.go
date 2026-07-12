@@ -372,6 +372,39 @@ func TestSetup_OIDCMissingFields_400(t *testing.T) {
 	}
 }
 
+// TestSetup_OIDCNonURLRedirect_400 covers the first-run bootstrap arm of the
+// same redirect-URL guard as TestOIDCConfig_PutNonURLRedirect_400: a non-URL
+// (client-id-shaped) redirect is rejected and leaves the instance unconfigured
+// for a clean retry.
+func TestSetup_OIDCNonURLRedirect_400(t *testing.T) {
+	authStore, tokenEnc := testAuthStore(t)
+	srv := httptest.NewServer(NewAuthMux(authStore, tokenEnc))
+	defer srv.Close()
+
+	body, _ := json.Marshal(authCredentialsRequest{
+		Mode:             "oidc",
+		OIDCIssuerURL:    "https://sso.example.com",
+		OIDCClientID:     "the-client-id",
+		OIDCClientSecret: "the-client-secret",
+		OIDCRedirectURL:  "the-client-id", // not a URL — the mistake that broke a real instance
+	})
+	resp, err := http.Post(srv.URL+"/api/auth/setup", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 for a non-URL redirect, got %d", resp.StatusCode)
+	}
+	configured, err := authStore.Configured(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if configured {
+		t.Error("expected a rejected oidc setup to leave the instance unconfigured")
+	}
+}
+
 func TestStatus_ReturnsMode(t *testing.T) {
 	authStore, tokenEnc := testAuthStore(t)
 	srv := httptest.NewServer(NewAuthMux(authStore, tokenEnc))

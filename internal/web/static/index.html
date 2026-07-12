@@ -139,6 +139,22 @@ async function api(path, opts) {
   return body;
 }
 
+// apiWithKey is api() authenticated by an explicit break-glass API key
+// (X-Api-Key header) instead of the session cookie — the recovery path for an
+// operator locked out of SSO (session.go checks this header independent of the
+// active auth mode). It delegates to api() to reuse its parsing/error logic;
+// only the auth mechanism differs. Content-Type MUST be set explicitly here
+// because api()'s options merge is shallow — passing opts.headers REPLACES the
+// default header object rather than merging, so omitting it would drop the
+// JSON content type. A wrong key comes back 401, and since every recovery call
+// targets an /api/auth/ path, api()'s 401→boot() reset is skipped (it exempts
+// those paths), leaving the error to surface inline where the form can show it.
+async function apiWithKey(path, key, opts) {
+  opts = opts || {};
+  const headers = Object.assign({ "Content-Type": "application/json", "X-Api-Key": key }, opts.headers || {});
+  return api(path, Object.assign({}, opts, { headers }));
+}
+
 function el(tag, attrs, children) {
   const node = document.createElement(tag);
   for (const [k, v] of Object.entries(attrs || {})) {
@@ -1761,24 +1777,127 @@ function renderCredentialsGate(container, kind, authStatus) {
   container.appendChild(form);
 }
 
+// AUTH_ERROR_MESSAGES maps the fixed set of reason codes the OIDC callback
+// can redirect back with (?auth_error=<code>, see oidc.go's redirectAuthError)
+// to short human text. The lookup is deliberately closed with a generic
+// fallback: an unrecognized (or attacker-crafted) code renders the generic
+// line rather than the raw value, and every message goes through el()'s
+// textContent path — never innerHTML — so a hand-forged ?auth_error= link
+// can't inject markup.
+const AUTH_ERROR_MESSAGES = {
+  idp_error: "Your identity provider rejected or cancelled the login.",
+  state_mismatch: "The login response didn't match this browser's request. Please try again.",
+  missing_code: "The identity provider didn't return an authorization code.",
+  flow_expired: "The login took too long and expired. Please try again.",
+  no_flow: "No active login was in progress. Please try again.",
+  exchange_failed: "The identity provider's token couldn't be verified.",
+  not_configured: "Single sign-on isn't fully configured on this instance.",
+  internal_error: "Something went wrong completing the login.",
+};
+
 // renderOIDCLoginNotice is the screen shown in oidc mode when boot() finds
-// the request has no valid session yet. Unlike the old forward/authentik
-// notices, there IS a real in-browser login flow to send the operator to:
-// a "Log in with SSO" button that navigates to /api/auth/oidc/login, which
-// starts the Authorization Code redirect and, on success, drops the session
-// cookie and returns to the app.
-function renderOIDCLoginNotice(container) {
+// the request has no valid session yet. It navigates to /api/auth/oidc/login
+// for the real Authorization Code redirect. authErrorReason (optional) is the
+// reason code from a just-failed callback — shown as a banner. The break-glass
+// recovery form below is ALWAYS present, not gated on authErrorReason: the
+// worst failure (the IdP rejecting a malformed redirect_uri) happens entirely
+// IdP-side and never redirects back to sakms with any query param at all, so
+// the recovery path must be reachable even with a clean URL.
+function renderOIDCLoginNotice(container, authErrorReason) {
   container.innerHTML = "";
   container.appendChild(el("h2", { text: "Log in to SAK" }));
+  if (authErrorReason) {
+    const msg = AUTH_ERROR_MESSAGES[authErrorReason] || "Login failed. Please try again.";
+    container.appendChild(el("div", { class: "error", style: "margin-top:0.5rem", text: msg }));
+  }
   container.appendChild(el("p", { class: "muted", text: "This instance uses single sign-on. Log in through your identity provider to continue." }));
   container.appendChild(el("div", { class: "row", style: "margin-top:0.75rem" }, [
     el("button", { class: "primary", text: "Log in with SSO", onclick: () => { window.location.href = "/api/auth/oidc/login"; } }),
   ]));
-  // Break-glass recovery: if SSO is misconfigured/unreachable, the operator
-  // can still reach Settings with the one-time API key shown at setup. Header-
-  // only, so a header-capable client (e.g. curl) is named explicitly — a
-  // plain browser tab can't attach X-Api-Key on its own.
-  container.appendChild(el("p", { class: "muted", style: "margin-top:0.75rem", text: "If SSO login fails and you saved the one-time break-glass API key from setup, use a header-capable client (e.g. curl) to send it as an X-Api-Key header — for example to PUT /api/auth/mode and switch back to password mode. A plain browser tab cannot attach this header on its own." }));
+  // Break-glass recovery: if SSO is misconfigured (e.g. a wrong redirect URL,
+  // the incident this form exists for), the operator can paste the one-time
+  // API key shown at setup and fix the OIDC config — or switch to password
+  // mode — directly here. The key rides as an X-Api-Key header on the form's
+  // own fetch (apiWithKey), which the browser CAN attach on a JS request even
+  // though it can't on a plain top-level navigation.
+  container.appendChild(el("p", { class: "muted", style: "margin-top:0.75rem", text: "If SSO login keeps failing and you saved the one-time break-glass API key from setup, expand “Trouble logging in?” below to paste it and fix the OIDC config (or switch to password mode) here. A header-capable client (e.g. curl) sending it as an X-Api-Key header works too." }));
+
+  const recovery = el("details", { style: "margin-top:1rem" });
+  recovery.appendChild(el("summary", { text: "Trouble logging in?" }));
+  recovery.appendChild(el("p", { class: "muted", text: "Paste the one-time break-glass API key you saved at setup to recover access without SSO." }));
+
+  const keyInput = el("input", { type: "password", placeholder: "break-glass API key" });
+  const unlockStatus = el("span", { class: "muted" });
+  const fixWrap = el("div", { style: "margin-top:0.75rem" });
+
+  const unlock = async () => {
+    unlockStatus.textContent = ""; unlockStatus.className = "muted";
+    const key = keyInput.value.trim();
+    if (!key) { unlockStatus.textContent = "Enter your break-glass API key."; unlockStatus.className = "error"; return; }
+    let cfg;
+    try { cfg = await apiWithKey("/api/auth/oidc", key); }
+    catch (e) { unlockStatus.textContent = "✗ " + e.message; unlockStatus.className = "error"; fixWrap.innerHTML = ""; return; }
+    renderRecoveryFix(fixWrap, key, cfg);
+  };
+  const unlockBtn = el("button", { type: "submit", text: "Unlock" });
+  recovery.appendChild(el("form", { onsubmit: (e) => { e.preventDefault(); unlock(); } }, [
+    el("label", {}, [document.createTextNode("Break-glass API key"), keyInput]),
+    el("div", { class: "row", style: "margin-top:0.5rem" }, [unlockBtn, unlockStatus]),
+  ]));
+  recovery.appendChild(fixWrap);
+  container.appendChild(recovery);
+}
+
+// renderRecoveryFix renders the post-unlock repair form into container: the
+// same four OIDC fields as renderAuthMode's Settings form (including the same
+// blank-means-unchanged secret placeholder trick), plus a "switch to password
+// mode instead" escape hatch — all authenticated by the break-glass key, not a
+// session cookie. Kept structurally close to renderAuthMode's oidc form so it
+// doesn't read as a foreign pattern.
+function renderRecoveryFix(container, key, cfg) {
+  container.innerHTML = "";
+  cfg = cfg || {};
+  const issuerInput = el("input", { type: "text", value: cfg.issuerUrl || "", placeholder: "https://sso.example.com/application/o/sakms/" });
+  const clientIdInput = el("input", { type: "text", value: cfg.clientId || "" });
+  const secretInput = el("input", { type: "password", placeholder: cfg.hasSecret ? "unchanged (configured)" : "client secret" });
+  const redirectInput = el("input", { type: "text", value: cfg.redirectUrl || "", placeholder: "https://media-admin.example.com/api/auth/oidc/callback" });
+  const saveStatus = el("span", { class: "muted" });
+  const retryWrap = el("div", { style: "margin-top:0.5rem" });
+
+  const saveFix = async () => {
+    saveStatus.textContent = ""; saveStatus.className = "muted";
+    try {
+      await apiWithKey("/api/auth/oidc", key, { method: "PUT", body: JSON.stringify({ issuerUrl: issuerInput.value, clientId: clientIdInput.value, clientSecret: secretInput.value, redirectUrl: redirectInput.value }) });
+      saveStatus.textContent = "saved"; saveStatus.className = "muted";
+      retryWrap.innerHTML = "";
+      retryWrap.appendChild(el("button", { class: "primary", text: "Saved — try logging in again", onclick: () => { window.location.href = "/api/auth/oidc/login"; } }));
+    } catch (e) { saveStatus.textContent = "✗ " + e.message; saveStatus.className = "error"; }
+  };
+  const saveBtn = el("button", { type: "submit", text: "Save fix" });
+
+  const switchStatus = el("span", { class: "muted" });
+  const switchBtn = el("button", {
+    text: "Switch to password mode instead", onclick: async () => {
+      switchStatus.textContent = ""; switchStatus.className = "muted";
+      try {
+        await apiWithKey("/api/auth/mode", key, { method: "PUT", body: JSON.stringify({ mode: "password" }) });
+        switchStatus.textContent = "switched"; switchStatus.className = "muted";
+        // Re-gate from scratch: mode is now password, so boot() lands on the
+        // password login screen (this key-holder has no session cookie).
+        await boot();
+      } catch (e) { switchStatus.textContent = "✗ " + e.message; switchStatus.className = "error"; }
+    },
+  });
+
+  container.appendChild(el("form", { onsubmit: (e) => { e.preventDefault(); saveFix(); } }, [
+    el("label", {}, [document.createTextNode("Issuer URL"), issuerInput]),
+    el("label", {}, [document.createTextNode("Client ID"), clientIdInput]),
+    el("label", {}, [document.createTextNode("Client secret"), secretInput]),
+    el("label", {}, [document.createTextNode("Redirect URL"), redirectInput]),
+    el("div", { class: "row", style: "margin-top:0.5rem" }, [saveBtn, saveStatus]),
+  ]));
+  container.appendChild(retryWrap);
+  container.appendChild(el("div", { class: "row", style: "margin-top:0.75rem" }, [switchBtn, switchStatus]));
 }
 
 // ---- Router ----
@@ -1835,6 +1954,14 @@ function updateNoneModeBanner(isNone) {
 // that cookie once the IdP redirect completes). No outbound call, no
 // optimistic heuristic.
 async function boot() {
+  // A failed OIDC callback redirects here with ?auth_error=<code> (a top-level
+  // browser navigation can't surface an inline error any other way). Read it
+  // once and strip it from the URL so a manual refresh doesn't re-stick a stale
+  // failure, then pass it along to the SSO login notice if that's where we land
+  // (harmless everywhere else — no other screen reads it).
+  const authError = new URLSearchParams(location.search).get("auth_error");
+  if (authError) history.replaceState(null, "", location.pathname);
+
   let authStatus = null;
   try { authStatus = await api("/api/auth/status"); } catch (e) { /* fall through */ }
 
@@ -1861,7 +1988,7 @@ async function boot() {
       // forward/authentik notices).
       updateNoneModeBanner(false);
       hideNav();
-      renderOIDCLoginNotice(view);
+      renderOIDCLoginNotice(view, authError);
       return;
     }
     // Reachable for: mode === "none" (authenticated is always true, nothing

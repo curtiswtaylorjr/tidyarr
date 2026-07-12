@@ -117,6 +117,16 @@ func oidcPutHandler(authStore *auth.Store, secretEnc auth.TokenEncryptor) http.H
 			http.Error(w, "issuerUrl, clientId, clientSecret, and redirectUrl are all required", http.StatusBadRequest)
 			return
 		}
+		// Narrow guard against the exact mistake that broke a real instance:
+		// pasting the client id (or any bare string) into the redirect URL
+		// field, which was accepted silently and only surfaced as an
+		// unrecoverable IdP-side rejection at login. A leading http(s):// is
+		// the minimum for a usable callback; deeper URL validation is left to
+		// the IdP, which must have the same value registered anyway.
+		if !strings.HasPrefix(redirectURL, "http://") && !strings.HasPrefix(redirectURL, "https://") {
+			http.Error(w, "redirectUrl must be an http:// or https:// URL", http.StatusBadRequest)
+			return
+		}
 		cipher, err := secretEnc.Encrypt(clientSecret)
 		if err != nil {
 			log.Printf("oidc config encrypt: %v", err)
@@ -171,18 +181,49 @@ func oidcLoginHandler(authStore *auth.Store) http.HandlerFunc {
 	}
 }
 
+// redirectAuthError sends the browser back to the SPA with a fixed, short
+// reason code in the query string instead of a plain-text http.Error dead
+// end. The callback is a top-level browser navigation the IdP bounces into,
+// so a bare 400/401 text body strands a real operator with no way forward;
+// the SPA reads auth_error and re-renders the SSO login notice with an
+// explanatory banner plus the break-glass recovery form. The code is ALWAYS
+// one of a fixed set of server-chosen constants (never attacker-influenced
+// text — e.g. the IdP's error_description is logged, never forwarded here),
+// so nothing injectable or sensitive rides in the URL.
+func redirectAuthError(w http.ResponseWriter, r *http.Request, code string) {
+	http.Redirect(w, r, "/?auth_error="+code, http.StatusFound)
+}
+
 // oidcCallbackHandler completes the flow: it reads and clears the flow
 // cookie, verifies the returned state matches (CSRF), exchanges the code for
 // tokens using the PKCE verifier, verifies the ID token (issuer/audience/
 // signature/expiry) and that its nonce matches, and on success issues the
 // SAME signed session cookie password mode uses, then redirects to the app.
-// Any failure at any step fails closed: a clear error, no session cookie.
+// Any failure at any step fails closed: no session cookie is issued. Because
+// this handler runs as a top-level browser navigation (not a fetch), every
+// failure path redirects to /?auth_error=<code> rather than writing a
+// plain-text error the browser would show as a dead end — the diagnostic
+// detail stays in the server log, only a fixed short code reaches the client.
 func oidcCallbackHandler(authStore *auth.Store, tokenEnc auth.TokenEncryptor) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		flow, err := readFlowCookie(r)
 		clearFlowCookie(w) // single-use: clear regardless of outcome
+
+		// The IdP can bounce the browser back to us with its OWN error (e.g.
+		// access_denied, or a provider-side failure) instead of a code. That
+		// arrives on the IdP's redirect, so it must be checked FIRST — even
+		// when the flow cookie is intact and the state would match, an error
+		// response carries no usable code and must not fall through to the
+		// exchange. error_description is logged server-side only; only the
+		// fixed short reason reaches the URL (its text is IdP-controlled).
+		if idpErr := r.URL.Query().Get("error"); idpErr != "" {
+			log.Printf("oidc callback: idp returned error=%q description=%q", idpErr, r.URL.Query().Get("error_description"))
+			redirectAuthError(w, r, "idp_error")
+			return
+		}
+
 		if err != nil {
-			http.Error(w, "no active login flow — start again at /api/auth/oidc/login", http.StatusBadRequest)
+			redirectAuthError(w, r, "no_flow")
 			return
 		}
 		// Defense-in-depth (Finding 4, 2026-07-11 review): a well-formed but
@@ -190,35 +231,35 @@ func oidcCallbackHandler(authStore *auth.Store, tokenEnc auth.TokenEncryptor) ht
 		// rather than relying on the state-compare or the IdP exchange to
 		// catch it incidentally.
 		if flow.State == "" || flow.Nonce == "" || flow.Verifier == "" {
-			http.Error(w, "no active login flow — start again at /api/auth/oidc/login", http.StatusBadRequest)
+			redirectAuthError(w, r, "no_flow")
 			return
 		}
 		// Server-side TTL enforcement (Finding 3) — don't rely solely on the
 		// cookie's own Expires/MaxAge.
 		if time.Since(time.Unix(flow.IssuedAt, 0)) > oidcFlowTTL {
-			http.Error(w, "login flow expired — start again at /api/auth/oidc/login", http.StatusBadRequest)
+			redirectAuthError(w, r, "flow_expired")
 			return
 		}
 		// CSRF: the state echoed back by the IdP must match the one we planted
 		// in the cookie. Compared before any expensive/outbound work.
 		if r.URL.Query().Get("state") != flow.State {
-			http.Error(w, "state mismatch", http.StatusBadRequest)
+			redirectAuthError(w, r, "state_mismatch")
 			return
 		}
 		code := r.URL.Query().Get("code")
 		if code == "" {
-			http.Error(w, "missing authorization code", http.StatusBadRequest)
+			redirectAuthError(w, r, "missing_code")
 			return
 		}
 
 		client, err := authStore.OIDCClient(r.Context())
 		if err != nil {
 			log.Printf("oidc callback: %v", err)
-			http.Error(w, "internal error", http.StatusInternalServerError)
+			redirectAuthError(w, r, "internal_error")
 			return
 		}
 		if client == nil {
-			http.Error(w, "oidc is not configured", http.StatusBadRequest)
+			redirectAuthError(w, r, "not_configured")
 			return
 		}
 
@@ -230,13 +271,14 @@ func oidcCallbackHandler(authStore *auth.Store, tokenEnc auth.TokenEncryptor) ht
 			// authenticating (single-operator model; who may complete the IdP
 			// login is the IdP's job).
 			log.Printf("oidc callback verify: %v", err)
-			http.Error(w, "authentication failed", http.StatusUnauthorized)
+			redirectAuthError(w, r, "exchange_failed")
 			return
 		}
 
 		token, err := auth.IssueToken(tokenEnc)
 		if err != nil {
-			http.Error(w, "internal error", http.StatusInternalServerError)
+			log.Printf("oidc callback: issuing session token: %v", err)
+			redirectAuthError(w, r, "internal_error")
 			return
 		}
 		auth.SetSessionCookie(w, token, true)

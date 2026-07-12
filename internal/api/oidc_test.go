@@ -114,6 +114,32 @@ func TestOIDCConfig_PutMissingFields_400(t *testing.T) {
 	}
 }
 
+// TestOIDCConfig_PutNonURLRedirect_400 covers the exact incident this
+// validation exists for: a client-id-shaped string pasted into the redirect
+// URL field. It's non-empty (so it clears the required check) but isn't a
+// URL, and must be rejected rather than silently persisted.
+func TestOIDCConfig_PutNonURLRedirect_400(t *testing.T) {
+	authStore, secretStore := testAuthStore(t)
+	srv := httptest.NewServer(NewOIDCMux(authStore, secretStore))
+	defer srv.Close()
+
+	body, _ := json.Marshal(oidcConfigRequest{
+		IssuerURL:    "https://sso.example.com",
+		ClientID:     "the-client-id",
+		ClientSecret: "the-client-secret",
+		RedirectURL:  "the-client-id", // not a URL — the mistake that broke a real instance
+	})
+	req, _ := http.NewRequest(http.MethodPut, srv.URL+"/api/auth/oidc", bytes.NewReader(body))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 for a non-URL redirect, got %d", resp.StatusCode)
+	}
+}
+
 // TestOIDCMux_ProtectedByMiddleware asserts the config mux carries no auth
 // authority of its own — cmd/sakms wraps it in auth.Middleware.
 func TestOIDCMux_ProtectedByMiddleware(t *testing.T) {
@@ -321,6 +347,26 @@ func hasSessionCookie(resp *http.Response) bool {
 	return false
 }
 
+// assertAuthErrorRedirect asserts the callback failed closed the way a
+// top-level browser navigation needs it to: a 302 back to the SPA with the
+// specific ?auth_error=<code> reason (not a plain-text dead end), and no
+// session cookie. Checking the exact code — not just "302, no cookie" — keeps
+// these tests honest: a failure path that wrongly redirected to "/" (or with
+// the wrong reason) would otherwise pass.
+func assertAuthErrorRedirect(t *testing.T, resp *http.Response, wantCode string) {
+	t.Helper()
+	if resp.StatusCode != http.StatusFound {
+		t.Fatalf("expected 302 redirect on a failed callback, got %d", resp.StatusCode)
+	}
+	loc := resp.Header.Get("Location")
+	if loc != "/?auth_error="+wantCode {
+		t.Fatalf("expected redirect to /?auth_error=%s, got %q", wantCode, loc)
+	}
+	if hasSessionCookie(resp) {
+		t.Error("no session cookie must be issued on a failed callback")
+	}
+}
+
 func TestOIDCFlow_HappyPath(t *testing.T) {
 	idp := newTestIdP(t)
 	srv, client := oidcFlowServer(t, idp)
@@ -350,12 +396,7 @@ func TestOIDCFlow_StateMismatch_Rejected(t *testing.T) {
 
 	resp := callback(t, srv, client, flowCookie, "not-the-real-state")
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("expected 400 on a state mismatch, got %d", resp.StatusCode)
-	}
-	if hasSessionCookie(resp) {
-		t.Error("no session cookie must be issued on a state mismatch")
-	}
+	assertAuthErrorRedirect(t, resp, "state_mismatch")
 }
 
 func TestOIDCFlow_NonceMismatch_Rejected(t *testing.T) {
@@ -367,12 +408,9 @@ func TestOIDCFlow_NonceMismatch_Rejected(t *testing.T) {
 
 	resp := callback(t, srv, client, flowCookie, flow.State)
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("expected 401 on a nonce mismatch, got %d", resp.StatusCode)
-	}
-	if hasSessionCookie(resp) {
-		t.Error("no session cookie must be issued on a nonce mismatch")
-	}
+	// A nonce mismatch fails inside client.Exchange (token verification), so
+	// it surfaces as exchange_failed — not a distinct callback branch.
+	assertAuthErrorRedirect(t, resp, "exchange_failed")
 }
 
 func TestOIDCFlow_ExpiredToken_Rejected(t *testing.T) {
@@ -385,12 +423,7 @@ func TestOIDCFlow_ExpiredToken_Rejected(t *testing.T) {
 
 	resp := callback(t, srv, client, flowCookie, flow.State)
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("expected 401 on an expired ID token, got %d", resp.StatusCode)
-	}
-	if hasSessionCookie(resp) {
-		t.Error("no session cookie must be issued for an expired ID token")
-	}
+	assertAuthErrorRedirect(t, resp, "exchange_failed")
 }
 
 func TestOIDCFlow_BadSignature_Rejected(t *testing.T) {
@@ -403,12 +436,7 @@ func TestOIDCFlow_BadSignature_Rejected(t *testing.T) {
 
 	resp := callback(t, srv, client, flowCookie, flow.State)
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("expected 401 on a bad-signature ID token, got %d", resp.StatusCode)
-	}
-	if hasSessionCookie(resp) {
-		t.Error("no session cookie must be issued for a bad-signature ID token")
-	}
+	assertAuthErrorRedirect(t, resp, "exchange_failed")
 }
 
 func TestOIDCFlow_WrongAudience_Rejected(t *testing.T) {
@@ -421,12 +449,7 @@ func TestOIDCFlow_WrongAudience_Rejected(t *testing.T) {
 
 	resp := callback(t, srv, client, flowCookie, flow.State)
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("expected 401 on a wrong-audience ID token, got %d", resp.StatusCode)
-	}
-	if hasSessionCookie(resp) {
-		t.Error("no session cookie must be issued for a wrong-audience ID token")
-	}
+	assertAuthErrorRedirect(t, resp, "exchange_failed")
 }
 
 func TestOIDCFlow_NoFlowCookie_Rejected(t *testing.T) {
@@ -436,10 +459,28 @@ func TestOIDCFlow_NoFlowCookie_Rejected(t *testing.T) {
 	// Never call startLogin — hit the callback cold, with no flow cookie.
 	resp := callback(t, srv, client, nil, "some-state")
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("expected 400 when the callback arrives with no active flow cookie, got %d", resp.StatusCode)
+	assertAuthErrorRedirect(t, resp, "no_flow")
+}
+
+// TestOIDCFlow_IdPError_Redirects covers the new path where the IdP bounces
+// the browser back with its own ?error= (e.g. access_denied) instead of a
+// code — checked before the flow/state logic, so even a valid state doesn't
+// let it fall through to the token exchange.
+func TestOIDCFlow_IdPError_Redirects(t *testing.T) {
+	idp := newTestIdP(t)
+	srv, client := oidcFlowServer(t, idp)
+
+	flowCookie, flow := startLogin(t, srv, client)
+
+	// A valid flow cookie and matching state, but the IdP returned an error
+	// instead of a code — must still redirect to idp_error, not attempt an
+	// exchange with an empty code.
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/auth/oidc/callback?error=access_denied&error_description=user+cancelled&state="+flow.State, nil)
+	req.AddCookie(flowCookie)
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
-	if hasSessionCookie(resp) {
-		t.Error("no session cookie must be issued without an active flow")
-	}
+	defer resp.Body.Close()
+	assertAuthErrorRedirect(t, resp, "idp_error")
 }

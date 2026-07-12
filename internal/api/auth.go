@@ -143,6 +143,16 @@ func authSetupHandler(authStore *auth.Store, tokenEnc auth.TokenEncryptor) http.
 				http.Error(w, "oidcIssuerUrl, oidcClientId, oidcClientSecret, and oidcRedirectUrl are all required", http.StatusBadRequest)
 				return
 			}
+			// Narrow guard against the exact mistake that broke a real
+			// instance: pasting the client id (or any bare string) into the
+			// redirect URL field, which was accepted silently and only
+			// surfaced as an unrecoverable IdP-side rejection at login. A
+			// leading http(s):// is the minimum for a usable callback; deeper
+			// validation is the IdP's job (it must register the same value).
+			if !strings.HasPrefix(redirectURL, "http://") && !strings.HasPrefix(redirectURL, "https://") {
+				http.Error(w, "oidcRedirectUrl must be an http:// or https:// URL", http.StatusBadRequest)
+				return
+			}
 			cipher, err := tokenEnc.Encrypt(clientSecret)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
