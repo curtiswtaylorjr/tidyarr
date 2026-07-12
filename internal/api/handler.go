@@ -45,6 +45,16 @@ func NewMux(httpClient *http.Client, connStore *connections.Store, propStore *pr
 	mux.HandleFunc("PUT /api/connections/{service}", upsertConnectionHandler(connStore))
 	mux.HandleFunc("DELETE /api/connections/{service}", deleteConnectionHandler(connStore))
 
+	// LAN service probing for the setup wizard (see netscan.go) — an
+	// authenticated-operator convenience that pre-fills a connection's URL.
+	// Auth-gated like every other route on this mux; every result is a hint
+	// to verify, never a trusted fact. The general probes never return a
+	// credential — Prowlarr's key is fetched only via the dedicated, explicit
+	// prowlarr-key route.
+	mux.HandleFunc("GET /api/netscan/known", netscanKnownHandler(httpClient))
+	mux.HandleFunc("POST /api/netscan/host", netscanHostHandler(httpClient))
+	mux.HandleFunc("POST /api/netscan/prowlarr-key", netscanProwlarrKeyHandler(httpClient))
+
 	mux.HandleFunc("GET /api/modes/{mode}/root-folders", listRootFoldersHandler(httpClient, connStore, settingsStore))
 	mux.HandleFunc("GET /api/modes/{mode}/tracked", listTrackedHandler(httpClient, connStore, settingsStore, libStore))
 	mux.HandleFunc("GET /api/modes/{mode}/library/root-folder", getLibraryRootFolderHandler(settingsStore))

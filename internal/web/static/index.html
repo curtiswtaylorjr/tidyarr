@@ -402,9 +402,32 @@ async function renderWizard(container) {
   const modeStatusByMode = {};
   for (const ms of status.modes) modeStatusByMode[ms.mode] = ms;
 
+  // LAN scan for the docker-DNS-reachable services — fetched ONCE here and
+  // passed down to each step, so the three known-host steps don't each
+  // re-probe. A findings is only ever a HINT to verify (an unauthenticated
+  // identity response is spoofable) — the UI copy and the "Use this URL"
+  // (never auto-save) flow reflect that. A scan failure must never break the
+  // wizard, so this is best-effort.
+  let findingByService = {};
+  try {
+    const known = await api("/api/netscan/known");
+    for (const f of known) findingByService[f.service] = f;
+  } catch (e) { /* no scan results — steps just show no hint */ }
+
   let step = 1;
   container.appendChild(await buildLibraryWizardStep("movies", step++, modeStatusByMode.movies && modeStatusByMode.movies.arrConfigured, container));
   container.appendChild(await buildLibraryWizardStep("series", step++, modeStatusByMode.series && modeStatusByMode.series.arrConfigured, container));
+
+  // Search + download-client + player connections (all optional). These four
+  // are where LAN scan slots in: Prowlarr/qBittorrent/NZBGet are reachable by
+  // conventional container hostname on SAK's own docker network (so their
+  // hints come from the pre-fetched known-host scan), while Jellyfin lives on
+  // a different host and gets a "probe a specific host" input instead.
+  container.appendChild(buildWizardStep(step++, "Search — connect Prowlarr", true, !!byService.prowlarr, "prowlarr", byService.prowlarr, container, { finding: findingByService.prowlarr }));
+  container.appendChild(buildWizardStep(step++, "Downloads — connect qBittorrent (torrents)", true, !!byService.qbittorrent, "qbittorrent", byService.qbittorrent, container, { finding: findingByService.qbittorrent }));
+  container.appendChild(buildWizardStep(step++, "Downloads — connect NZBGet (usenet)", true, !!byService.nzbget, "nzbget", byService.nzbget, container, { finding: findingByService.nzbget }));
+  container.appendChild(buildWizardStep(step++, "Player — connect Jellyfin", true, !!byService.jellyfin, "jellyfin", byService.jellyfin, container, { finding: findingByService.jellyfin, allowHostProbe: true }));
+
   {
     const configured = modeStatusByMode.adult && modeStatusByMode.adult.arrConfigured;
     container.appendChild(buildWizardStep(step++, "Adult — connect whisparr", true, configured, "whisparr", byService.whisparr, container));
@@ -431,17 +454,108 @@ async function renderWizard(container) {
   container.appendChild(footer);
 }
 
-function buildWizardStep(n, title, optional, configured, service, existingConn, wizardContainer) {
+function buildWizardStep(n, title, optional, configured, service, existingConn, wizardContainer, netscanOpts) {
   const fs = el("fieldset", {}, [
     el("legend", { text: n + ". " + title + (optional ? " (optional)" : "") + (configured ? " ✓" : "") }),
   ]);
   const c = buildConnectionControls(service, existingConn, () => renderWizard(wizardContainer));
-  fs.appendChild(el("div", { class: "grid2" }, [
-    el("label", {}, [document.createTextNode("URL"), c.urlInput]),
-    el("label", {}, [document.createTextNode("API Key"), c.keyInput]),
-  ]));
+  // Username/password services (qBittorrent, NZBGet) get a Username field; the
+  // key field is a "Password" for them. Everything else is URL + API Key.
+  const fields = [el("label", {}, [document.createTextNode("URL"), c.urlInput])];
+  if (c.needsUsername) fields.push(el("label", {}, [document.createTextNode("Username"), c.usernameInput]));
+  fields.push(el("label", {}, [document.createTextNode(c.needsUsername ? "Password" : "API Key"), c.keyInput]));
+  fs.appendChild(el("div", { class: "grid2" }, fields));
+  // LAN-scan hint (optional): a "possible instance found" prompt with a
+  // Use-this-URL button that only ever pre-fills the URL — never auto-saves.
+  if (netscanOpts) {
+    const hint = buildNetscanHint(service, c, netscanOpts);
+    if (hint) fs.appendChild(hint);
+  }
   fs.appendChild(el("div", { class: "row", style: "margin-top:0.5rem" }, [c.testBtn, c.saveBtn, c.status]));
   return fs;
+}
+
+// buildNetscanHint renders the LAN-scan affordances for one wizard connection
+// step. Every string here is deliberately hedged ("possible", "verify") — a
+// finding is an unauthenticated, spoofable identity signal, never a confirmed
+// fact. Actions only ever PRE-FILL form fields; the existing Test/Save flow is
+// unchanged and still the only thing that persists anything. c is the controls
+// object from buildConnectionControls (its urlInput/keyInput are what the
+// buttons fill). opts = { finding, allowHostProbe }.
+function buildNetscanHint(service, c, opts) {
+  const wrap = el("div", { class: "muted", style: "margin-top:0.5rem;padding:0.5rem;border:1px dashed var(--border);border-radius:4px" });
+  const status = el("div", { class: "muted", style: "margin-top:0.35rem" });
+
+  // renderFinding paints the "possible X found — Use this URL?" line plus, for
+  // Prowlarr only, a SEPARATE key-fetch button (never bundled with Use-URL).
+  const renderFinding = (finding, host) => {
+    const block = el("div", {});
+    block.appendChild(el("div", { text: "Possible " + service + " instance found at " + finding.url + " — this is only a hint; verify it's really yours before saving." }));
+    const btnRow = el("div", { class: "row", style: "margin-top:0.35rem" });
+    btnRow.appendChild(el("button", { text: "Use this URL", onclick: () => {
+      c.urlInput.value = finding.url;
+      status.textContent = "URL pre-filled — verify, then Test and Save below.";
+      status.className = "muted";
+    } }));
+    if (service === "prowlarr") {
+      btnRow.appendChild(el("button", { text: "Fetch API key from this instance", onclick: async () => {
+        status.textContent = "fetching key…"; status.className = "muted";
+        try {
+          const res = await api("/api/netscan/prowlarr-key", { method: "POST", body: JSON.stringify({ url: finding.url }) });
+          c.keyInput.value = res.apiKey;
+          status.textContent = "API key retrieved live from " + finding.url + "/initialize.json — verify this is your instance before saving.";
+          status.className = "muted";
+        } catch (e) { status.textContent = "✗ " + e.message; status.className = "error"; }
+      } }));
+    }
+    block.appendChild(btnRow);
+    return block;
+  };
+
+  let hasContent = false;
+
+  if (opts.finding) {
+    wrap.appendChild(renderFinding(opts.finding));
+    hasContent = true;
+  }
+
+  // Jellyfin (and any host-probe step): a single-host probe input. The typed
+  // host must resolve to a private/LAN address server-side or the probe is
+  // refused — that's the SSRF guardrail.
+  if (opts.allowHostProbe) {
+    const hostInput = el("input", { type: "text", placeholder: "Jellyfin host or LAN IP, e.g. 10.1.10.4" });
+    const findingSlot = el("div", { style: "margin-top:0.35rem" });
+    const probeBtn = el("button", { text: "Probe this host", onclick: async () => {
+      findingSlot.innerHTML = "";
+      status.textContent = "probing…"; status.className = "muted";
+      try {
+        const findings = await api("/api/netscan/host", { method: "POST", body: JSON.stringify({ host: hostInput.value }) });
+        const jf = findings.find(f => f.service === service);
+        if (jf) {
+          findingSlot.appendChild(renderFinding(jf));
+          status.textContent = "";
+        } else if (findings.length) {
+          status.textContent = "Found other services there (" + findings.map(f => f.service).join(", ") + ") but no " + service + ".";
+          status.className = "muted";
+        } else {
+          status.textContent = "No " + service + " found at that host.";
+          status.className = "muted";
+        }
+      } catch (e) { status.textContent = "✗ " + e.message; status.className = "error"; }
+    } });
+    const probeOnEnter = (e) => { if (e.key === "Enter") { e.preventDefault(); probeBtn.click(); } };
+    hostInput.addEventListener("keydown", probeOnEnter);
+    wrap.appendChild(el("div", {}, [
+      el("div", { text: "On a different host? Probe a specific host or LAN IP for a " + service + " instance:" }),
+      el("div", { class: "row", style: "margin-top:0.35rem" }, [hostInput, probeBtn]),
+      findingSlot,
+    ]));
+    hasContent = true;
+  }
+
+  if (!hasContent) return null;
+  wrap.appendChild(status);
+  return wrap;
 }
 
 // buildLibraryWizardStep is Movies'/Series' counterpart to buildWizardStep —
