@@ -30,6 +30,11 @@ type Scene struct {
 	Date  string
 	Site  string // studio name
 	Image string // scene thumbnail/poster URL (may be empty; see rawScene.Image)
+	// Duration is the scene's runtime in seconds — see rawScene.Duration for
+	// sourcing/confidence. May be 0 (absent/unknown); consumers computing an
+	// implied bitrate (Size×8/runtime) MUST treat 0 as "unknown, skip the
+	// check," never as a real zero-length runtime or a divide-by-zero input.
+	Duration int
 }
 
 type rawSite struct {
@@ -47,12 +52,27 @@ type rawSite struct {
 // scene shape (Jellyfin/Plex TPDB agents, community Go clients); the field is
 // modeled from that documentation, not confirmed against a live authenticated
 // instance in-repo.
+//
+// Duration ("duration", seconds) — investigated for the frontend-redesign
+// plan's auto-grab bitrate scorer, which needs a title's runtime before
+// grabbing (implied bitrate = Size×8/runtime). Not directly confirmed against
+// a live TPDB instance (same constraint as Image above), but corroborated by
+// two independent sources: (1) the stash-box GraphQL schema TPDB's own
+// GraphQL endpoint implements (github.com/stashapp/stash-box) declares
+// `duration: Int` on its Scene type; (2) github.com/lusoris/goenvoy's TPDB
+// REST client (actively maintained, last verified 2026-06-14) models
+// `Duration int `json:"duration"`` on Scene/Movie/Jav, with a passing test
+// fixture (1800 for a scene) — and that library's other field names
+// (_id/title/date/site.name/image) match this client's own rawScene
+// byte-for-byte, indicating it targets the same API version. Confidence:
+// documented-shape + strong corroboration, NOT live-confirmed.
 type rawScene struct {
-	ID    string   `json:"_id"`
-	Title string   `json:"title"`
-	Date  string   `json:"date"`
-	Site  *rawSite `json:"site"`
-	Image string   `json:"image"`
+	ID       string   `json:"_id"`
+	Title    string   `json:"title"`
+	Date     string   `json:"date"`
+	Site     *rawSite `json:"site"`
+	Image    string   `json:"image"`
+	Duration int      `json:"duration"`
 }
 
 func (s rawScene) toScene() Scene {
@@ -60,7 +80,7 @@ func (s rawScene) toScene() Scene {
 	if s.Site != nil {
 		site = s.Site.Name
 	}
-	return Scene{ID: s.ID, Title: s.Title, Date: s.Date, Site: site, Image: s.Image}
+	return Scene{ID: s.ID, Title: s.Title, Date: s.Date, Site: site, Image: s.Image, Duration: s.Duration}
 }
 
 type scenesResponse struct {

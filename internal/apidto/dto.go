@@ -204,13 +204,20 @@ type DiscoverItem struct {
 // (cdn.theporndb.net); it is frequently empty (many scenes have no art), so
 // the client must render a text-only card when blank and route non-empty
 // values through the image proxy (GET /api/images/proxy?url=), never
-// hot-linking TPDB directly (plan Decision #7).
+// hot-linking TPDB directly (plan Decision #7). DurationSeconds is the
+// scene's pre-grab runtime in seconds (see internal/tpdbrest.Scene.Duration
+// for sourcing/confidence: documented-shape + corroborated by two
+// independent sources, not live-confirmed against a real TPDB instance); it
+// may be 0 (unknown), which the auto-grab bitrate scorer (Stage 2) must
+// treat as "skip the pre-grab bitrate check," never a real zero-length
+// runtime or a divide-by-zero input.
 type AdultDiscoverItem struct {
-	ID     string `json:"id"`
-	Title  string `json:"title"`
-	Studio string `json:"studio"`
-	Date   string `json:"date"`
-	Image  string `json:"image"`
+	ID              string `json:"id"`
+	Title           string `json:"title"`
+	Studio          string `json:"studio"`
+	Date            string `json:"date"`
+	Image           string `json:"image"`
+	DurationSeconds int    `json:"durationSeconds"`
 }
 
 // AvailabilityResponse is GET /api/modes/{mode}/availability's response —

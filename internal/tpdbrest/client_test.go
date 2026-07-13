@@ -155,6 +155,42 @@ func TestGet_NonOKStatus(t *testing.T) {
 	}
 }
 
+func TestGet_ParsesDuration(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"_id":"1","title":"Timed Scene","date":"2024-01-01","site":{"name":"Some Site"},"duration":1800}]}`))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "testkey", &http.Client{Timeout: 5 * time.Second})
+	out, err := c.SearchByHash(context.Background(), "x")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(out) != 1 || out[0].Duration != 1800 {
+		t.Fatalf("expected Duration=1800 seconds, got %+v", out)
+	}
+}
+
+func TestGet_MissingDurationIsZero(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"_id":"1","title":"No Duration Scene","date":"2024-01-01","site":{"name":"Some Site"}}]}`))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "testkey", &http.Client{Timeout: 5 * time.Second})
+	out, err := c.SearchByHash(context.Background(), "x")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// A scene with no "duration" in the response must decode to 0, the
+	// documented "unknown, skip the bitrate check" sentinel — never an error.
+	if len(out) != 1 || out[0].Duration != 0 {
+		t.Fatalf("expected Duration=0 when absent from response, got %+v", out)
+	}
+}
+
 func TestGet_EmptySiteFallback(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

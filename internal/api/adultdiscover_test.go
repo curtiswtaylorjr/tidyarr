@@ -27,7 +27,7 @@ func TestAdultDiscoverHandler_Browse(t *testing.T) {
 			gotQ = "present"
 		}
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"data":[{"_id":"s1","title":"A Scene","date":"2024-01-01","site":{"name":"Tushy"}}]}`))
+		w.Write([]byte(`{"data":[{"_id":"s1","title":"A Scene","date":"2024-01-01","site":{"name":"Tushy"},"duration":1800}]}`))
 	})
 
 	connStore, propStore, allowStore, settingsStore, grabsStore, libStore := testStores(t)
@@ -58,6 +58,9 @@ func TestAdultDiscoverHandler_Browse(t *testing.T) {
 	}
 	if len(items) != 1 || items[0].Title != "A Scene" || items[0].Studio != "Tushy" || items[0].ID != "s1" {
 		t.Errorf("unexpected items (studio must map from Site): %+v", items)
+	}
+	if items[0].DurationSeconds != 1800 {
+		t.Errorf("expected DurationSeconds to map from TPDB's duration field, got %d", items[0].DurationSeconds)
 	}
 }
 

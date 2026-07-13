@@ -22,12 +22,20 @@ import (
 // is often empty (many scenes carry no art), so the frontend must render a
 // text-only card when it's blank and route non-empty values through the image
 // proxy, never hot-link TPDB directly (plan Decision #7).
+//
+// DurationSeconds is the scene's pre-grab runtime in seconds (see
+// tpdbrest.Scene.Duration for sourcing/confidence — documented-shape,
+// corroborated by two independent sources, not live-confirmed). May be 0
+// (unknown) — the auto-grab bitrate scorer (Stage 2) must treat 0 as
+// "unknown, skip the pre-grab bitrate check," never as a real zero-length
+// runtime or a divide-by-zero input, per the plan's missing-input handling.
 type adultScene struct {
-	ID     string `json:"id"`
-	Title  string `json:"title"`
-	Studio string `json:"studio"`
-	Date   string `json:"date"`
-	Image  string `json:"image"`
+	ID              string `json:"id"`
+	Title           string `json:"title"`
+	Studio          string `json:"studio"`
+	Date            string `json:"date"`
+	Image           string `json:"image"`
+	DurationSeconds int    `json:"durationSeconds"`
 }
 
 // adultDiscoverHandler backs Adult's Discover screen against ThePornDB's REST
@@ -78,7 +86,7 @@ func adultDiscoverHandler(httpClient *http.Client, connStore *connections.Store)
 
 		out := make([]adultScene, len(scenes))
 		for i, s := range scenes {
-			out[i] = adultScene{ID: s.ID, Title: s.Title, Studio: s.Site, Date: s.Date, Image: s.Image}
+			out[i] = adultScene{ID: s.ID, Title: s.Title, Studio: s.Site, Date: s.Date, Image: s.Image, DurationSeconds: s.Duration}
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(out)
