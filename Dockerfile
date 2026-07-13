@@ -2,7 +2,7 @@
 
 # Frontend build stage: compiles the SolidJS + Vite app to static assets.
 # This whole stage is discarded — no Node.js reaches the final image. Its
-# only output is /src/internal/web/static/app, COPY'd into the Go build below
+# only output is /src/internal/web/static, COPY'd into the Go build below
 # so //go:embed static picks it up. Node/pnpm versions are pinned (must match
 # frontend/package.json's engines + packageManager); install uses the
 # committed lockfile with --frozen-lockfile so a drift fails the build here.
@@ -13,7 +13,7 @@ COPY frontend/package.json frontend/pnpm-lock.yaml ./
 RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
     pnpm install --frozen-lockfile
 COPY frontend/ ./
-# Writes to /src/internal/web/static/app (outDir is ../internal/web/static/app
+# Writes to /src/internal/web/static (outDir is ../internal/web/static
 # relative to this frontend/ workdir), mirroring the local-dev layout.
 RUN pnpm build
 
@@ -26,9 +26,10 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 
 COPY . .
 # Overlay the compiled frontend into the Go embed dir before building. The
-# COPY . . above brings static/index.html (tracked); this adds the generated
-# static/app/ bundle (gitignored/dockerignored, so it comes only from here).
-COPY --from=frontend /src/internal/web/static/app ./internal/web/static/app
+# static/ dir is entirely generated (gitignored/dockerignored — the Stage 5
+# cutover removed the old tracked static/index.html), so the embed content
+# comes only from here; without this COPY, //go:embed static fails cleanly.
+COPY --from=frontend /src/internal/web/static ./internal/web/static
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 go build -trimpath -o /out/sakms ./cmd/sakms

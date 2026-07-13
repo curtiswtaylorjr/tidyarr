@@ -8,10 +8,13 @@ generated, gitignored, and never committed (plan Guardrail #6).
 
 ## Status
 
-Toolchain scaffold only. The app is a single placeholder root component
-(`src/App.tsx`) that proves the build works — no real views yet. Auth boot,
-Discover, Settings, and the rest are added by later waves; see
-`.omc/plans/frontend-redesign-seerr.md`.
+Complete and live. This is the production frontend — auth boot (3-way
+setup/login/app branch, password + OIDC + break-glass), Discover with
+one-click auto-grab per mode, Rename, Purge, Dedup, Tag, and full Settings
+(incl. Advanced Settings) are all ported. The old vanilla-JS
+`internal/web/static/index.html` was removed in the Stage 5 atomic cutover;
+`pnpm build` output now IS the embedded `static/` tree. See
+`.omc/plans/frontend-redesign-seerr.md` for the full history.
 
 ## Toolchain
 
@@ -34,11 +37,12 @@ pnpm install        # installs deps from the committed lockfile
 pnpm build          # type-checks, builds, and reports gzipped JS size
 ```
 
-`pnpm build` writes the compiled bundle to
-`../internal/web/static/app/`. That directory is **required** for a bare
-local `go build ./cmd/sakms` to embed a complete `static/` tree — run
-`pnpm build` first. (The build never touches `static/index.html`, which is
-the currently-live production frontend until the later atomic cutover.)
+`pnpm build` writes the compiled bundle directly into
+`../internal/web/static/` (index.html + assets/). That directory **is** the
+production frontend now (Stage 5 atomic cutover — the old hand-written
+`static/index.html` is gone) and is entirely generated/gitignored, so a bare
+local `go build ./cmd/sakms` fails cleanly with `pattern static: no matching
+files found` until `pnpm build` has populated it — run `pnpm build` first.
 
 ### Commands
 
@@ -46,7 +50,7 @@ the currently-live production frontend until the later atomic cutover.)
 |---|---|
 | `pnpm dev` | Vite dev server with HMR (source lives here; nothing is embedded). |
 | `pnpm typecheck` | `tsc --noEmit`, strict mode. |
-| `pnpm build` | `tsc --noEmit` → `vite build` → gzipped-JS size report. Output → `../internal/web/static/app/`. |
+| `pnpm build` | `tsc --noEmit` → `vite build` → gzipped-JS size report. Output → `../internal/web/static/`. |
 | `pnpm preview` | Serve the built bundle locally to sanity-check production output. |
 
 ## Layout

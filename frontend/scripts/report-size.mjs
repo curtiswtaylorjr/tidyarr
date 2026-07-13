@@ -14,7 +14,7 @@ import { join, relative } from "node:path";
 const CEILING_BYTES = 200 * 1024; // 200 KB gzipped JS, soft ceiling
 
 // outDir from vite.config.ts, resolved relative to this script.
-const outDir = fileURLToPath(new URL("../../internal/web/static/app", import.meta.url));
+const outDir = fileURLToPath(new URL("../../internal/web/static", import.meta.url));
 
 async function jsFiles(dir) {
   const out = [];

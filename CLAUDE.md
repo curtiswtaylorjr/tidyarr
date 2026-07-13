@@ -239,3 +239,39 @@ above, so don't drop them for convenience:
     deliberate Season-0 (Specials) grab whose filename didn't parse — the
     new bool distinguishes "a season was actually picked" from "none
     was," which a bare `int` can never do on its own.
+- **Frontend (SolidJS + Vite SPA, Seerr-inspired redesign, 2026-07-13)**:
+  the frontend is a SolidJS + Vite single-page app, compiled at build time to
+  static HTML/JS/CSS and embedded in the Go binary exactly as before
+  (`internal/web`, `//go:embed static`). **No Node.js runs in production** —
+  the binary still just serves static files, only a richer generated bundle.
+  The old 2,284-line hand-written vanilla-JS `static/index.html` was removed
+  in an atomic cutover: `pnpm build`'s output now *is* the embedded `static/`
+  tree (whole dir gitignored), so a bare `go build ./cmd/sakms` fails cleanly
+  (`pattern static: no matching files found`) until the frontend is built —
+  the Dockerfile's discarded Node stage does this automatically. Load-bearing
+  decisions the redesign preserves (don't quietly reverse them):
+  - **No bulk actions, single-operator, staged-for-approval** carry over
+    verbatim — the visual style is from Seerr, its multi-user
+    request/approval model is explicitly NOT (see `frontend/SEERR_SCOPE.md`).
+  - **API request/response types are generated from Go DTOs**
+    (`internal/apidto` → `ts/dto.gen.ts` via `go run ./cmd/gendto`), never
+    hand-duplicated. The `*T`/`omitempty` three-state secret rule
+    (nil = preserve stored secret, `""` = clear, `"x"` = set) is mapped
+    deliberately in the client — a naive `apiKey?: string` would silently
+    wipe secrets on an untouched save.
+  - **Images are proxied** through the Go backend (`/api/images/proxy`),
+    never hot-linked from TMDB/TPDB — keeps operator browsing off those hosts
+    and traffic same-origin behind the internal-only middleware.
+  - **Auth boot is the single highest-risk piece** (a regression is a total,
+    break-glass-only lockout): a 3-way branch (setup / login / app) across all
+    three modes, OIDC as a full-page redirect (never XHR), and the break-glass
+    `X-Api-Key` recovery path all survive — see `frontend/src/auth/boot.ts`.
+  - **One-click auto-grab** is gated by a *separate* bitrate-quality-floor
+    scorer, `internal/autograb` — deliberately distinct from and permanently
+    coexisting with `internal/release.ScoreCandidate` (which still ranks the
+    manual Search view). See `internal/autograb`'s package doc for the full
+    reconciliation and why there are two scorers, not one.
+  - **Break-glass after a wipe**: every deploy wipes the DB + `secret.key`, so
+    on the next start a fresh `X-Api-Key` is logged once (`main.go:104`). If a
+    deploy lands with a broken auth-boot shell, that key is the recovery net —
+    the retrieval + use procedure is in `docs/break-glass-recovery.md`.
