@@ -10,12 +10,13 @@ import { Discover } from "./Discover";
 import { Grabs } from "./Grabs";
 import { Rename } from "./Rename";
 import { Purge } from "./Purge";
+import { Dedup } from "./Dedup";
 
 // APP_ROUTES is the exhaustive list of client-side route patterns the router
 // serves. Guardrail #2 / requirement #7: the router must NEVER claim any
 // /api/* path (the OIDC callback /api/auth/oidc/callback is a real server
 // route). A unit test asserts none of these start with "/api".
-export const APP_ROUTES = ["/", "/discover", "/grabs", "/rename", "/purge"] as const;
+export const APP_ROUTES = ["/", "/discover", "/grabs", "/rename", "/purge", "/dedup"] as const;
 
 // ShellLayout is the Router root — a tab nav (Discover / Grabs) above whatever
 // route is active. Being inside <Router> is what gives <A> its active-link
@@ -54,6 +55,14 @@ const ShellLayout: Component<{ children?: JSX.Element }> = (props) => (
         inactiveClass="text-muted"
       >
         Purge
+      </A>
+      <A
+        href="/dedup"
+        class="text-sm font-medium hover:text-fg"
+        activeClass="text-fg"
+        inactiveClass="text-muted"
+      >
+        Dedup
       </A>
     </nav>
     {props.children}
@@ -120,6 +129,7 @@ export const AppShell: Component<{
           <Route path="/grabs" component={Grabs} />
           <Route path="/rename" component={Rename} />
           <Route path="/purge" component={Purge} />
+          <Route path="/dedup" component={Dedup} />
           <Route path="*" component={NotFound} />
         </Router>
       </main>

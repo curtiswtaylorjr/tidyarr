@@ -394,13 +394,38 @@ export interface AutoGrabResponse {
   candidates?: AutoGrabCandidate[];
 }
 /**
- * Proposal is one staged review-queue row as the Rename view consumes it.
- * SourceName/RootFolderPath/Reason are always present; Title/Year are only
+ * Candidate is one file in a Dedup proposal's duplicate group — the shape the
+ * Dedup view (frontend/src/screens/Dedup.tsx) renders one table row from. A
+ * CURATED subset of internal/proposals.Candidate: only the fields the view
+ * actually displays (Label/Path/Resolution/Codec/BitRate) plus Winner, the
+ * keeper-vs-duplicate flag. Winner==true is the "tracked copy" the group keeps;
+ * every other candidate is a duplicate the Apply removes (see
+ * internal/dedup.ApplyLibrary*). Wire order is load-bearing: DedupApplyRequest's
+ * KeepIndex is an ARRAY INDEX into this exact slice (proposals.Proposal.Candidates
+ * order), so the client MUST render candidates in received order and never sort
+ * them, or the index it sends resolves to the wrong file. proposals.Candidate's
+ * TrackedID/PHash are intentionally omitted — the view reads neither, and this
+ * package curates to what the frontend consumes (see the Proposal doc / package doc).
+ */
+export interface Candidate {
+  label: string;
+  path: string;
+  resolution: number /* int */;
+  codec: string;
+  bitRate: number /* int64 */;
+  winner: boolean;
+}
+/**
+ * Proposal is one staged review-queue row as the Rename/Purge/Dedup views consume
+ * it. SourceName/RootFolderPath/Reason are always present; Title/Year are only
  * meaningful once Status is pending/applied; Reason explains an unmatched row;
  * DraftID is set once a successful submit-draft ("give back") has run, so the
  * button renders as already-done and can't re-submit. Studio/Date/PHash are
  * Adult-only (captured from Adult identification); SeasonNumber/EpisodeNumber
  * are Series-only (a season-pack orphan produces one proposal per episode).
+ * Candidates is Dedup-only: the duplicate group's files, exactly one flagged
+ * Winner (the keeper); Rename/Purge never populate it (it's absent from their
+ * wire rows, so the shared TS type carries it as optional).
  */
 export interface Proposal {
   id: number /* int64 */;
@@ -416,6 +441,7 @@ export interface Proposal {
   phash?: string;
   reason?: string;
   draftId?: string;
+  candidates?: Candidate[];
 }
 /**
  * AllowlistAddRequest is the body of POST /api/modes/{mode}/purge/allowlist —
@@ -439,4 +465,25 @@ export interface RepickRequest {
   tmdbId: number /* int */;
   title: string;
   year?: number /* int */;
+}
+/**
+ * DedupApplyRequest is the OPTIONAL body of POST /api/proposals/{id}/apply when
+ * the proposal is a Dedup group (Rename/Purge send an empty body and ignore
+ * these fields — see internal/api's applyProposalRequest, which this mirrors).
+ * Exactly one of two shapes is sent per Apply:
+ *   - {keepIndex: N} — keep candidate N, delete every other candidate in the
+ *     group. N is an ARRAY INDEX into Proposal.Candidates in received order
+ *     (the radio the operator selected; the group's Winner is pre-selected).
+ *     KeepIndex MUST be sent even when it is 0 — a falsy-guard that drops a
+ *     literal 0 makes the backend fall back to its own auto-winner and can
+ *     delete the file the operator actually chose to keep (dedup.ApplyLibrary
+ *     indexes p.Candidates[keepIndex] directly).
+ *   - {keepAll: true} — keep every candidate, delete nothing ("Keep All"). The
+ *     conservative escape hatch when the group isn't really a duplicate.
+ * KeepIndex is a pointer/omitempty so "keep all" omits it entirely rather than
+ * sending 0 (which would mean "keep candidate 0").
+ */
+export interface DedupApplyRequest {
+  keepIndex?: number /* int */;
+  keepAll?: boolean;
 }

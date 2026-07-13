@@ -405,27 +405,52 @@ type AutoGrabResponse struct {
 // Wire keys match proposals.Proposal's json tags so a future handler swap onto
 // this type is a substitution, not a wire-format change (see this package's doc).
 
-// Proposal is one staged review-queue row as the Rename view consumes it.
-// SourceName/RootFolderPath/Reason are always present; Title/Year are only
+// Candidate is one file in a Dedup proposal's duplicate group — the shape the
+// Dedup view (frontend/src/screens/Dedup.tsx) renders one table row from. A
+// CURATED subset of internal/proposals.Candidate: only the fields the view
+// actually displays (Label/Path/Resolution/Codec/BitRate) plus Winner, the
+// keeper-vs-duplicate flag. Winner==true is the "tracked copy" the group keeps;
+// every other candidate is a duplicate the Apply removes (see
+// internal/dedup.ApplyLibrary*). Wire order is load-bearing: DedupApplyRequest's
+// KeepIndex is an ARRAY INDEX into this exact slice (proposals.Proposal.Candidates
+// order), so the client MUST render candidates in received order and never sort
+// them, or the index it sends resolves to the wrong file. proposals.Candidate's
+// TrackedID/PHash are intentionally omitted — the view reads neither, and this
+// package curates to what the frontend consumes (see the Proposal doc / package doc).
+type Candidate struct {
+	Label      string `json:"label"`
+	Path       string `json:"path"`
+	Resolution int    `json:"resolution"`
+	Codec      string `json:"codec"`
+	BitRate    int64  `json:"bitRate"`
+	Winner     bool   `json:"winner"`
+}
+
+// Proposal is one staged review-queue row as the Rename/Purge/Dedup views consume
+// it. SourceName/RootFolderPath/Reason are always present; Title/Year are only
 // meaningful once Status is pending/applied; Reason explains an unmatched row;
 // DraftID is set once a successful submit-draft ("give back") has run, so the
 // button renders as already-done and can't re-submit. Studio/Date/PHash are
 // Adult-only (captured from Adult identification); SeasonNumber/EpisodeNumber
 // are Series-only (a season-pack orphan produces one proposal per episode).
+// Candidates is Dedup-only: the duplicate group's files, exactly one flagged
+// Winner (the keeper); Rename/Purge never populate it (it's absent from their
+// wire rows, so the shared TS type carries it as optional).
 type Proposal struct {
-	ID             int64  `json:"id"`
-	Status         string `json:"status"`
-	SourceName     string `json:"sourceName"`
-	RootFolderPath string `json:"rootFolderPath"`
-	Title          string `json:"title,omitempty"`
-	Year           int    `json:"year,omitempty"`
-	SeasonNumber   int    `json:"seasonNumber,omitempty"`
-	EpisodeNumber  int    `json:"episodeNumber,omitempty"`
-	Studio         string `json:"studio,omitempty"`
-	Date           string `json:"date,omitempty"`
-	PHash          string `json:"phash,omitempty"`
-	Reason         string `json:"reason,omitempty"`
-	DraftID        string `json:"draftId,omitempty"`
+	ID             int64       `json:"id"`
+	Status         string      `json:"status"`
+	SourceName     string      `json:"sourceName"`
+	RootFolderPath string      `json:"rootFolderPath"`
+	Title          string      `json:"title,omitempty"`
+	Year           int         `json:"year,omitempty"`
+	SeasonNumber   int         `json:"seasonNumber,omitempty"`
+	EpisodeNumber  int         `json:"episodeNumber,omitempty"`
+	Studio         string      `json:"studio,omitempty"`
+	Date           string      `json:"date,omitempty"`
+	PHash          string      `json:"phash,omitempty"`
+	Reason         string      `json:"reason,omitempty"`
+	DraftID        string      `json:"draftId,omitempty"`
+	Candidates     []Candidate `json:"candidates,omitempty"`
 }
 
 // --- Purge allowlist (Stage 3) --------------------------------------------
@@ -462,4 +487,26 @@ type RepickRequest struct {
 	TMDBID int    `json:"tmdbId"`
 	Title  string `json:"title"`
 	Year   int    `json:"year,omitempty"`
+}
+
+// DedupApplyRequest is the OPTIONAL body of POST /api/proposals/{id}/apply when
+// the proposal is a Dedup group (Rename/Purge send an empty body and ignore
+// these fields — see internal/api's applyProposalRequest, which this mirrors).
+// Exactly one of two shapes is sent per Apply:
+//
+//   - {keepIndex: N} — keep candidate N, delete every other candidate in the
+//     group. N is an ARRAY INDEX into Proposal.Candidates in received order
+//     (the radio the operator selected; the group's Winner is pre-selected).
+//     KeepIndex MUST be sent even when it is 0 — a falsy-guard that drops a
+//     literal 0 makes the backend fall back to its own auto-winner and can
+//     delete the file the operator actually chose to keep (dedup.ApplyLibrary
+//     indexes p.Candidates[keepIndex] directly).
+//   - {keepAll: true} — keep every candidate, delete nothing ("Keep All"). The
+//     conservative escape hatch when the group isn't really a duplicate.
+//
+// KeepIndex is a pointer/omitempty so "keep all" omits it entirely rather than
+// sending 0 (which would mean "keep candidate 0").
+type DedupApplyRequest struct {
+	KeepIndex *int `json:"keepIndex,omitempty"`
+	KeepAll   bool `json:"keepAll,omitempty"`
 }
