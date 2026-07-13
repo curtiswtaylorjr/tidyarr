@@ -154,7 +154,7 @@ func autoGrabSearch(ctx context.Context, sess *mode.Session, m mode.Mode, req ap
 			TVDBID: tvdbID, Season: req.SeasonNumber, Episode: req.EpisodeNumber,
 			Categories: categoriesForSearch(mode.Series),
 		})
-		return releases, seriesEpisodeRuntimeSeconds(ctx, sess, req), err
+		return releases, seriesEpisodeRuntimeSeconds(ctx, sess, req.TMDBID, req.SeasonNumber, req.EpisodeNumber), err
 	default: // Movies
 		details, err := sess.TMDB.MovieDetails(ctx, req.TMDBID)
 		if err != nil {
@@ -168,28 +168,29 @@ func autoGrabSearch(ctx context.Context, sess *mode.Session, m mode.Mode, req ap
 	}
 }
 
-// seriesEpisodeRuntimeSeconds resolves the pre-grab runtime (seconds) for a
-// Series auto-grab. Only a single-episode grab (EpisodeNumber > 0) gets a real
-// runtime: it fetches the whole season once (SeasonDetails) and returns the
-// picked episode's runtime × 60. A whole-season grab (EpisodeNumber == 0)
-// returns 0 (unknown) on purpose — a season pack's implied bitrate is
-// ambiguous (its size spans many episodes muxed into one release), and the
-// scorer applies one runtime scalar to the whole candidate list, so no single
-// value grades a mixed pack-and-single result list correctly; unknown → the
-// safe neutral (manual pick list). Any failure (SeasonDetails error, the
-// episode absent from TMDB's list, or a null/zero runtime) also degrades to 0
-// rather than failing the grab: the season lookup only enriches runtime, it is
-// not required for the search (ExternalIDs already supplied the search's id).
-func seriesEpisodeRuntimeSeconds(ctx context.Context, sess *mode.Session, req apidto.AutoGrabRequest) float64 {
-	if req.EpisodeNumber <= 0 {
+// seriesEpisodeRuntimeSeconds resolves the per-episode runtime (seconds) for a
+// Series episode, shared by the pre-grab bitrate scorer (autoGrabSearch) and
+// the post-grab mislabel check (postGrabRuntimeReview). Only a single-episode
+// grab (episodeNumber > 0) gets a real runtime: it fetches the whole season
+// once (SeasonDetails) and returns the picked episode's runtime × 60. A
+// whole-season grab (episodeNumber == 0) returns 0 (unknown) on purpose — a
+// season pack's implied bitrate is ambiguous (its size spans many episodes
+// muxed into one release), and the scorer applies one runtime scalar to the
+// whole candidate list, so no single value grades a mixed pack-and-single
+// result list correctly; unknown → the safe neutral (manual pick list / no
+// post-grab flag). Any failure (SeasonDetails error, the episode absent from
+// TMDB's list, or a null/zero runtime) also degrades to 0 rather than failing
+// the caller: the season lookup only enriches runtime, it is never required.
+func seriesEpisodeRuntimeSeconds(ctx context.Context, sess *mode.Session, tmdbID, seasonNumber, episodeNumber int) float64 {
+	if episodeNumber <= 0 {
 		return 0
 	}
-	episodes, err := sess.TMDB.SeasonDetails(ctx, req.TMDBID, req.SeasonNumber)
+	episodes, err := sess.TMDB.SeasonDetails(ctx, tmdbID, seasonNumber)
 	if err != nil {
 		return 0
 	}
 	for _, e := range episodes {
-		if e.EpisodeNumber == req.EpisodeNumber {
+		if e.EpisodeNumber == episodeNumber {
 			return float64(e.Runtime) * 60
 		}
 	}

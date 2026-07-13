@@ -509,22 +509,39 @@ func checkImportHandler(httpClient *http.Client, connStore *connections.Store, s
 // id, more than one imported file (ambiguous which to probe), a probe error,
 // or an unknown/zero duration on either side all skip the check.
 //
-// Only Movies is wired: it's the one mode with a single file and a single,
-// unambiguous known runtime (TMDB /movie/{id}). Series is skipped because the
-// current TMDB client doesn't fetch a per-episode runtime (and a season pack's
-// total is ambiguous regardless); Adult is skipped because TPDB's pre-grab
-// scene runtime is unconfirmed (see the plan's Open Items). Both are safe
-// skips, consistent with never false-positive-flagging.
+// Movies and single-episode Series are wired — both resolve a single,
+// unambiguous expected runtime from TMDB (Movies from /movie/{id}, Series from
+// the picked episode via seriesEpisodeRuntimeSeconds, the same source the
+// pre-grab bitrate scorer already uses). A whole-season Series grab
+// (EpisodeNumber == 0) is deliberately skipped: a season pack has no single
+// per-file runtime to check against, exactly the pre-grab scorer's own decision
+// to grade packs as unknown-bitrate. Adult is skipped because TPDB's pre-grab
+// scene runtime is unconfirmed (see the plan's Open Items). All skips are safe,
+// consistent with never false-positive-flagging.
 func postGrabRuntimeReview(ctx context.Context, prober dedup.Prober, grabsStore *grabs.Store, sess *mode.Session, g *grabs.Grab, changes []mode.PathChange) {
 	if prober == nil || sess.TMDB == nil || g.TMDBID == 0 {
 		return
 	}
-	if g.Mode != mode.Movies || len(changes) != 1 {
+	if len(changes) != 1 {
 		return
 	}
 
-	details, err := sess.TMDB.MovieDetails(ctx, g.TMDBID)
-	if err != nil || details.Runtime <= 0 {
+	var expectedSeconds float64
+	switch g.Mode {
+	case mode.Movies:
+		details, err := sess.TMDB.MovieDetails(ctx, g.TMDBID)
+		if err != nil || details.Runtime <= 0 {
+			return
+		}
+		expectedSeconds = float64(details.Runtime * 60)
+	case mode.Series:
+		// Only single-episode grabs are checkable; a season pack
+		// (EpisodeNumber == 0) has no single runtime and yields 0 here.
+		expectedSeconds = seriesEpisodeRuntimeSeconds(ctx, sess, g.TMDBID, g.SeasonNumber, g.EpisodeNumber)
+		if expectedSeconds <= 0 {
+			return
+		}
+	default:
 		return
 	}
 
@@ -533,13 +550,13 @@ func postGrabRuntimeReview(ctx context.Context, prober dedup.Prober, grabsStore 
 		return
 	}
 
-	mismatch, checked := autograb.RuntimeMismatch(probe.Duration, float64(details.Runtime*60))
+	mismatch, checked := autograb.RuntimeMismatch(probe.Duration, expectedSeconds)
 	if !checked || !mismatch {
 		return
 	}
 
 	// Best-effort: a flag failure must not undo an already-successful import.
 	_ = grabsStore.Flag(ctx, g.ID, fmt.Sprintf(
-		"imported file runs %.0f min but TMDB lists %d min — possible mislabel or wrong content",
-		probe.Duration/60, details.Runtime))
+		"imported file runs %.0f min but TMDB lists %.0f min — possible mislabel or wrong content",
+		probe.Duration/60, expectedSeconds/60))
 }
