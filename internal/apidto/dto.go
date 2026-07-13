@@ -384,3 +384,50 @@ type AutoGrabResponse struct {
 	Grab       *Grab               `json:"grab,omitempty"`
 	Candidates []AutoGrabCandidate `json:"candidates,omitempty"`
 }
+
+// --- Review-queue proposals: Rename (Stage 3) -----------------------------
+//
+// The staged scan→propose→apply review queue backing the Rename workflow (and,
+// in later Stage-3 waves, Purge/Dedup/Tag). Proposal below is a CURATED subset
+// of internal/proposals.Proposal's wire shape — only the fields the Rename view
+// actually reads (see internal/web/static/index.html's renderRename, ported to
+// frontend/src/screens/Rename.tsx). It is deliberately NOT a full mirror of the
+// domain struct: the Dedup-only Candidates slice and the Adult-give-back-only
+// Studio/Date fields belong to the Purge/Dedup/Tag waves and are added here
+// when those land, per Guardrail #4's "DTO set grows per stage." Rename being
+// the first Stage-3 wave, this establishes the shared core the siblings extend.
+//
+// Status mirrors proposals.Status exactly ("pending" | "unmatched" | "applied"
+// | "dismissed"); the TS client narrows it to a string-literal union locally
+// (frontend/src/api/rename.ts), the same pattern discover.ts uses for Mode.
+// Wire keys match proposals.Proposal's json tags so a future handler swap onto
+// this type is a substitution, not a wire-format change (see this package's doc).
+
+// Proposal is one staged review-queue row as the Rename view consumes it.
+// SourceName/RootFolderPath/Reason are always present; Title/Year are only
+// meaningful once Status is pending/applied; Reason explains an unmatched row;
+// DraftID is set once a successful submit-draft ("give back") has run, so the
+// button renders as already-done and can't re-submit.
+type Proposal struct {
+	ID             int64  `json:"id"`
+	Status         string `json:"status"`
+	SourceName     string `json:"sourceName"`
+	RootFolderPath string `json:"rootFolderPath"`
+	Title          string `json:"title,omitempty"`
+	Year           int    `json:"year,omitempty"`
+	Reason         string `json:"reason,omitempty"`
+	DraftID        string `json:"draftId,omitempty"`
+}
+
+// RepickRequest is the body of POST /api/proposals/{id}/repick — Rename's
+// manual-override path when Scan's automatic TMDB match was wrong or scored too
+// low to auto-accept (Movies/Series only; Adult identifies via a different id
+// space with its own give-back correction). TMDBID and Title are both required
+// and carry the NEWLY chosen match from the tmdb-search result, never the
+// proposal's current tmdbId; Year is optional (parsed from the result's
+// release date when present). Mirrors internal/api's repickProposalRequest.
+type RepickRequest struct {
+	TMDBID int    `json:"tmdbId"`
+	Title  string `json:"title"`
+	Year   int    `json:"year,omitempty"`
+}

@@ -393,3 +393,34 @@ export interface AutoGrabResponse {
   grab?: Grab;
   candidates?: AutoGrabCandidate[];
 }
+/**
+ * Proposal is one staged review-queue row as the Rename view consumes it.
+ * SourceName/RootFolderPath/Reason are always present; Title/Year are only
+ * meaningful once Status is pending/applied; Reason explains an unmatched row;
+ * DraftID is set once a successful submit-draft ("give back") has run, so the
+ * button renders as already-done and can't re-submit.
+ */
+export interface Proposal {
+  id: number /* int64 */;
+  status: string;
+  sourceName: string;
+  rootFolderPath: string;
+  title?: string;
+  year?: number /* int */;
+  reason?: string;
+  draftId?: string;
+}
+/**
+ * RepickRequest is the body of POST /api/proposals/{id}/repick — Rename's
+ * manual-override path when Scan's automatic TMDB match was wrong or scored too
+ * low to auto-accept (Movies/Series only; Adult identifies via a different id
+ * space with its own give-back correction). TMDBID and Title are both required
+ * and carry the NEWLY chosen match from the tmdb-search result, never the
+ * proposal's current tmdbId; Year is optional (parsed from the result's
+ * release date when present). Mirrors internal/api's repickProposalRequest.
+ */
+export interface RepickRequest {
+  tmdbId: number /* int */;
+  title: string;
+  year?: number /* int */;
+}

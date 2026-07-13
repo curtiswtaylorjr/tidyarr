@@ -79,12 +79,12 @@ describe("Discover auto-grab — Movies (direct one-click)", () => {
 
     render(() => <Discover />);
     const grabButtons = await screen.findAllByText("Grab");
-    fireEvent.click(grabButtons[0]);
+    fireEvent.click(grabButtons[0]!);
 
     expect(await screen.findByText(/auto-grabbed/)).toBeInTheDocument();
     // No-bulk: one click → exactly one auto-grab request for one title.
     expect(autograbCalls(calls)).toHaveLength(1);
-    expect(autograbCalls(calls)[0].body).toMatchObject({
+    expect(autograbCalls(calls)[0]!.body).toMatchObject({
       title: "Hero Movie",
       tmdbId: 1,
     });
@@ -124,7 +124,7 @@ describe("Discover auto-grab — Movies (direct one-click)", () => {
     });
 
     render(() => <Discover />);
-    fireEvent.click((await screen.findAllByText("Grab"))[0]);
+    fireEvent.click((await screen.findAllByText("Grab"))[0]!);
 
     // The pick list shows the release, why it wasn't auto-picked, and a single
     // grab affordance.
@@ -168,20 +168,20 @@ describe("Discover auto-grab — Series (picker gates the grab)", () => {
     fireEvent.click(await screen.findByText("Series"));
 
     // Clicking Grab reveals the picker — it must NOT auto-grab yet.
-    fireEvent.click((await screen.findAllByText("Grab"))[0]);
+    fireEvent.click((await screen.findAllByText("Grab"))[0]!);
     expect(await screen.findAllByLabelText("Season")).not.toHaveLength(0);
     expect(autograbCalls(calls)).toHaveLength(0);
 
     // Choose S3E5, submit — now one grab fires, carrying the selection and the
     // seasonSpecified flag (Season-0/Specials-safe).
-    const seasonInput = screen.getAllByLabelText("Season")[0];
-    const episodeInput = screen.getAllByLabelText("Episode")[0];
+    const seasonInput = screen.getAllByLabelText("Season")[0]!;
+    const episodeInput = screen.getAllByLabelText("Episode")[0]!;
     fireEvent.input(seasonInput, { target: { value: "3" } });
     fireEvent.input(episodeInput, { target: { value: "5" } });
     fireEvent.click(screen.getByText("Go"));
 
     await waitFor(() => expect(autograbCalls(calls)).toHaveLength(1));
-    expect(autograbCalls(calls)[0].body).toMatchObject({
+    expect(autograbCalls(calls)[0]!.body).toMatchObject({
       title: "A Series",
       tmdbId: 42,
       seasonNumber: 3,
@@ -214,7 +214,7 @@ describe("Discover auto-grab — Adult (runtime-sourced)", () => {
 
     expect(await screen.findByText(/auto-grabbed/)).toBeInTheDocument();
     expect(autograbCalls(calls)).toHaveLength(1);
-    expect(autograbCalls(calls)[0].body).toMatchObject({
+    expect(autograbCalls(calls)[0]!.body).toMatchObject({
       title: "Scene One",
       studio: "Vixen",
       durationSeconds: 2400,
