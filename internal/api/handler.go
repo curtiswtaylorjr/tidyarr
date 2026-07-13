@@ -75,15 +75,6 @@ func NewMux(httpClient *http.Client, connStore *connections.Store, propStore *pr
 	mux.HandleFunc("GET /api/modes/{mode}/identify-enabled", getIdentifyEnabledHandler(settingsStore))
 	mux.HandleFunc("PUT /api/modes/{mode}/identify-enabled", putIdentifyEnabledHandler(settingsStore))
 
-	// One-time Sonarr library importer (see internal/sonarrimport) — Series
-	// only, not mode-generic, since Movies never had a Sonarr library to
-	// migrate from.
-	mux.HandleFunc("POST /api/series/import-from-sonarr", sonarrImportHandler(httpClient, connStore, libStore))
-
-	// One-time Whisparr library importer (see internal/whisparrimport) — Adult
-	// only, migrating an existing Whisparr library into SAK's own Scene table.
-	mux.HandleFunc("POST /api/adult/import-from-whisparr", whisparrImportHandler(httpClient, connStore, libStore))
-
 	mux.HandleFunc("POST /api/modes/{mode}/rename/scan", renameScanHandler(httpClient, connStore, settingsStore, propStore, libStore, prober, videoHasher))
 	mux.HandleFunc("GET /api/modes/{mode}/rename/proposals", listProposalsHandler(propStore, proposals.Rename))
 	mux.HandleFunc("GET /api/modes/{mode}/rename/kids-root-path", getKidsRootPathHandler(settingsStore))
@@ -119,14 +110,14 @@ func NewMux(httpClient *http.Client, connStore *connections.Store, propStore *pr
 	mux.HandleFunc("GET /api/modes/{mode}/grabs", listGrabsHandler(grabsStore))
 	mux.HandleFunc("POST /api/grabs/{id}/check-import", checkImportHandler(httpClient, connStore, settingsStore, grabsStore, libStore))
 
-	mux.HandleFunc("GET /api/modes/{mode}/tags", listTagsHandler(httpClient, connStore, settingsStore, libStore))
-	mux.HandleFunc("POST /api/modes/{mode}/items/{itemId}/tags", addItemTagHandler(httpClient, connStore, settingsStore, libStore))
-	mux.HandleFunc("DELETE /api/modes/{mode}/items/{itemId}/tags/{tagId}", removeItemTagHandler(httpClient, connStore, settingsStore, libStore))
+	mux.HandleFunc("GET /api/modes/{mode}/tags", listTagsHandler(libStore))
+	mux.HandleFunc("POST /api/modes/{mode}/items/{itemId}/tags", addItemTagHandler(libStore))
+	mux.HandleFunc("DELETE /api/modes/{mode}/items/{itemId}/tags/{tagId}", removeItemTagHandler(libStore))
 
 	// Adult scene tags — a parallel, fully library-backed path (see tag.go).
-	// Adult-only and hardcoded in the path (scenes exist only for Adult),
-	// leaving Adult's still-Whisparr-backed /items and /tags routes above
-	// untouched until Whisparr elimination lands.
+	// Adult-only and hardcoded in the path (scenes exist only for Adult). The
+	// generic {mode}/items and {mode}/tags routes above 400 for Adult (see
+	// tag.go); Adult tags live entirely on these scene routes.
 	mux.HandleFunc("GET /api/modes/adult/scenes/tags", sceneTagVocabularyHandler(libStore))
 	mux.HandleFunc("GET /api/modes/adult/scenes/{sceneId}/tags", listSceneTagsHandler(libStore))
 	mux.HandleFunc("POST /api/modes/adult/scenes/{sceneId}/tags", addSceneTagHandler(libStore))

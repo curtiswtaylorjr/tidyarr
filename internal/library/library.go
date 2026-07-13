@@ -237,8 +237,7 @@ func (s *Store) RemoveTag(ctx context.Context, itemID int64, tag string) error {
 
 // TagVocabulary returns every distinct tag currently used by any item in m —
 // what a Tag picker autocompletes against, imported live from usage rather
-// than a separately-maintained vocabulary list (the same principle
-// internal/tag's Servarr-backed Vocabulary already follows).
+// than a separately-maintained vocabulary list.
 func (s *Store) TagVocabulary(ctx context.Context, m mode.Mode) ([]string, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT DISTINCT t.tag FROM library_tags t

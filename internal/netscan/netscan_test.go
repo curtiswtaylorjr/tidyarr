@@ -14,8 +14,8 @@ func testHTTPClient() *http.Client {
 	return &http.Client{Timeout: 5 * time.Second}
 }
 
-// The exact canned identity payloads the four real services serve (see the
-// package doc). The Prowlarr one deliberately INCLUDES a live apiKey, so the
+// The exact canned identity payloads the real services serve (see the package
+// doc). Prowlarr's /initialize.json carries its own live apiKey, so the
 // leak-guard test can prove the probe never surfaces it.
 const (
 	prowlarrInitializeJSON = `{"apiRoot":"/api/v1","apiKey":"SUPERSECRETPROWLARRKEY","instanceName":"Prowlarr","urlBase":""}`
@@ -61,6 +61,25 @@ func TestProbeProwlarr_ConfirmsIdentity(t *testing.T) {
 	}
 	if !strings.Contains(strings.ToLower(f.Label), "prowlarr") {
 		t.Errorf("label %q should mention prowlarr", f.Label)
+	}
+}
+
+// TestProbeProwlarr_RequiresMatchingInstanceName proves the probe doesn't just
+// confirm "any Servarr-shaped app" — a server whose /initialize.json reports a
+// different instanceName (here, a Whisparr-shaped payload) must not confirm as
+// Prowlarr.
+func TestProbeProwlarr_RequiresMatchingInstanceName(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/initialize.json" {
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"apiKey":"OTHERKEY","instanceName":"Whisparr"}`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+	if _, ok := probeProwlarr(context.Background(), testHTTPClient(), srv.URL); ok {
+		t.Error("probing a non-Prowlarr Servarr server should not confirm as Prowlarr")
 	}
 }
 

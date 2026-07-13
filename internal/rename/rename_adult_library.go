@@ -17,13 +17,13 @@ import (
 	"github.com/curtiswtaylorjr/sakms/internal/proposals"
 )
 
-// ScanLibraryAdult is Rename's Adult-library counterpart to Scan — used once
-// Adult stops requiring Whisparr (see the plan this was built from, Stage 2).
-// It walks rootFolderPath for files libStore doesn't already know about,
-// resolves each to its video file, runs it through the SAME phash-first
-// identification cascade the Servarr-backed Scan uses (identifyAdultFiles:
-// local phash -> LookupFingerprints -> Identify fallback), and builds one
-// proposal per resolved scene.
+// ScanLibraryAdult is Rename's Adult-library scan — the library-backed path
+// used once Adult stopped requiring Whisparr (see the plan this was built
+// from, Stage 2). It walks rootFolderPath for files libStore doesn't already
+// know about, resolves each to its video file, runs it through the same
+// phash-first identification cascade (identifyAdultFiles: local phash ->
+// LookupFingerprints -> Identify fallback), and builds one proposal per
+// resolved scene.
 //
 // hasher/prober are threaded in exactly as Scan takes them — the cascade
 // computes each candidate's phash+duration locally, and neither client lives
@@ -110,9 +110,9 @@ func ScanLibraryAdult(ctx context.Context, sess *mode.Session, libStore *library
 
 // buildAdultLibraryProposal assembles one library-backed Adult proposal from
 // an already-resolved identification, mapping the identify.MatchResult's
-// fields exactly as the Servarr-backed buildAdultProposal does (Title/Studio/
-// Date/ForeignID/ItemType/GiveBackBox/GiveBackSceneID), minus the Servarr-only
-// QualityProfileID plumbing. The one behavioral addition: a Pending match
+// fields (Title/Studio/Date/ForeignID/ItemType/GiveBackBox/GiveBackSceneID),
+// minus any Servarr-only QualityProfileID plumbing. The one behavioral
+// addition: a Pending match
 // whose (box, scene_id) is already tracked is demoted to Unmatched here
 // (pre-Apply dedup), instead of being proposed again.
 func buildAdultLibraryProposal(
@@ -167,11 +167,10 @@ func buildAdultLibraryProposal(
 // "now tracked" state, immediately — no registration/rescan round trip.
 //
 // sess is threaded in ONLY for fingerprint give-back (submitFingerprintGiveBack
-// needs sess.Identify.GiveBack) — the give-back behavior is preserved verbatim
-// from the Servarr-backed Apply, best-effort and never turning an otherwise-
+// needs sess.Identify.GiveBack) — best-effort, never turning an otherwise-
 // successful Apply into an error. There is no Servarr write and no
 // QualityProfileID here. fingerprintSubmitted is returned so the caller can
-// persist FingerprintSubmittedAt (the never-submit-twice guard), same as Apply.
+// persist FingerprintSubmittedAt (the never-submit-twice guard).
 //
 // changes is a named return so a post-move failure (e.g. UpsertScene) still
 // reports the committed file move to the caller for Session.NotifyPlayers —
@@ -182,8 +181,7 @@ func ApplyLibraryAdult(ctx context.Context, sess *mode.Session, libStore *librar
 	}
 	// Structural safety guard at the mutation boundary: a scene's library row
 	// is keyed on (box, scene_id), so refuse to record one without a real
-	// identity rather than writing a row keyed on empty strings — mirrors the
-	// Servarr-backed Apply's own "no scene identifier" guard.
+	// identity rather than writing a row keyed on empty strings.
 	if p.GiveBackBox == "" || p.GiveBackSceneID == "" {
 		return 0, false, nil, fmt.Errorf("proposal %d has no scene identifier — refusing to record it", p.ID)
 	}

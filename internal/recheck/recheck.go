@@ -16,9 +16,8 @@
 // etc.), since none exists anywhere in this codebase and adding one would be
 // separately-scoped infrastructure (see the plan's Stage 8 note).
 //
-// It builds its own minimal client(s) per cycle straight from connStore — the
-// same standalone-construction posture internal/whisparrimport's handler uses
-// rather than going through mode.Build — and owns its own bounded HTTP client,
+// It builds its own minimal client(s) per cycle straight from connStore,
+// rather than going through mode.Build, and owns its own bounded HTTP client,
 // so it depends on nothing a request handler sets up.
 package recheck
 

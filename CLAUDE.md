@@ -144,13 +144,14 @@ above, so don't drop them for convenience:
   real query; see `internal/library`'s package doc). Own
   ScanLibrarySeries/ApplyLibrarySeries Rename and Purge paths, own
   root-folder + quality-tier settings, own episode/season-aware Search →
-  grab → check-import. A one-time, human-triggered importer
-  (`internal/sonarrimport`, "Import from Sonarr" in Settings) migrates an
-  existing Sonarr library by walking disk directly + resolving TVDB→TMDB
-  ids via TMDB's `/find` endpoint — read-only against Sonarr, safe to
-  re-run. `internal/servarr`'s Sonarr support is kept (still a valid
-  generic capability, same precedent as Radarr) even though nothing in
-  `mode.Build` constructs one anymore. Series Dedup is built too
+  grab → check-import. The one-time `internal/sonarrimport` migration tool
+  ("Import from Sonarr" in Settings) has been removed entirely (2026-07-12),
+  same decision and reasoning as Whisparr's importer below — there is no
+  Sonarr connection type anymore; `TestConnection` has no `"sonarr"` case,
+  and Settings' Connections table doesn't list it. `internal/servarr`'s
+  Sonarr support is kept (still a valid generic capability, same precedent
+  as Radarr) even though nothing in `mode.Build` constructs one anymore.
+  Series Dedup is built too
   (`dedup.ScanLibrarySeries`/`ApplyLibrarySeries`): duplicates group by
   `(show TMDB id, season, episode)` rather than a single id — "the tracked
   copy" for a key is just the one `library.Episode` row for that exact
@@ -172,16 +173,16 @@ above, so don't drop them for convenience:
   Radarr/Sonarr. `internal/servarr`'s Whisparr support is kept (still a valid
   generic capability, same precedent as Radarr/Sonarr) even though nothing in
   `mode.Build` constructs one. **Stash is unchanged and still used** — for
-  identification (`mode.Session.Stash`, phash-first `rename.scanAdultPhashFirst`
-  reads a phash Stash already computed; SAK never computes one) and for
+  identification (`mode.Session.Stash`, the phash-first `rename.ScanLibraryAdult`
+  path reads a phash Stash already computed; SAK never computes one) and for
   player-rescan-notify (`Session.NotifyPlayers`); it is a downstream player,
   never an organizational authority, exactly like Jellyfin for Movies/Series.
-  A one-time, human-triggered importer (`internal/whisparrimport`, "Import from
-  Whisparr" in Settings) migrates an existing Whisparr-tracked Adult library by
-  walking disk directly + re-resolving each scene's stash-box UUID against
-  StashDB/FansDB — it builds its own standalone `servarr.Client{App: Whisparr}`
-  from the saved connection (not through `mode.Build`), so it keeps working now
-  that Adult's own Servarr wiring is gone.
+  The one-time `internal/whisparrimport` migration tool ("Import from
+  Whisparr" in Settings) has been removed entirely (2026-07-12) — a fresh
+  install has no prior Whisparr history to migrate from, and Wade confirmed
+  the library can always be rebuilt directly from the filesystem instead.
+  There is no Whisparr connection type anymore; `TestConnection` has no
+  `"whisparr"` case, and Settings' Connections table doesn't list it.
 - **Adult phash (future work, unchanged by the Whisparr elimination above):**
   the concrete shape decided so far is that SAK will build its own frame-decode
   + StashDB-compatible phash hasher (the `PHASH` algorithm StashDB/FansDB's

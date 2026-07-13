@@ -86,22 +86,23 @@ func testStores(t *testing.T) (*connections.Store, *proposals.Store, *allowlist.
 // TestConnectionsTestHandler_EndToEnd exercises the real path a Settings
 // "Test connection" click takes: an HTTP POST into SAK's own server,
 // which itself makes a real HTTP call out to the configured service (here, a
-// second httptest server standing in for a live Sonarr) and reports back
-// over JSON. This is the thing actually wiring identify/servarr/ollama/
-// stashapi into cmd/sakms is meant to prove works, not just that each
+// second httptest server standing in for a live Jellyfin) and reports back
+// over JSON. This is the thing actually wiring identify/ollama/stashapi/
+// jellyfin into cmd/sakms is meant to prove works, not just that each
 // package compiles in isolation.
 func TestConnectionsTestHandler_EndToEnd(t *testing.T) {
-	fakeSonarr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`[{"id":1,"path":"/media/Series","accessible":true,"freeSpace":123}]`))
+	fakeJellyfin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"Version":"10.9.0"}`))
 	}))
-	defer fakeSonarr.Close()
+	defer fakeJellyfin.Close()
 
 	connStore, propStore, allowStore, settingsStore, grabsStore, libStore := testStores(t)
 	sakSrv := httptest.NewServer(NewMux(testHTTPClient(), connStore, propStore, allowStore, testProber(t), testPHasher(t), testVideoHasher(t), settingsStore, grabsStore, libStore))
 	defer sakSrv.Close()
 
 	reqBody, _ := json.Marshal(ConnectionTestRequest{
-		Service: "sonarr", URL: fakeSonarr.URL, APIKey: "test-key",
+		Service: "jellyfin", URL: fakeJellyfin.URL, APIKey: "test-key",
 	})
 	resp, err := http.Post(sakSrv.URL+"/api/connections/test", "application/json", bytes.NewReader(reqBody))
 	if err != nil {

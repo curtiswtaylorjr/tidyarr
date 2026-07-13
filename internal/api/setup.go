@@ -69,7 +69,7 @@ func buildSetupStatus(ctx context.Context, connStore *connections.Store, allowSt
 	var status setupStatus
 
 	for _, m := range append(append([]mode.Mode{}, wizardModes...), mode.Adult) {
-		ms, err := modeStatusFor(ctx, m, connStore, allowStore, settingsStore)
+		ms, err := modeStatusFor(ctx, m, allowStore, settingsStore)
 		if err != nil {
 			return setupStatus{}, err
 		}
@@ -102,29 +102,22 @@ func buildSetupStatus(ctx context.Context, connStore *connections.Store, allowSt
 	return status, nil
 }
 
-// modeStatusFor reports whether m is ready to use. Movies and Series have
-// no *arr connection to check anymore — each is "configured" once its own
-// library root folder setting is populated instead (see internal/library's
-// package doc); Adult still checks its Whisparr connection, unchanged. The
+// modeStatusFor reports whether m is ready to use. No mode has an *arr
+// connection to check anymore — each is "configured" once its own library
+// root folder setting is populated (see internal/library's package doc). The
 // field stays named ArrConfigured across all three (the wizard's "is this
-// mode ready" signal), even though Movies/Series' check isn't really an
-// *arr connection anymore.
-func modeStatusFor(ctx context.Context, m mode.Mode, connStore *connections.Store, allowStore *allowlist.Store, settingsStore *settings.Store) (modeStatus, error) {
+// mode ready" signal), even though the check isn't really an *arr connection
+// anymore.
+func modeStatusFor(ctx context.Context, m mode.Mode, allowStore *allowlist.Store, settingsStore *settings.Store) (modeStatus, error) {
 	var arrConfigured bool
-	var err error
 	switch m {
-	case mode.Movies, mode.Series:
+	case mode.Movies, mode.Series, mode.Adult:
 		key, _ := libraryRootFolderKey(m)
 		rootPath, getErr := settingsStore.Get(ctx, key)
 		if getErr != nil && !errors.Is(getErr, settings.ErrNotFound) {
 			return modeStatus{}, getErr
 		}
 		arrConfigured = rootPath != ""
-	case mode.Adult:
-		arrConfigured, err = connectionExists(ctx, connStore, "whisparr")
-	}
-	if err != nil {
-		return modeStatus{}, err
 	}
 
 	tags, err := allowStore.List(ctx, m)

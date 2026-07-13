@@ -45,7 +45,7 @@ func TestNetscanKnownHandler_ReturnsJSONArray(t *testing.T) {
 }
 
 // TestNetscanProwlarrKeyHandler_ReturnsKey proves the dedicated, explicit
-// key-fetch route returns the key from a Prowlarr /initialize.json.
+// key-fetch route returns the key from Prowlarr's /initialize.json.
 func TestNetscanProwlarrKeyHandler_ReturnsKey(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/initialize.json" {

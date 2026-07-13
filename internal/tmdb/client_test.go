@@ -272,39 +272,3 @@ func TestSeasonDetails_NormalizesEpisodes(t *testing.T) {
 		t.Errorf("unexpected episodes: %+v", episodes)
 	}
 }
-
-func TestFindByTVDBID_ResolvesTMDBID(t *testing.T) {
-	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/find/12345" {
-			t.Errorf("unexpected path: %s", r.URL.Path)
-		}
-		if got := r.URL.Query().Get("external_source"); got != "tvdb_id" {
-			t.Errorf("expected external_source=tvdb_id, got %q", got)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"tv_results": [{"id": 42, "name": "Some Show"}], "movie_results": []}`))
-	})
-
-	tmdbID, ok, err := c.FindByTVDBID(context.Background(), 12345)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !ok || tmdbID != 42 {
-		t.Errorf("expected (42, true), got (%d, %v)", tmdbID, ok)
-	}
-}
-
-func TestFindByTVDBID_NoMatch(t *testing.T) {
-	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"tv_results": [], "movie_results": []}`))
-	})
-
-	_, ok, err := c.FindByTVDBID(context.Background(), 99999)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if ok {
-		t.Error("expected ok=false when tv_results is empty")
-	}
-}

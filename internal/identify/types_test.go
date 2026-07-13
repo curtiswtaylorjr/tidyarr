@@ -3,9 +3,9 @@ package identify
 import "testing"
 
 // TestWhisparrForeignID pins the single normalized-foreignID derivation both
-// rename (classifyAdultMatch) and dedup (adultForeignID) now delegate to, so a
-// future change here surfaces as a failure rather than a silent cross-package
-// divergence.
+// rename (classifyAdultMatch) and dedup (adultSceneIdentity) now delegate to,
+// so a future change here surfaces as a failure rather than a silent
+// cross-package divergence.
 func TestWhisparrForeignID(t *testing.T) {
 	cases := []struct {
 		name   string

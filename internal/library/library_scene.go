@@ -44,8 +44,7 @@ type Scene struct {
 
 // UpsertScene creates a scene, or updates it if one already exists for the
 // same (box, scene_id) pair — mirrors Upsert's re-entrant "this is now what
-// I have" shape, used by the one-time Whisparr importer and Rename/Search's
-// get-or-create-by-identity calls.
+// I have" shape, used by Rename/Search's get-or-create-by-identity calls.
 func (s *Store) UpsertScene(ctx context.Context, scene Scene) (Scene, error) {
 	row := s.db.QueryRowContext(ctx, `
 		INSERT INTO library_scenes (box, scene_id, title, studio, date, file_path, root_folder_path, phash, phash_file_size, phash_file_mtime)
@@ -71,8 +70,8 @@ func (s *Store) UpsertScene(ctx context.Context, scene Scene) (Scene, error) {
 
 // GetScene looks up a scene by its (box, scene_id) identity, or ErrNotFound
 // if no such row exists yet — the duplicate-detection/get-or-create key
-// Rename, Search, and the Whisparr importer use, the direct analogue of
-// GetSeriesByTMDBID with the key swapped.
+// Rename and Search use, the direct analogue of GetSeriesByTMDBID with the
+// key swapped.
 func (s *Store) GetScene(ctx context.Context, box, sceneID string) (*Scene, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT id, box, scene_id, title, studio, date, file_path, root_folder_path, phash, phash_file_size, phash_file_mtime, created_at, updated_at

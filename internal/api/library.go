@@ -20,9 +20,9 @@ import (
 // library root folder path — the free-typed replacement for picking a path
 // from a *arr app's own RootFolders response, since SAK owns its own
 // library (see internal/library's package doc). Adult now carries its own
-// free-typed key too; its separate Whisparr-backed root-folder LISTING
-// (GET /api/modes/{mode}/root-folders, see rootfolders.go) is unchanged and
-// stays until Whisparr elimination lands.
+// free-typed key too; the generic root-folder LISTING route
+// (GET /api/modes/{mode}/root-folders, see rootfolders.go) 400s for every
+// mode now, so each mode's path comes from its own library setting here.
 const (
 	moviesLibraryRootFolderKey = "movies_library_root_folder"
 	seriesLibraryRootFolderKey = "series_library_root_folder"

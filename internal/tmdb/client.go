@@ -8,14 +8,16 @@
 // A movie's TMDB id is a different id space entirely from TheTVDB's — TMDB
 // covers TV shows too, but under its own id. ExternalIDs resolves a TMDB TV
 // show id to its TVDB id (used by Discover once a user picks a TV show to
-// search+grab, not for every item in a trending list); FindByTVDBID is the
-// reverse, used by the one-time Sonarr importer since Sonarr tracks shows
-// by TVDB id but SAK's library keys everything by TMDB id.
+// search+grab, not for every item in a trending list). The reverse lookup
+// (TVDB id → TMDB id, FindByTVDBID) existed only to serve the one-time Sonarr
+// importer and was removed with it (2026-07-12) — SAK's library keys
+// everything by TMDB id, and nothing else in the codebase ever needed to
+// resolve the other direction.
 //
 // SearchMovies/Trending/Popular/ExternalIDs are exercised live by this
-// project's Discover flow. SeasonDetails, FindByTVDBID, MovieDetails, and
-// TVDetails are NOT — their response shapes are modeled from TMDB's public
-// API documentation only, per this project's
+// project's Discover flow. SeasonDetails, MovieDetails, and TVDetails are
+// NOT — their response shapes are modeled from TMDB's public API
+// documentation only, per this project's
 // honesty-about-unverified-assumptions convention.
 package tmdb
 
@@ -161,8 +163,7 @@ func (c *Client) SearchMovies(ctx context.Context, query string) ([]Item, error)
 }
 
 // SearchTV searches TMDB's TV catalog by title — the show-title lookup
-// Rename's Series-library code path and the Sonarr importer use, direct
-// sibling of SearchMovies.
+// Rename's Series-library code path uses, direct sibling of SearchMovies.
 func (c *Client) SearchTV(ctx context.Context, query string) ([]Item, error) {
 	q := url.Values{}
 	q.Set("query", query)
@@ -310,27 +311,4 @@ func (c *Client) SeasonDetails(ctx context.Context, tmdbTVID, seasonNumber int) 
 		out[i] = SeasonEpisode{EpisodeNumber: e.EpisodeNumber, Name: e.Name, AirDate: e.AirDate}
 	}
 	return out, nil
-}
-
-type findResponse struct {
-	TVResults []rawResult `json:"tv_results"`
-}
-
-// FindByTVDBID resolves a TVDB id to its TMDB TV show id — the reverse of
-// ExternalIDs, needed by the one-time Sonarr importer (Sonarr tracks shows
-// by TVDB id; SAK's library keys everything by TMDB id). ok is false if
-// TMDB has no TV match on file for tvdbID. Hits /find/{tvdb_id}?
-// external_source=tvdb_id — like SeasonDetails, this shape is modeled from
-// TMDB's public documentation, not yet confirmed against a live call.
-func (c *Client) FindByTVDBID(ctx context.Context, tvdbID int) (tmdbID int, ok bool, err error) {
-	q := url.Values{}
-	q.Set("external_source", "tvdb_id")
-	var resp findResponse
-	if err := c.do(ctx, fmt.Sprintf("/find/%d", tvdbID), q, &resp); err != nil {
-		return 0, false, err
-	}
-	if len(resp.TVResults) == 0 {
-		return 0, false, nil
-	}
-	return resp.TVResults[0].ID, true, nil
 }

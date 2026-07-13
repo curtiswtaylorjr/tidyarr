@@ -12,7 +12,6 @@ import (
 	"github.com/curtiswtaylorjr/sakms/internal/ollama"
 	"github.com/curtiswtaylorjr/sakms/internal/prowlarr"
 	"github.com/curtiswtaylorjr/sakms/internal/qbittorrent"
-	"github.com/curtiswtaylorjr/sakms/internal/servarr"
 	"github.com/curtiswtaylorjr/sakms/internal/stashapi"
 	"github.com/curtiswtaylorjr/sakms/internal/stashbox"
 	"github.com/curtiswtaylorjr/sakms/internal/tmdb"
@@ -23,7 +22,7 @@ import (
 // read-only call against it — the same thing Settings' "Test connection"
 // button does. Nothing here is persisted.
 type ConnectionTestRequest struct {
-	Service  string `json:"service"` // "sonarr" | "whisparr" | "ollama" | "stash" | "jellyfin" | "stashdb" | "fansdb" | "tpdb" | "brave" | "prowlarr" | "qbittorrent" | "nzbget" | "tmdb"
+	Service  string `json:"service"` // "ollama" | "stash" | "jellyfin" | "stashdb" | "fansdb" | "tpdb" | "brave" | "prowlarr" | "qbittorrent" | "nzbget" | "tmdb"
 	URL      string `json:"url"`
 	Username string `json:"username,omitempty"` // only qbittorrent/nzbget use this
 	APIKey   string `json:"apiKey,omitempty"`
@@ -43,15 +42,12 @@ type ConnectionTestResult struct {
 // query, TPDB's own /scenes endpoint with minimal params, and Brave's actual
 // search endpoint (it has no separate lightweight check, so this is a real,
 // billable query, same as any other Brave call) — never a guessed one.
-// There is deliberately no "radarr" case: Movies owns its own library now
-// instead of proxying Radarr (see internal/library's package doc), so
-// there's nothing left in SAK that would ever test a Radarr connection.
+// There is deliberately no "radarr" or "sonarr" case: Movies/Series own their
+// own libraries now instead of proxying Radarr/Sonarr (see internal/library's
+// package doc), so there's nothing left in SAK that would ever test a
+// Radarr/Sonarr connection.
 func TestConnection(ctx context.Context, httpClient *http.Client, req ConnectionTestRequest) ConnectionTestResult {
 	switch req.Service {
-	case "sonarr":
-		return testServarr(ctx, httpClient, servarr.Sonarr, req)
-	case "whisparr":
-		return testServarr(ctx, httpClient, servarr.Whisparr, req)
 	case "ollama":
 		return testOllama(ctx, httpClient, req)
 	case "stash":
@@ -75,14 +71,6 @@ func TestConnection(ctx context.Context, httpClient *http.Client, req Connection
 	default:
 		return ConnectionTestResult{Error: fmt.Sprintf("unsupported service %q", req.Service)}
 	}
-}
-
-func testServarr(ctx context.Context, httpClient *http.Client, app servarr.App, req ConnectionTestRequest) ConnectionTestResult {
-	c := servarr.New(servarr.Config{BaseURL: req.URL, APIKey: req.APIKey, App: app}, httpClient)
-	if _, err := c.RootFolders(ctx); err != nil {
-		return ConnectionTestResult{Error: err.Error()}
-	}
-	return ConnectionTestResult{OK: true}
 }
 
 func testOllama(ctx context.Context, httpClient *http.Client, req ConnectionTestRequest) ConnectionTestResult {

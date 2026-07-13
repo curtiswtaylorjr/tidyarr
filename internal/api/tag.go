@@ -5,11 +5,8 @@ import (
 	"net/http"
 	"strconv"
 
-	"github.com/curtiswtaylorjr/sakms/internal/connections"
 	"github.com/curtiswtaylorjr/sakms/internal/library"
 	"github.com/curtiswtaylorjr/sakms/internal/mode"
-	"github.com/curtiswtaylorjr/sakms/internal/settings"
-	"github.com/curtiswtaylorjr/sakms/internal/tag"
 )
 
 // libraryTagEntry is Movies' vocabulary shape — a local tag is just a
@@ -26,9 +23,8 @@ type libraryTagEntry struct {
 // entirely local (libStore's TagVocabulary/SeriesTagVocabulary, distinct tags
 // already in use, imported live from usage). Adult's tags moved to the
 // scene-tag routes when Whisparr was eliminated (Stage 4), so this old
-// *arr-item route 400s for Adult; the trailing mode.Build path now only ever
-// serves an unknown mode (which mode.Build rejects before any nil deref).
-func listTagsHandler(httpClient *http.Client, connStore *connections.Store, settingsStore *settings.Store, libStore *library.Store) http.HandlerFunc {
+// *arr-item route 400s for Adult; any other mode string is simply unknown.
+func listTagsHandler(libStore *library.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		m := mode.Mode(r.PathValue("mode"))
 		ctx := r.Context()
@@ -40,44 +36,26 @@ func listTagsHandler(httpClient *http.Client, connStore *connections.Store, sett
 			vocab, err = libStore.TagVocabulary(ctx, m)
 		case mode.Series:
 			vocab, err = libStore.SeriesTagVocabulary(ctx)
-		}
-		if m == mode.Movies || m == mode.Series {
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-			out := make([]libraryTagEntry, len(vocab))
-			for i, label := range vocab {
-				out[i] = libraryTagEntry{ID: label, Label: label}
-			}
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(out)
-			return
-		}
-
-		// Adult owns its own library now (Whisparr eliminated, Stage 4), so
-		// there is no *arr Tags resource to browse and the old Whisparr-backed
-		// tag.Vocabulary path is gone. Adult tags are scene-level: fail cleanly
-		// here (rather than nil-deref sess.Servarr) and point at the scene-tag
-		// route. This guard MUST precede mode.Build/tag.Vocabulary below.
-		if m == mode.Adult {
+		case mode.Adult:
+			// Adult owns its own library now (Whisparr eliminated, Stage 4), so
+			// there is no *arr Tags resource to browse. Adult tags are
+			// scene-level: fail cleanly and point at the scene-tag route.
 			http.Error(w, "adult tags are managed per scene now — use /api/modes/adult/scenes/tags and /api/modes/adult/scenes/{sceneId}/tags", http.StatusBadRequest)
 			return
-		}
-
-		sess, err := mode.Build(ctx, connStore, settingsStore, httpClient, m)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+		default:
+			http.Error(w, "mode \""+string(m)+"\": unknown mode", http.StatusBadRequest)
 			return
 		}
-
-		tags, err := tag.Vocabulary(ctx, sess)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadGateway)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
+		}
+		out := make([]libraryTagEntry, len(vocab))
+		for i, label := range vocab {
+			out[i] = libraryTagEntry{ID: label, Label: label}
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(tags)
+		json.NewEncoder(w).Encode(out)
 	}
 }
 
@@ -86,13 +64,12 @@ type addItemTagRequest struct {
 }
 
 // addItemTagHandler assigns a tag to one tracked item — a single,
-// immediately-committed action, not staged through the proposals queue (see
-// internal/tag's doc comment for why Tag doesn't follow the Scan/Apply
-// shape the other three workflows do). For Movies/Series, itemId is a
-// library item/series' own id and this writes straight to libStore —
-// there's no upstream "create the tag first" step the way Servarr's Tags
-// resource needs, since a local tag is just a string.
-func addItemTagHandler(httpClient *http.Client, connStore *connections.Store, settingsStore *settings.Store, libStore *library.Store) http.HandlerFunc {
+// immediately-committed action, not staged through the proposals queue like
+// Rename/Purge/Dedup: it's already a single, deliberate, atomic action a
+// human takes (pick a tag, click it), the same shape as Settings' own
+// Save/Delete actions. For Movies/Series, itemId is a library item/series'
+// own id and this writes straight to libStore.
+func addItemTagHandler(libStore *library.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		m := mode.Mode(r.PathValue("mode"))
 		itemID, ok := parseIntPathValue(w, r, "itemId")
@@ -117,32 +94,20 @@ func addItemTagHandler(httpClient *http.Client, connStore *connections.Store, se
 				return
 			}
 			w.WriteHeader(http.StatusNoContent)
-			return
 		case mode.Series:
 			if err := libStore.AddSeriesTag(ctx, int64(itemID), req.Label); err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
 			w.WriteHeader(http.StatusNoContent)
-			return
 		case mode.Adult:
 			// Adult tags are scene-level now (Whisparr eliminated, Stage 4) —
-			// this old *arr-item route no longer applies. Fail cleanly (rather
-			// than nil-deref sess.Servarr) and point at the scene-tag route.
+			// this old *arr-item route no longer applies. Point at the
+			// scene-tag route.
 			http.Error(w, "adult tags are managed per scene now — use POST /api/modes/adult/scenes/{sceneId}/tags", http.StatusBadRequest)
-			return
+		default:
+			http.Error(w, "mode \""+string(m)+"\": unknown mode", http.StatusBadRequest)
 		}
-
-		sess, err := mode.Build(ctx, connStore, settingsStore, httpClient, m)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		if err := tag.Add(ctx, sess, itemID, req.Label); err != nil {
-			http.Error(w, err.Error(), http.StatusBadGateway)
-			return
-		}
-		w.WriteHeader(http.StatusNoContent)
 	}
 }
 
@@ -151,7 +116,7 @@ func addItemTagHandler(httpClient *http.Client, connStore *connections.Store, se
 // tag id for Adult, or the tag string itself for Movies/Series (a local tag
 // has no numeric id at all — it's just a string in library_tags/
 // library_series_tags).
-func removeItemTagHandler(httpClient *http.Client, connStore *connections.Store, settingsStore *settings.Store, libStore *library.Store) http.HandlerFunc {
+func removeItemTagHandler(libStore *library.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		m := mode.Mode(r.PathValue("mode"))
 		itemID, ok := parseIntPathValue(w, r, "itemId")
@@ -168,7 +133,6 @@ func removeItemTagHandler(httpClient *http.Client, connStore *connections.Store,
 				return
 			}
 			w.WriteHeader(http.StatusNoContent)
-			return
 		case mode.Series:
 			tagLabel := r.PathValue("tagId") // string label for Series too, same reasoning as Movies
 			if err := libStore.RemoveSeriesTag(ctx, int64(itemID), tagLabel); err != nil {
@@ -176,42 +140,25 @@ func removeItemTagHandler(httpClient *http.Client, connStore *connections.Store,
 				return
 			}
 			w.WriteHeader(http.StatusNoContent)
-			return
 		case mode.Adult:
 			// Adult tags are scene-level now (Whisparr eliminated, Stage 4) —
-			// this old *arr-item route no longer applies. Fail cleanly (rather
-			// than nil-deref sess.Servarr) and point at the scene-tag route.
+			// this old *arr-item route no longer applies. Point at the
+			// scene-tag route.
 			http.Error(w, "adult tags are managed per scene now — use DELETE /api/modes/adult/scenes/{sceneId}/tags/{tagId}", http.StatusBadRequest)
-			return
+		default:
+			http.Error(w, "mode \""+string(m)+"\": unknown mode", http.StatusBadRequest)
 		}
-
-		tagID, ok := parseIntPathValue(w, r, "tagId")
-		if !ok {
-			return
-		}
-
-		sess, err := mode.Build(ctx, connStore, settingsStore, httpClient, m)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		if err := tag.Remove(ctx, sess, itemID, tagID); err != nil {
-			http.Error(w, err.Error(), http.StatusBadGateway)
-			return
-		}
-		w.WriteHeader(http.StatusNoContent)
 	}
 }
 
 // Adult scene tags are a parallel, fully library-backed path — the exact
 // Movies/Series precedent (libStore called directly, no *arr app), just
 // keyed on a library_scenes row instead of a library item/series. They live
-// under /api/modes/adult/scenes/... rather than the {mode}/items/... routes
-// so they don't disturb Adult's still-Whisparr-backed /items and /tags
-// routes, which stay untouched until Whisparr elimination lands. A scene id
-// is a library_scenes.id (int64); a tag is just a string, so there's no
-// numeric-tag-id step and DELETE's {tagId} segment is the label itself,
-// same as Movies/Series.
+// under /api/modes/adult/scenes/... rather than the {mode}/items/... routes,
+// which 400 for Adult (the generic *arr-item tag routes have no Adult backing
+// now). A scene id is a library_scenes.id (int64); a tag is just a string, so
+// there's no numeric-tag-id step and DELETE's {tagId} segment is the label
+// itself, same as Movies/Series.
 
 // sceneTagVocabularyHandler returns Adult's scene-tag vocabulary — every
 // distinct tag any scene currently uses. Sibling of listTagsHandler's

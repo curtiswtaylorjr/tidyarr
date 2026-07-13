@@ -9,12 +9,13 @@ import (
 
 // LAN service probing for the setup wizard — an authenticated-operator
 // convenience that offers to pre-fill a connection's URL (and, only on a
-// separate explicit action, Prowlarr's API key) instead of typing it by
-// hand. Every route here lives on NewMux, so it inherits the same session/
-// API-key protection as every other connections-management route; nothing
-// here is on the public setup/login mux. See internal/netscan's package doc
-// for the security posture — every Finding is a hint to verify, never a
-// trusted fact, and the general probe endpoints never return a credential.
+// separate explicit action, a Servarr-family service's API key) instead of
+// typing it by hand. Every route here lives on NewMux, so it inherits the
+// same session/API-key protection as every other connections-management
+// route; nothing here is on the public setup/login mux. See internal/netscan's
+// package doc for the security posture — every Finding is a hint to verify,
+// never a trusted fact, and the general probe endpoints never return a
+// credential.
 
 // netscanKnownHandler tries the fixed list of conventional container
 // hostnames (prowlarr/qbittorrent/nzbget/jellyfin) at their default ports and
@@ -56,9 +57,12 @@ func netscanHostHandler(httpClient *http.Client) http.HandlerFunc {
 	}
 }
 
-// netscanProwlarrKeyHandler re-fetches Prowlarr's /initialize.json fresh from
-// the given URL to retrieve its live API key — the one dedicated, explicit
-// action that reads the key, never bundled into the probe responses above.
+// netscanProwlarrKeyHandler re-fetches a Prowlarr instance's /initialize.json
+// fresh from the given URL to retrieve its live API key — the one dedicated,
+// explicit action that reads the key, never bundled into the probe responses
+// above. Prowlarr's unauthenticated /initialize.json is the only known
+// service endpoint (confirmed by direct check against a live instance) to
+// expose a key this way.
 func netscanProwlarrKeyHandler(httpClient *http.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {

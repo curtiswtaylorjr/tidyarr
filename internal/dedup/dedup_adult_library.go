@@ -35,10 +35,9 @@ type sceneDedupKey struct {
 // method (UpdateScenePHash on library_scenes). Kept as a parallel sibling
 // rather than a shared generic helper (CLAUDE.md's "prefer parallel sibling
 // functions" convention), so the Movies (attachPHashes) and Series
-// (attachPHashesSeries) paths stay untouched. Unlike the Servarr-backed
-// attachPHashesAdult (which has no SAK-owned row to cache against and so
-// recomputes every scan), this one reuses a tracked scene's cached library
-// hash when the file's identity (size+mtime) AND the hash's scheme still
+// (attachPHashesSeries) paths stay untouched. Unlike an uncached
+// recompute-every-scan approach, this one reuses a tracked scene's cached
+// library hash when the file's identity (size+mtime) AND the hash's scheme still
 // match — the decode-once win — and writes a freshly computed tracked hash
 // back via UpdateScenePHash.
 func attachPHashesScene(ctx context.Context, hasher PHasher, libStore *library.Store, candidates []proposals.Candidate, tracked *library.Scene) []proposals.Candidate {
@@ -73,13 +72,12 @@ func attachPHashesScene(ctx context.Context, hasher PHasher, libStore *library.S
 // instead of depending on Whisparr's tracked-item registry. It groups a
 // tracked scene and any untracked copies of it by sceneDedupKey (box +
 // scene_id), the direct analogue of Series' (show, season, episode)
-// grouping. Orphans are identified with sess.Identify exactly as the
-// Servarr-backed scanAdult does — the same phash-first-then-Identify cascade
-// is Rename's concern; Dedup only needs the identity to group by.
+// grouping. Orphans are identified with sess.Identify — the same
+// phash-first-then-Identify cascade is Rename's concern; Dedup only needs the
+// identity to group by.
 //
-// Both guards live inside this function (unlike scanAdult, whose Identify
-// guard sits in Scan's dispatch), mirroring ScanLibrary's own two in-function
-// guards now that Scan no longer dispatches here.
+// Both guards live inside this function, mirroring ScanLibrary's own two
+// in-function guards.
 func ScanLibraryAdult(ctx context.Context, sess *mode.Session, libStore *library.Store, rootFolderPath string, prober Prober, hasher PHasher, perFrameThreshold int) ([]proposals.Proposal, error) {
 	if sess.Identify == nil {
 		return nil, fmt.Errorf("adult identification isn't configured — add an Ollama connection and set the Ollama model in Settings, plus at least one of StashDB/FansDB/TPDB")
@@ -192,9 +190,9 @@ func ScanLibraryAdult(ctx context.Context, sess *mode.Session, libStore *library
 // false for an identify error, a nil result, or a match with no valid
 // stash-box identity (SceneID=="" || Box==""). That ok-condition is the exact
 // same one identify.MatchResult.WhisparrForeignID uses to decide a match has a
-// valid ForeignID, so the library-backed grouping key can never silently
-// diverge from the Servarr-backed scanAdult's — it just keeps box and scene id
-// as separate columns instead of collapsing them into one string.
+// valid ForeignID, so the library-backed grouping key stays consistent with it
+// — it just keeps box and scene id as separate columns instead of collapsing
+// them into one string.
 func adultSceneIdentity(res *identify.MatchResult, err error) (box, sceneID, itemType, title, studio, date string, ok bool) {
 	if err != nil || res == nil {
 		return "", "", "", "", "", "", false

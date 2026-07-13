@@ -201,8 +201,7 @@ func TestApplyLibraryAdult_RefusesProposalWithoutSceneIdentifier(t *testing.T) {
 
 // TestApplyLibraryAdult_FiresFingerprintGiveBack proves give-back still fires
 // through the library-backed Apply (Stash-free), carrying the proposal's local
-// phash + prober duration to the origin box — the same behavior the
-// Servarr-backed Apply had, not dropped in the library path.
+// phash + prober duration to the origin box.
 func TestApplyLibraryAdult_FiresFingerprintGiveBack(t *testing.T) {
 	root := t.TempDir()
 	sourcePath := writeSceneFile(t, root, "raw-release.mp4")

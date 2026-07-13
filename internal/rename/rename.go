@@ -1,12 +1,14 @@
-// Package rename implements SAK's Rename workflow: propose registering
-// orphaned (unmapped) files with their mode's Sonarr/Radarr instance, then —
-// once a human approves a specific proposal — actually register it.
+// Package rename implements SAK's Rename workflow: propose relocating
+// orphaned (unmapped) files into their mode's own SAK library under the
+// active naming scheme, then — once a human approves a specific proposal —
+// actually relocate and record it.
 //
 // Scan never mutates anything; it only reads and produces proposals.Proposal
-// values. Apply is the only function in this package that calls a *arr app's
-// write endpoints, and it only ever acts on one already-approved proposal at
-// a time — there is no "apply everything" path, by design (see the design
-// spec's staged-for-approval principle).
+// values. Apply is the only function that moves a file and writes the library
+// record, and it only ever acts on one already-approved proposal at a time —
+// there is no "apply everything" path, by design (see the design spec's
+// staged-for-approval principle). Every mode runs its own libStore-backed
+// ScanLibrary*/ApplyLibrary* sibling, dispatched at the API layer.
 package rename
 
 import (
@@ -27,7 +29,6 @@ import (
 	"github.com/curtiswtaylorjr/sakms/internal/place"
 	"github.com/curtiswtaylorjr/sakms/internal/proposals"
 	"github.com/curtiswtaylorjr/sakms/internal/searchterm"
-	"github.com/curtiswtaylorjr/sakms/internal/servarr"
 )
 
 // yearFromReleaseDate parses the release year out of TMDB's normalized
@@ -43,302 +44,6 @@ func yearFromReleaseDate(releaseDate string) int {
 		return 0
 	}
 	return year
-}
-
-// Scan walks every root folder sess's Servarr app currently reports and
-// produces one proposal per orphaned item: a resolved match ready to
-// register (Pending), or a record of why it couldn't be resolved on its own
-// (Unmatched) — surfaced either way, never silently dropped.
-//
-// For Adult, hasher/prober back phash-first identification: hasher computes
-// each candidate's StashDB-compatible phash locally (internal/videophash) and
-// prober supplies its duration for give-back (internal/mediainfo). identifyEnabled
-// is Adult's per-mode toggle (resolved by the caller from settings) — when
-// true, Adult resolves via the phash cascade first; when false, it goes
-// straight to the legacy AI/text pipeline. The toggle is the SOLE dispatch
-// gate (it replaced the old sess.Stash != nil check entirely). Movies/Series
-// ignore all three (they run through ScanLibrary*, not Scan).
-func Scan(ctx context.Context, sess *mode.Session, hasher PHasher, prober Prober, identifyEnabled bool) ([]proposals.Proposal, error) {
-	client := sess.Servarr
-
-	// Adult identification runs through sess.Identify, which mode.Build leaves
-	// nil when the AI backbone isn't configured. Fail fast with an actionable
-	// message rather than nil-panicking mid-walk or burying the real "you
-	// haven't configured identification" signal under N Unmatched rows.
-	if sess.Mode == mode.Adult && sess.Identify == nil {
-		return nil, fmt.Errorf("adult identification isn't configured — add a connection for your chosen AI provider and set the AI model in Settings, plus at least one of StashDB/FansDB/TPDB")
-	}
-
-	folders, err := client.RootFolders(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("loading root folders: %w", err)
-	}
-	tracked, err := client.AllTracked(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("loading tracked items: %w", err)
-	}
-	profiles, err := client.QualityProfiles(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("loading quality profiles: %w", err)
-	}
-
-	// Kids classification only ever reroutes content INTO sess.KidsRootPath —
-	// it's only meaningful if that's actually one of this *arr app's own
-	// currently-reported root folders (never a stale or mistyped setting).
-	validRootPaths := map[string]bool{}
-	for _, root := range folders {
-		validRootPaths[root.Path] = true
-	}
-	kidsRootPath := sess.KidsRootPath
-	if kidsRootPath != "" && !validRootPaths[kidsRootPath] {
-		kidsRootPath = ""
-	}
-
-	var out []proposals.Proposal
-	var adultCandidates []adultCandidate
-	for _, root := range folders {
-		for _, uf := range root.UnmappedFolders {
-			if config.SidecarExts[strings.ToLower(filepath.Ext(uf.Name))] {
-				continue
-			}
-			switch {
-			case sess.Mode == mode.Adult && identifyEnabled:
-				// Batched through the phash-first pipeline below rather than
-				// resolved here one at a time — it computes every candidate's
-				// phash (bounded worker pool) then does one batched cascade lookup.
-				adultCandidates = append(adultCandidates, adultCandidate{root: root, uf: uf})
-			case sess.Mode == mode.Adult:
-				// Toggle off -> straight to the legacy AI/text pipeline.
-				out = append(out, proposeOneAdult(ctx, sess.Identify, sess.Mode, root, uf, tracked, profiles))
-			default:
-				out = append(out, proposeOne(ctx, client, sess.Mode, sess.MainstreamAI, kidsRootPath, root, uf, tracked, profiles))
-			}
-		}
-	}
-	if len(adultCandidates) > 0 {
-		out = append(out, scanAdultPhashFirst(ctx, sess, hasher, prober, adultCandidates, tracked, profiles)...)
-	}
-	if sess.Mode != mode.Adult {
-		out = append(out, reconcileTracked(ctx, sess.Mode, sess.MainstreamAI, kidsRootPath, folders, tracked)...)
-	}
-	return out, nil
-}
-
-// reconcileTracked audits every ALREADY-TRACKED item under the general or
-// Kids root for kids/general misplacement — the counterpart to proposeOne's
-// classification, which only ever runs on newly-found orphans. Without this,
-// a tracked item's classification could drift (a re-rated title, a fixed-up
-// genre list) and Rename would never surface it. Only produces proposals
-// when kidsRootPath is actually configured; a no-op otherwise.
-//
-// general→kids is unambiguous (the destination is always kidsRootPath), but
-// kids→general needs to know WHICH other root folder is "general" — only
-// attempted when exactly one non-Kids root folder exists, since guessing
-// among several would be exactly the kind of silent misrouting this project
-// avoids. A multi-general-root setup simply won't get kids→general
-// reconciliation; it still gets general→kids.
-func reconcileTracked(ctx context.Context, m mode.Mode, mainstreamAI identify.AIClient, kidsRootPath string, folders []servarr.RootFolder, tracked []servarr.TrackedItem) []proposals.Proposal {
-	if kidsRootPath == "" {
-		return nil
-	}
-
-	var generalRoot string
-	generalCount := 0
-	for _, f := range folders {
-		if f.Path != kidsRootPath {
-			generalRoot = f.Path
-			generalCount++
-		}
-	}
-	unambiguousGeneral := generalCount == 1
-
-	var out []proposals.Proposal
-	for _, t := range tracked {
-		cls := classifyKids(ctx, mainstreamAI, servarr.LookupResult{
-			Title: t.Title, Certification: t.Certification, Genres: t.Genres, Overview: t.Overview,
-		})
-
-		var wantPath string
-		switch {
-		case cls.IsKids && t.RootFolderPath != kidsRootPath:
-			wantPath = kidsRootPath
-		case !cls.IsKids && t.RootFolderPath == kidsRootPath && unambiguousGeneral:
-			wantPath = generalRoot
-		default:
-			continue // already correctly placed
-		}
-
-		out = append(out, proposals.Proposal{
-			Mode: m, Workflow: proposals.Rename, Status: proposals.Pending,
-			SourceName: t.Title, SourcePath: t.Path, RootFolderPath: wantPath,
-			Title: t.Title, TVDBID: t.TVDBID, TMDBID: t.TMDBID, TrackedID: t.ID,
-			Reason: fmt.Sprintf("currently in %s, classified kids=%v (%s) — should move to %s", t.RootFolderPath, cls.IsKids, cls.Reason, wantPath),
-		})
-	}
-	return out
-}
-
-func proposeOne(
-	ctx context.Context, client *servarr.Client, m mode.Mode, mainstreamAI identify.AIClient, kidsRootPath string,
-	root servarr.RootFolder, uf servarr.UnmappedFolder,
-	tracked []servarr.TrackedItem, profiles []servarr.QualityProfile,
-) proposals.Proposal {
-	p := proposals.Proposal{
-		Mode: m, Workflow: proposals.Rename,
-		SourceName: uf.Name, SourcePath: uf.Path, RootFolderPath: root.Path,
-	}
-
-	term := searchterm.FromName(uf.Name)
-	lr, ok, reason := lookupFirst(ctx, client, term)
-	if !ok && mainstreamAI != nil {
-		lr, ok, reason = lookupWithAIFallback(ctx, client, mainstreamAI, uf.Name, reason)
-	}
-	if !ok {
-		p.Status = proposals.Unmatched
-		p.Reason = reason
-		return p
-	}
-
-	if dup := findTrackedDuplicate(tracked, client.AppType(), lr); dup != nil {
-		p.Status = proposals.Unmatched
-		p.Reason = fmt.Sprintf("appears to already be tracked as %q (in %s) — leaving in place for manual review", dup.Title, dup.RootFolderPath)
-		return p
-	}
-
-	targetPath := root.Path
-	// Only worth classifying if a Kids path is actually configured for this
-	// mode and this item wasn't already found sitting in it — an item
-	// already under the Kids root is already correctly placed by whoever put
-	// it there.
-	if kidsRootPath != "" && kidsRootPath != root.Path {
-		if classifyKids(ctx, mainstreamAI, lr).IsKids {
-			targetPath = kidsRootPath
-		}
-	}
-
-	p.Status = proposals.Pending
-	p.Title = lr.Title
-	p.TVDBID = lr.TVDBID
-	p.TMDBID = lr.TMDBID
-	p.RootFolderPath = targetPath
-	p.QualityProfileID = servarr.DefaultQualityProfileID(tracked, targetPath, profiles)
-	return p
-}
-
-// classifyKids runs the structured-signal-first, AI-fallback-second
-// classification chain (see internal/classify): deterministic
-// certification/genre first, falling back to mainstreamAI only when that
-// signal is too weak to trust AND an AI client is actually configured. On an
-// AI failure, or with no AI configured, the not-confident metadata-only
-// result stands — its IsKids is already false in that case, matching the
-// original CLI's "default to general" behavior when nothing resolves it.
-func classifyKids(ctx context.Context, mainstreamAI identify.AIClient, lr servarr.LookupResult) classify.Result {
-	result := classify.FromMetadata(classify.Signal{Certification: lr.Certification, Genres: lr.Genres})
-	if result.Confident || mainstreamAI == nil {
-		return result
-	}
-	if aiResult, err := classify.WithAI(ctx, mainstreamAI, lr.Title, lr.Overview); err == nil {
-		return aiResult
-	}
-	return result
-}
-
-// lookupFirst runs client.Lookup for term and reports its first result.
-// ok=false covers both a lookup error and an empty result set — both route to
-// the same "try the AI fallback next" branch in proposeOne.
-func lookupFirst(ctx context.Context, client *servarr.Client, term string) (lr servarr.LookupResult, ok bool, reason string) {
-	results, err := client.Lookup(ctx, term)
-	if err != nil {
-		return servarr.LookupResult{}, false, fmt.Sprintf("lookup failed for search term %q: %v", term, err)
-	}
-	if len(results) == 0 {
-		return servarr.LookupResult{}, false, fmt.Sprintf("no match for search term %q", term)
-	}
-	return results[0], true, ""
-}
-
-// lookupWithAIFallback asks the configured AI provider to guess the real
-// title from name, then retries Lookup with that guess — Rename's fallback
-// for names the *arr app's own search term couldn't resolve. firstReason
-// (from the failed lookupFirst attempt) is folded into the result so a final
-// Unmatched proposal explains both attempts, not just the last one.
-func lookupWithAIFallback(ctx context.Context, client *servarr.Client, ai identify.AIClient, name, firstReason string) (lr servarr.LookupResult, ok bool, reason string) {
-	guessed, err := identify.GuessTitle(ctx, ai, name)
-	if err != nil {
-		return servarr.LookupResult{}, false, fmt.Sprintf("%s, and AI title guess failed: %v", firstReason, err)
-	}
-	results, err := client.Lookup(ctx, guessed)
-	if err != nil {
-		return servarr.LookupResult{}, false, fmt.Sprintf("%s, and lookup failed for AI-guessed title %q: %v", firstReason, guessed, err)
-	}
-	if len(results) == 0 {
-		return servarr.LookupResult{}, false, fmt.Sprintf("%s, and no match even for AI-guessed title %q", firstReason, guessed)
-	}
-	return results[0], true, ""
-}
-
-// findTrackedDuplicate reports whether lr's identified TVDB/TMDB ID already
-// matches something the app tracks — i.e. this "orphaned" item is actually a
-// duplicate copy of existing content, not a genuinely new addition.
-func findTrackedDuplicate(tracked []servarr.TrackedItem, app servarr.App, lr servarr.LookupResult) *servarr.TrackedItem {
-	for i, t := range tracked {
-		if app == servarr.Sonarr && lr.TVDBID != 0 && t.TVDBID == lr.TVDBID {
-			return &tracked[i]
-		}
-		if app == servarr.Radarr && lr.TMDBID != 0 && t.TMDBID == lr.TMDBID {
-			return &tracked[i]
-		}
-	}
-	return nil
-}
-
-// proposeOneAdult resolves one unmapped folder via the AI identification
-// pipeline (sess.Identify) instead of the *arr app's own TVDB/TMDB Lookup.
-// Duplicate detection is intentionally skipped: TrackedItem carries no
-// ForeignID/StashId to key an Adult scene against (see spec §7) — an
-// already-tracked duplicate surfaces safely as Whisparr's own foreignId
-// uniqueness rejection at Apply, not silent corruption.
-func proposeOneAdult(
-	ctx context.Context, ident *identify.Identifier, m mode.Mode,
-	root servarr.RootFolder, uf servarr.UnmappedFolder,
-	tracked []servarr.TrackedItem, profiles []servarr.QualityProfile,
-) proposals.Proposal {
-	res, err := ident.Identify(ctx, uf.Name, filepath.Base(root.Path))
-	return buildAdultProposal(m, root, uf, res, err, tracked, profiles)
-}
-
-// buildAdultProposal assembles a Proposal from an already-resolved (or
-// failed) identification result. Factored out of proposeOneAdult so
-// scanAdultPhashFirst's fingerprint-cascade hits can build a Proposal the
-// same way without paying for a second ident.Identify call — both callers
-// are the same Adult/Whisparr pipeline, so this is ordinary same-package
-// logic extraction, not the "different backend, needs its own sibling
-// function" case CLAUDE.md warns against.
-func buildAdultProposal(
-	m mode.Mode, root servarr.RootFolder, uf servarr.UnmappedFolder,
-	res *identify.MatchResult, err error,
-	tracked []servarr.TrackedItem, profiles []servarr.QualityProfile,
-) proposals.Proposal {
-	p := proposals.Proposal{
-		Mode: m, Workflow: proposals.Rename,
-		SourceName: uf.Name, SourcePath: uf.Path, RootFolderPath: root.Path,
-	}
-	p.Status, p.Reason, p.Title, p.ForeignID, p.ItemType = classifyAdultMatch(res, err)
-	if res != nil {
-		// Captured regardless of match outcome: an Unmatched (web-identified-only)
-		// proposal still needs Studio/Date for SubmitDraft to give the scene back
-		// to the community databases.
-		p.Studio, p.Date = res.Studio, res.Date
-		// GiveBackBox/GiveBackSceneID are captured separately from ForeignID:
-		// WhisparrForeignID() returns the SAME raw UUID string for both a
-		// stashdb and a fansdb match, so ForeignID alone can't tell give-back
-		// which community box to submit a fingerprint to later.
-		p.GiveBackBox, p.GiveBackSceneID = res.Box, res.SceneID
-	}
-	if p.Status == proposals.Pending {
-		p.QualityProfileID = servarr.DefaultQualityProfileID(tracked, root.Path, profiles)
-	}
-	return p
 }
 
 // classifyAdultMatch maps a completed Identify result to a proposal's
@@ -359,100 +64,10 @@ func classifyAdultMatch(res *identify.MatchResult, err error) (status proposals.
 	return proposals.Pending, "", res.Title, foreignID, res.Type
 }
 
-// Apply registers p's identified item with sess's Servarr app, then triggers
-// a broad downloaded-scan so the app picks up the file already sitting on
-// disk under p.RootFolderPath. p must be Pending — Apply refuses anything
-// else (already applied, dismissed, or unmatched with nothing to register).
-//
-// A nonzero p.TrackedID means p came from reconcileTracked, not proposeOne —
-// the item is already tracked and just needs to move root folders, which
-// Radarr/Sonarr's own UpdateRootFolder (moveFiles=true) handles entirely on
-// its own side; SAK never touches that file directly.
-//
-// Otherwise (a new orphan), if p was classified into a different root than
-// it was originally found under (see classifyKids in Scan), the file is
-// physically relocated into that root FIRST — Sonarr/Radarr can only import
-// a file that's already sitting under the root folder it's being registered
-// against. This is the one place Rename ever touches the filesystem
-// directly (mirroring Dedup's existing os.Remove precedent for the same
-// reason: SAK runs with direct local access to the same paths the *arr
-// apps report).
-//
-// If Add succeeds but the follow-up scan trigger fails, trackedID is still
-// returned alongside the error: the item is genuinely registered at that
-// point, so the caller should still record it as applied rather than losing
-// track of it — the scan trigger can be retried independently (e.g. the
-// app's own periodic scan will pick it up eventually regardless).
-//
-// fingerprintSubmitted reports whether an Adult proposal's phash was
-// successfully given back to its origin community box (see
-// submitFingerprintGiveBack) — give-back only ever runs here, after a human
-// has approved Apply, never during Scan (see the design spec's
-// staged-for-approval principle; the original CLI gave back during its scan
-// pass, which this project deliberately does not reproduce). It's
-// best-effort and never turns an otherwise-successful Apply into an error —
-// the caller uses it only to decide whether to record
-// p.FingerprintSubmittedAt.
-//
-// changes is a named return so a post-move failure (Add or
-// ScanForDownloaded) still reports the committed relocate to the caller for
-// Session.NotifyPlayers — it's set immediately after Relocate succeeds,
-// unconditionally, never gated on trackedID/Add/ScanForDownloaded also
-// succeeding: the file has already physically moved by that point, so Stash
-// must be told regardless of what happens next, or a phantom scene results.
-// Nothing is emitted when the relocate branch is skipped (dir unchanged —
-// no rename occurred, Stash already has the file at its path) or on the
-// p.TrackedID != 0 reclassify early-return (SAK does no local os.Rename
-// there).
-func Apply(ctx context.Context, sess *mode.Session, p proposals.Proposal) (trackedID int, fingerprintSubmitted bool, changes []mode.PathChange, err error) {
-	if p.Status != proposals.Pending {
-		return 0, false, nil, fmt.Errorf("proposal %d is %q, not pending — nothing to apply", p.ID, p.Status)
-	}
-
-	if p.TrackedID != 0 {
-		if err := sess.Servarr.UpdateRootFolder(ctx, p.TrackedID, p.RootFolderPath); err != nil {
-			return 0, false, nil, fmt.Errorf("reclassifying %q: %w", p.Title, err)
-		}
-		return p.TrackedID, false, nil, nil
-	}
-
-	// Structural safety guard at the mutation boundary: a Whisparr scene needs
-	// BOTH a ForeignID and an ItemType, or Whisparr silently files it as a
-	// mis-typed movie (its ItemType enum's zero value is "movie"). Refuse here
-	// rather than trusting Scan-convention — even a hand-crafted or future-buggy
-	// Adult proposal can never be registered without a real scene identifier.
-	if sess.Servarr.AppType() == servarr.Whisparr && (p.ForeignID == "" || p.ItemType == "") {
-		return 0, false, nil, fmt.Errorf("proposal %d has no scene identifier — refusing to register it as a mis-typed movie", p.ID)
-	}
-
-	if p.SourcePath != "" && filepath.Dir(p.SourcePath) != p.RootFolderPath {
-		unique, err := Relocate(p.SourcePath, p.RootFolderPath)
-		if err != nil {
-			return 0, false, nil, fmt.Errorf("relocating %q into %q: %w", p.SourcePath, p.RootFolderPath, err)
-		}
-		// Critic fix #3: capture the committed move right here, unconditionally
-		// — not gated on trackedID/Add/ScanForDownloaded succeeding below.
-		changes = []mode.PathChange{{Path: p.SourcePath, Kind: mode.Deleted}, {Path: unique, Kind: mode.Created}}
-	}
-
-	id, err := sess.Servarr.Add(ctx, servarr.AddRequest{
-		Title: p.Title, TVDBID: p.TVDBID, TMDBID: p.TMDBID,
-		ForeignID: p.ForeignID, ItemType: p.ItemType,
-		QualityProfileID: p.QualityProfileID, RootFolderPath: p.RootFolderPath, Monitored: true,
-	})
-	if err != nil {
-		return 0, false, changes, fmt.Errorf("registering %q: %w", p.Title, err)
-	}
-
-	if err := sess.Servarr.ScanForDownloaded(ctx); err != nil {
-		return id, false, changes, fmt.Errorf("registered as id=%d but triggering the downloaded-files scan failed: %w", id, err)
-	}
-	return id, submitFingerprintGiveBack(ctx, sess, p), changes, nil
-}
-
 // submitFingerprintGiveBack submits p's phash back to whichever community box
-// it was first fingerprint-matched against (see buildAdultProposal's
-// GiveBackBox/GiveBackSceneID capture). A no-op, not an error, whenever p
+// it was first fingerprint-matched against (from the GiveBackBox/GiveBackSceneID
+// captured on the proposal when it was a phash-cascade hit). A no-op, not an
+// error, whenever p
 // wasn't a phash-cascade hit (GiveBackBox/GiveBackSceneID/PHash unset), give-back
 // isn't configured, or the submission itself fails — the item is already
 // genuinely registered by the time this runs, so a give-back failure must
@@ -520,18 +135,17 @@ func Relocate(sourcePath, destRoot string) (string, error) {
 	return unique, nil
 }
 
-// ScanLibrary is Rename's Movies-library counterpart to Scan — used only
-// for Movies mode, now that Radarr no longer sits between SAK and the
-// filesystem/TMDB (see internal/library's package doc). It walks
-// rootFolderPath (and sess.KidsRootPath, if configured and different) for
-// files libStore doesn't already know about, resolves each via TMDB search
-// instead of Servarr's Lookup, and skips anything whose TMDB id is already
-// in the library.
+// ScanLibrary is Rename's Movies-library scan — used only for Movies mode,
+// now that Radarr no longer sits between SAK and the filesystem/TMDB (see
+// internal/library's package doc). It walks rootFolderPath (and
+// sess.KidsRootPath, if configured and different) for files libStore doesn't
+// already know about, resolves each via TMDB search instead of Servarr's
+// Lookup, and skips anything whose TMDB id is already in the library.
 //
-// Unlike Scan, this does NOT audit already-tracked items for kids/general
-// drift (reconcileTracked's counterpart): TMDB's search response carries no
-// certification/genre data the way *arr's own Lookup did, and fetching it
-// per already-tracked item on every Scan would be an expensive N+1 against
+// It does NOT audit already-tracked items for kids/general drift: TMDB's
+// search response carries no certification/genre data the way *arr's own
+// Lookup did, and fetching it per already-tracked item on every scan would
+// be an expensive N+1 against
 // TMDB. This is a deliberate v1 simplification — new orphans are still
 // classified (via AI, using title+overview only, since certification/genre
 // metadata isn't available here without an extra per-item call), just not
@@ -628,7 +242,7 @@ func proposeOneLibrary(
 	switch {
 	case foundRoot == sess.KidsRootPath:
 		// Already sitting under the Kids root — already correctly placed by
-		// whoever put it there, same as proposeOne's rule.
+		// whoever put it there, left where it is.
 		targetRoot = sess.KidsRootPath
 	case sess.KidsRootPath != "" && sess.MainstreamAI != nil:
 		if result, err := classify.WithAI(ctx, sess.MainstreamAI, match.Title, match.Overview); err == nil && result.IsKids {
@@ -674,10 +288,10 @@ func RelocateMovie(sourcePath, destRoot, title string, year, tmdbID int, preset 
 	return unique, nil
 }
 
-// ApplyLibrary is Rename's Movies-library counterpart to Apply. p must be
-// Pending. Unlike Apply, there's no reconcile-drift case (ScanLibrary never
-// produces one — see its doc comment), so this only ever handles a new
-// orphan: resolve the actual video file (p.SourcePath may be a directory
+// ApplyLibrary is Rename's Movies-library apply. p must be Pending. There's
+// no reconcile-drift case (ScanLibrary never produces one — see its doc
+// comment), so this only ever handles a new orphan: resolve the actual video
+// file (p.SourcePath may be a directory
 // wrapping it, or the file itself), relocate just that file into a
 // preset-formatted folder via RelocateMovie, then record it directly in
 // libStore — no registration/rescan round trip needed, since
@@ -724,9 +338,9 @@ type episodeKey struct {
 	tmdbID, season, episode int
 }
 
-// ScanLibrarySeries is Rename's Series-library counterpart to Scan — used
-// only once Series stops requiring Sonarr (see the plan this was built
-// from, Stage 2). It walks rootFolderPath (and sess.KidsRootPath, if
+// ScanLibrarySeries is Rename's Series-library scan — the library-backed
+// path used once Series stopped requiring Sonarr (see the plan this was
+// built from, Stage 2). It walks rootFolderPath (and sess.KidsRootPath, if
 // configured and different) for orphaned files or season-pack folders,
 // resolves each file's season/episode from its own name, resolves the show
 // via TMDB search, and skips anything already tracked WITH a file — an

@@ -142,11 +142,13 @@ type Session struct {
 	Mode Mode
 	// Servarr is nil for every mode now — SAK owns its own library across all
 	// three (Movies/Series since their Radarr/Sonarr eliminations, Adult since
-	// Stage 4's Whisparr elimination), so Build never constructs one. The field
-	// (and internal/servarr) is retained because the workflow packages still
-	// carry their generic Servarr-backed Scan/Apply functions as unused generic
-	// capability (the "don't strip generic capability" convention); no live
-	// path reads this. Callers must not assume this is non-nil.
+	// Stage 4's Whisparr elimination), so Build never constructs one, and no
+	// live code path (connection testing included — TestConnection has no
+	// radarr/sonarr/whisparr case) reads this field. The field (and
+	// internal/servarr itself) is retained anyway as generic, still-valid
+	// capability per this project's "don't strip a shared library's capability
+	// just because its last caller moved on" convention. Callers must not
+	// assume this is non-nil.
 	Servarr *servarr.Client
 
 	// Identify is the AI-assisted content-identification pipeline, populated

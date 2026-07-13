@@ -4,20 +4,17 @@
 // to keep the better-quality copy instead of leaving both silently in
 // place (today's behavior in both source CLIs).
 //
-// Movies groups by TMDB id (scanMovies/ScanLibrary); Adult groups by the
-// resolved scene's foreignID (scanAdult); Series groups by
+// Movies groups by TMDB id (ScanLibrary); Adult groups by the resolved
+// scene's foreignID (ScanLibraryAdult); Series groups by
 // (show TMDB id, season, episode) — see ScanLibrarySeries, whose grouping
 // resolves both questions an earlier version of this comment used to flag
 // as undecided: "the tracked copy" is just the one library.Episode row for
 // that exact key (the schema's own UNIQUE constraint rules out ambiguity),
 // and a duplicate season-pack file groups with a duplicate single-episode
 // file naturally, since a season pack is broken into individual files
-// (library.ResolveEpisodeVideoFiles) before grouping ever happens. Scan/
-// Apply are the generic Servarr-backed pair, serving only Adult now
-// (Movies/Series both moved to their own libStore-backed
-// ScanLibrary*/ApplyLibrary* siblings, dispatched at the API layer); Scan
-// still refuses a Series session (Sonarr-backed or not) since that
-// dispatch never routes here for Series.
+// (library.ResolveEpisodeVideoFiles) before grouping ever happens. Every mode
+// runs its own libStore-backed ScanLibrary*/ApplyLibrary* sibling, dispatched
+// at the API layer.
 //
 // Quality comparison never trusts a *arr app's own reported file quality —
 // every candidate, tracked or not, gets ffprobed directly by SAK itself
@@ -37,7 +34,6 @@ import (
 	"time"
 
 	"github.com/curtiswtaylorjr/sakms/internal/config"
-	"github.com/curtiswtaylorjr/sakms/internal/identify"
 	"github.com/curtiswtaylorjr/sakms/internal/library"
 	"github.com/curtiswtaylorjr/sakms/internal/mediainfo"
 	"github.com/curtiswtaylorjr/sakms/internal/mode"
@@ -45,7 +41,6 @@ import (
 	"github.com/curtiswtaylorjr/sakms/internal/place"
 	"github.com/curtiswtaylorjr/sakms/internal/proposals"
 	"github.com/curtiswtaylorjr/sakms/internal/searchterm"
-	"github.com/curtiswtaylorjr/sakms/internal/servarr"
 )
 
 // Prober is the subset of *mediainfo.Prober Scan needs — an interface so
@@ -57,10 +52,9 @@ type Prober interface {
 // PHasher is the subset of *phash.Hasher the phash-refined Scans need — an
 // interface so tests can inject a fake without a real ffmpeg binary or video
 // file, exactly as Prober does for ffprobe. All three modes refine their groups
-// with it: the library-backed Movies (ScanLibrary) and Series
-// (ScanLibrarySeries), and the Servarr-backed Adult (scanAdult). Adult alone
-// recomputes every scan (no SAK-owned row to cache against — see
-// attachPHashesAdult).
+// with it: the library-backed Movies (ScanLibrary), Series (ScanLibrarySeries),
+// and Adult (ScanLibraryAdult). Adult alone recomputes every scan (no SAK-owned
+// row to cache against).
 type PHasher interface {
 	Hash(ctx context.Context, path string) (string, error)
 }
@@ -141,28 +135,6 @@ func attachPHashesSeries(ctx context.Context, hasher PHasher, libStore *library.
 				_ = libStore.UpdateEpisodePHash(ctx, int64(c.TrackedID), h, size, mtime)
 			}
 		}
-		out = append(out, c)
-	}
-	return out
-}
-
-// attachPHashesAdult is attachPHashes' Servarr/Adult-typed sibling, stripped to
-// its essence: hash every candidate fresh and drop any it can't hash. Adult is
-// Whisparr-backed with no SAK-owned library row to cache a hash against (unlike
-// Movies' library_items / Series' library_episodes), so there is deliberately no
-// cache-read and no write-back — every Adult Dedup scan recomputes. That is a
-// smaller, equally-correct scope, not a missing feature: refineByPHash's
-// keep-both-on-<2 behavior is identical with or without a cache (see the package
-// doc and CHANGELOG). A candidate whose hash can't be computed is dropped, the
-// same tolerant posture as probeCandidate and attachPHashes.
-func attachPHashesAdult(ctx context.Context, hasher PHasher, candidates []proposals.Candidate) []proposals.Candidate {
-	out := make([]proposals.Candidate, 0, len(candidates))
-	for _, c := range candidates {
-		h, err := hasher.Hash(ctx, c.Path)
-		if err != nil {
-			continue // uncomputable — drop, same tolerance as attachPHashes/probeCandidate
-		}
-		c.PHash = h
 		out = append(out, c)
 	}
 	return out
@@ -281,339 +253,6 @@ func markWinner(candidates []proposals.Candidate) {
 	candidates[best].Winner = true
 }
 
-// Scan dispatches on the session's app: Radarr runs the Movies duplicate
-// detection (scanMovies, keyed by TMDB ID); Whisparr runs the Adult one
-// (scanAdult, keyed by foreignID); anything else (including a Series
-// session, whether it's still Sonarr-backed or already on its own library —
-// sess.Servarr is nil in the latter case) is refused, since Series dedup
-// isn't built yet (see the package doc).
-//
-// hasher and perFrameThreshold refine the Adult path by perceptual similarity
-// exactly as ScanLibrary/ScanLibrarySeries do (see scanAdult). They are
-// threaded through to scanMovies too for signature consistency, but the legacy
-// Radarr path does not use them — Movies' real dedup is ScanLibrary.
-func Scan(ctx context.Context, sess *mode.Session, prober Prober, hasher PHasher, perFrameThreshold int) ([]proposals.Proposal, error) {
-	if sess.Servarr == nil {
-		return nil, fmt.Errorf("dedup: Series-library dedup isn't implemented yet (tracked separately) — Movies and Adult only")
-	}
-	switch sess.Servarr.AppType() {
-	case servarr.Radarr:
-		return scanMovies(ctx, sess, prober, hasher, perFrameThreshold)
-	case servarr.Whisparr:
-		if sess.Identify == nil {
-			return nil, fmt.Errorf("adult identification isn't configured — add an Ollama connection and set the Ollama model in Settings, plus at least one of StashDB/FansDB/TPDB")
-		}
-		return scanAdult(ctx, sess, prober, hasher, perFrameThreshold)
-	default:
-		return nil, fmt.Errorf("dedup: Series-library dedup isn't implemented yet (tracked separately) — Movies and Adult only, not %v", sess.Mode)
-	}
-}
-
-// scanMovies identifies every unmapped file and groups it (and any
-// already-tracked item) by resolved TMDB ID. A group with 2+ probeable
-// candidates becomes a Pending Dedup proposal; a lone new item is left for
-// Rename to handle, not reported here.
-//
-// hasher and perFrameThreshold are accepted for signature consistency with the
-// phash-refined Scan dispatch but deliberately unused here: this is the legacy
-// Radarr path, and Movies' real (phash-refined) dedup is ScanLibrary.
-func scanMovies(ctx context.Context, sess *mode.Session, prober Prober, _ PHasher, _ int) ([]proposals.Proposal, error) {
-	client := sess.Servarr
-
-	folders, err := client.RootFolders(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("loading root folders: %w", err)
-	}
-	tracked, err := client.AllTracked(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("loading tracked items: %w", err)
-	}
-	profiles, err := client.QualityProfiles(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("loading quality profiles: %w", err)
-	}
-
-	trackedByTMDB := make(map[int]servarr.TrackedItem, len(tracked))
-	for _, t := range tracked {
-		if t.TMDBID != 0 {
-			trackedByTMDB[t.TMDBID] = t
-		}
-	}
-
-	type orphanHit struct {
-		name, path string
-		title      string
-	}
-	orphansByTMDB := make(map[int][]orphanHit)
-
-	for _, root := range folders {
-		for _, uf := range root.UnmappedFolders {
-			if config.SidecarExts[strings.ToLower(filepath.Ext(uf.Name))] {
-				continue
-			}
-			results, err := client.Lookup(ctx, searchterm.FromName(uf.Name))
-			if err != nil || len(results) == 0 || results[0].TMDBID == 0 {
-				continue // not Dedup's concern — Rename's own Scan already surfaces unmatched items
-			}
-			lr := results[0]
-			orphansByTMDB[lr.TMDBID] = append(orphansByTMDB[lr.TMDBID], orphanHit{name: uf.Name, path: uf.Path, title: lr.Title})
-		}
-	}
-
-	var out []proposals.Proposal
-	for tmdbID, orphans := range orphansByTMDB {
-		trackedItem, isTracked := trackedByTMDB[tmdbID]
-		if !isTracked && len(orphans) < 2 {
-			continue // a single new, untracked item — nothing to dedup
-		}
-
-		title := orphans[0].title
-		rootPath := ""
-		var candidates []proposals.Candidate
-		if isTracked {
-			if c := probeCandidate(ctx, prober, "tracked", trackedItem.Path, trackedItem.ID); c != nil {
-				candidates = append(candidates, *c)
-			}
-			title, rootPath = trackedItem.Title, trackedItem.RootFolderPath
-		}
-		for _, o := range orphans {
-			if c := probeCandidate(ctx, prober, o.name, o.path, 0); c != nil {
-				candidates = append(candidates, *c)
-				if rootPath == "" {
-					rootPath = filepath.Dir(o.path)
-				}
-			}
-		}
-		if len(candidates) < 2 {
-			continue // couldn't probe enough of the group to compare
-		}
-		markWinner(candidates)
-
-		out = append(out, proposals.Proposal{
-			Mode: sess.Mode, Workflow: proposals.Dedup, Status: proposals.Pending,
-			SourceName: title, Title: title, TMDBID: tmdbID, RootFolderPath: rootPath,
-			QualityProfileID: servarr.DefaultQualityProfileID(tracked, rootPath, profiles),
-			Candidates:       candidates,
-			Reason:           fmt.Sprintf("%d copies identified as %q", len(candidates), title),
-		})
-	}
-	return out, nil
-}
-
-// scanAdult is scanMovies' Whisparr counterpart: it groups a tracked scene and
-// any unmapped copies of it by the normalized foreignID string (raw stash-box
-// UUID, or "tpdbId:<id>" for a TPDB-only match), identifying orphans via
-// sess.Identify exactly as Rename does. Structure mirrors scanMovies
-// deliberately (per the plan) rather than sharing a parameterized helper.
-//
-// The tracked side skips any item whose ForeignID is empty — the same
-// graceful-degradation posture Movies uses for TMDBID==0. If a real Whisparr
-// GET /movie doesn't report foreignId (or reports it in a different format than
-// Add sent), then len(tracked) > 0 but trackedByForeignID stays empty, and this
-// silently degrades to orphan-vs-orphan dedup (keys computed locally from
-// sess.Identify, independent of any Whisparr response) — no crash, no misgroup,
-// no misfile. This is an UNVERIFIED assumption (no live Whisparr here); see the
-// commit body. Deliberately not logged: no internal/* package in this codebase
-// logs directly (only cmd/sakms/main.go does).
-func scanAdult(ctx context.Context, sess *mode.Session, prober Prober, hasher PHasher, perFrameThreshold int) ([]proposals.Proposal, error) {
-	client := sess.Servarr
-
-	folders, err := client.RootFolders(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("loading root folders: %w", err)
-	}
-	tracked, err := client.AllTracked(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("loading tracked items: %w", err)
-	}
-	profiles, err := client.QualityProfiles(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("loading quality profiles: %w", err)
-	}
-
-	trackedByForeignID := make(map[string]servarr.TrackedItem, len(tracked))
-	for _, t := range tracked {
-		if t.ForeignID != "" {
-			trackedByForeignID[t.ForeignID] = t
-		}
-	}
-
-	type orphanHit struct {
-		name, path, title, itemType string
-	}
-	orphansByForeignID := make(map[string][]orphanHit)
-
-	for _, root := range folders {
-		for _, uf := range root.UnmappedFolders {
-			if config.SidecarExts[strings.ToLower(filepath.Ext(uf.Name))] {
-				continue
-			}
-			res, err := sess.Identify.Identify(ctx, uf.Name, filepath.Base(root.Path))
-			fid, itemType, title, ok := adultForeignID(res, err)
-			if !ok {
-				continue // web-only / no scene id / identify error — Rename's concern, not Dedup's
-			}
-			orphansByForeignID[fid] = append(orphansByForeignID[fid], orphanHit{name: uf.Name, path: uf.Path, title: title, itemType: itemType})
-		}
-	}
-
-	var out []proposals.Proposal
-	for fid, orphans := range orphansByForeignID {
-		trackedItem, isTracked := trackedByForeignID[fid]
-		if !isTracked && len(orphans) < 2 {
-			continue // a single new, untracked scene — nothing to dedup
-		}
-
-		title := orphans[0].title
-		rootPath := ""
-		var candidates []proposals.Candidate
-		if isTracked {
-			if c := probeCandidate(ctx, prober, "tracked", trackedItem.Path, trackedItem.ID); c != nil {
-				candidates = append(candidates, *c)
-			}
-			title, rootPath = trackedItem.Title, trackedItem.RootFolderPath
-		}
-		for _, o := range orphans {
-			if c := probeCandidate(ctx, prober, o.name, o.path, 0); c != nil {
-				candidates = append(candidates, *c)
-				if rootPath == "" {
-					rootPath = filepath.Dir(o.path)
-				}
-			}
-		}
-		if len(candidates) < 2 {
-			continue // couldn't probe enough of the group to compare
-		}
-
-		// Refine the same-foreignID group by perceptual similarity, exactly as
-		// ScanLibrary/ScanLibrarySeries do: hash each candidate (always fresh —
-		// Adult has no library row to cache against, see attachPHashesAdult), then
-		// drop any candidate outside the threshold of the group's reference (the
-		// tracked scene if present via its nonzero TrackedID, else the first
-		// orphan). A group refined below 2 survivors is not a duplicate — the
-		// strictly-more-conservative keep-both.
-		candidates = attachPHashesAdult(ctx, hasher, candidates)
-		candidates = refineByPHash(candidates, phash.Frames, perFrameThreshold)
-		if len(candidates) < 2 {
-			continue // perceptually dissimilar — keep both, no proposal
-		}
-		markWinner(candidates)
-
-		out = append(out, proposals.Proposal{
-			Mode: sess.Mode, Workflow: proposals.Dedup, Status: proposals.Pending,
-			SourceName: title, Title: title,
-			ForeignID: fid, ItemType: orphans[0].itemType, RootFolderPath: rootPath,
-			QualityProfileID: servarr.DefaultQualityProfileID(tracked, rootPath, profiles),
-			Candidates:       candidates,
-			Reason:           fmt.Sprintf("%d copies identified as %q", len(candidates), title),
-		})
-	}
-	return out, nil
-}
-
-// adultForeignID maps an Identify result to the normalized foreignID both sides
-// group by, the item's type, and its title. ok is false for an identify error,
-// a nil result, or a match with no valid Whisparr ForeignID. The actual
-// derivation is delegated to identify.MatchResult.WhisparrForeignID so dedup
-// and rename can never silently diverge on what a scene's foreignID is.
-func adultForeignID(res *identify.MatchResult, err error) (fid, itemType, title string, ok bool) {
-	if err != nil || res == nil {
-		return "", "", "", false
-	}
-	fid, ok = res.WhisparrForeignID()
-	if !ok {
-		return "", "", "", false
-	}
-	return fid, res.Type, res.Title, true
-}
-
-// Apply resolves p by keeping exactly one candidate and removing the rest.
-// keepIndex selects which candidate survives; nil means "auto" — whichever
-// candidate Scan already marked Winner. keepAll skips all removal (both/all
-// copies stay, matching the design's "Keep both" action) and takes
-// precedence over keepIndex.
-//
-// If the surviving candidate wasn't already tracked (either it never was,
-// or the tracked copy just lost), Apply registers it the same way Rename
-// does, so the duplicate group always resolves to exactly one tracked item
-// with a file behind it — never zero.
-//
-// changes is a named return reporting each removed loser's path for
-// Session.NotifyPlayers — appended only after removeCandidate for that
-// candidate succeeds, so a mid-loop removal failure still reports whatever
-// was actually deleted before the error propagates. Both removeCandidate
-// branches (tracked-via-Whisparr and untracked-via-os.Remove) key off c.Path
-// here, unlike the Movies/Series library path. The survivor never moves, so
-// nothing is emitted for it; keepAll removes nothing and always returns nil
-// changes.
-func Apply(ctx context.Context, sess *mode.Session, p proposals.Proposal, keepIndex *int, keepAll bool) (trackedID int, changes []mode.PathChange, err error) {
-	if p.Status != proposals.Pending {
-		return 0, nil, fmt.Errorf("proposal %d is %q, not pending — nothing to apply", p.ID, p.Status)
-	}
-	if len(p.Candidates) < 2 {
-		return 0, nil, fmt.Errorf("proposal %d has fewer than 2 candidates to resolve", p.ID)
-	}
-
-	// Structural safety guard at the TOP of Apply — before the removal loop and
-	// both early-return paths (keepAll, already-tracked winner). A Whisparr scene
-	// needs BOTH a ForeignID and an ItemType, or the Add below silently files the
-	// surviving copy as a mis-typed movie (Whisparr's ItemType enum zero value is
-	// "movie"). Placed here, not just before Add: the removal loop deletes losing
-	// candidates first, so a guard placed late would destroy files and THEN refuse
-	// — partial destruction. For a real Scan-produced Adult proposal these fields
-	// are always set, so it only catches a hand-crafted / future-buggy proposal.
-	if sess.Servarr.AppType() == servarr.Whisparr && (p.ForeignID == "" || p.ItemType == "") {
-		return 0, nil, fmt.Errorf("proposal %d has no scene identifier — refusing to register it as a mis-typed movie", p.ID)
-	}
-
-	if keepAll {
-		for _, c := range p.Candidates {
-			if c.TrackedID != 0 {
-				return c.TrackedID, nil, nil
-			}
-		}
-		return 0, nil, nil
-	}
-
-	idx := winnerIndex(p.Candidates)
-	if keepIndex != nil {
-		if *keepIndex < 0 || *keepIndex >= len(p.Candidates) {
-			return 0, nil, fmt.Errorf("proposal %d: keepIndex %d out of range", p.ID, *keepIndex)
-		}
-		idx = *keepIndex
-	}
-	winner := p.Candidates[idx]
-
-	for i, c := range p.Candidates {
-		if i == idx {
-			continue
-		}
-		if err := removeCandidate(ctx, sess, c); err != nil {
-			return 0, changes, fmt.Errorf("removing %s: %w", c.Path, err)
-		}
-		if c.Path != "" {
-			changes = append(changes, mode.PathChange{Path: c.Path, Kind: mode.Deleted})
-		}
-	}
-
-	if winner.TrackedID != 0 {
-		return winner.TrackedID, changes, nil
-	}
-
-	id, err := sess.Servarr.Add(ctx, servarr.AddRequest{
-		Title: p.Title, TMDBID: p.TMDBID,
-		ForeignID: p.ForeignID, ItemType: p.ItemType, // Radarr proposals carry "" here and Add ignores them
-		QualityProfileID: p.QualityProfileID, RootFolderPath: p.RootFolderPath, Monitored: true,
-	})
-	if err != nil {
-		return 0, changes, fmt.Errorf("registering surviving copy %q: %w", p.Title, err)
-	}
-	if err := sess.Servarr.ScanForDownloaded(ctx); err != nil {
-		return id, changes, fmt.Errorf("registered as id=%d but triggering the downloaded-files scan failed: %w", id, err)
-	}
-	return id, changes, nil
-}
-
 func winnerIndex(candidates []proposals.Candidate) int {
 	for i, c := range candidates {
 		if c.Winner {
@@ -623,20 +262,11 @@ func winnerIndex(candidates []proposals.Candidate) int {
 	return 0
 }
 
-func removeCandidate(ctx context.Context, sess *mode.Session, c proposals.Candidate) error {
-	if c.TrackedID != 0 {
-		return sess.Servarr.DeleteTracked(ctx, c.TrackedID)
-	}
-	return os.Remove(c.Path)
-}
-
-// ScanLibrary is Dedup's Movies-library counterpart to scanMovies — used
-// only for Movies mode now that Radarr no longer sits between SAK and the
-// filesystem/TMDB (see internal/library's package doc). Identifies every
-// unmapped file (via TMDB search instead of Servarr's Lookup) and groups it,
-// and any already-tracked library item, by TMDB id — the same shape
-// scanMovies already established, just reading/writing internal/library
-// instead of Servarr.
+// ScanLibrary is Dedup's Movies-library scan — used only for Movies mode now
+// that Radarr no longer sits between SAK and the filesystem/TMDB (see
+// internal/library's package doc). Identifies every unmapped file (via TMDB
+// search instead of Servarr's Lookup) and groups it, and any already-tracked
+// library item, by TMDB id.
 func ScanLibrary(ctx context.Context, sess *mode.Session, libStore *library.Store, rootFolderPath string, prober Prober, hasher PHasher, perFrameThreshold int) ([]proposals.Proposal, error) {
 	if sess.TMDB == nil {
 		return nil, fmt.Errorf("tmdb isn't configured yet — add it in Settings first")
@@ -736,10 +366,10 @@ func ScanLibrary(ctx context.Context, sess *mode.Session, libStore *library.Stor
 	return out, nil
 }
 
-// ApplyLibrary is Dedup's Movies-library counterpart to Apply — resolves p
-// against libStore instead of Servarr: a tracked loser's file is removed
-// and its library record deleted, an untracked orphan loser's file is
-// removed directly, and an untracked winner is recorded via libStore.Upsert
+// ApplyLibrary is Dedup's Movies-library apply — resolves p against libStore:
+// a tracked loser's file is removed and its library record deleted, an
+// untracked orphan loser's file is removed directly, and an untracked winner
+// is recorded via libStore.Upsert
 // (no registration/rescan round trip needed — Upsert itself IS the "now
 // tracked" state).
 //

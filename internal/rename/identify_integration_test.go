@@ -67,7 +67,7 @@ func TestLiveIdentify_SAKHashResolvesInStashDB(t *testing.T) {
 	t.Logf("SAK computed phash = %s for %s", hash, testFile)
 
 	// Run it through the real cascade against the live StashDB, the same
-	// identify.LookupFingerprints path scanAdultPhashFirst drives.
+	// identify.LookupFingerprints path identifyAdultFiles drives.
 	box := stashbox.New(stashbox.Config{Endpoint: url, APIKey: apiKey, HasVoteField: true}, &http.Client{Timeout: 30 * time.Second})
 	ident := &identify.Identifier{
 		GiveBack: identify.NewGiveBack(map[string]*stashbox.Client{"stashdb": box}),

@@ -58,8 +58,8 @@ func ScanLibraryAdult(ctx context.Context, libStore *library.Store, allowlist []
 //
 // Unlike ApplyLibrary (Movies), the file path is taken from p.SourcePath
 // rather than re-fetched from the store: a scene has no GetScene-by-id lookup,
-// only GetScene(box, sceneID), so the path captured at Scan time is what Apply
-// acts on — the same way the Servarr-backed Apply uses p.SourcePath.
+// only GetScene(box, sceneID), so the path captured at scan time is what
+// Apply acts on.
 //
 // changes is a named return so a post-delete failure (libStore.DeleteScene)
 // still reports the committed removal to the caller for

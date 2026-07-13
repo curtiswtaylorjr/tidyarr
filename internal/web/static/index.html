@@ -438,7 +438,7 @@ function buildConnectionControls(service, existingConn, onSaved, opts) {
 // Three PAGES, one visible at a time, each with exactly one Save: (1) all
 // three library root folders (Movies/Series required to do anything at all —
 // neither proxies a *arr app anymore — Adult optional), (2) every service
-// connection (Prowlarr, download clients, Jellyfin, Whisparr — all optional,
+// connection (Prowlarr, download clients, Jellyfin — all optional,
 // one combined save), (3) the AI provider + model + its connection (optional).
 // Saving a page auto-advances to the next one (an empty/skip save on an
 // optional page still advances — Save doubles as "done with this page", there
@@ -489,8 +489,7 @@ async function renderWizard(container, page) {
     // Prowlarr/qBittorrent/NZBGet are reachable by conventional container
     // hostname on SAK's own docker network (hints from a known-host scan,
     // fetched only on this page), while Jellyfin lives on a different host
-    // and gets a "probe a specific host" input. Whisparr is a plain
-    // connection with no netscan hint (not a scan target). Saving advances
+    // and gets a "probe a specific host" input. Saving advances
     // to page 3 regardless of how many (if any) services were filled in.
     let findingByService = {};
     try {
@@ -538,13 +537,12 @@ async function renderWizard(container, page) {
 function buildConnectedServicesWizardStep(n, byService, findingByService, wizardContainer) {
   // Netscan hints ride along exactly as before: the docker-DNS-reachable
   // services get a pre-fetched known-host finding; Jellyfin (different host)
-  // gets a probe-a-host input; Whisparr isn't a scan target, so no hint.
+  // gets a probe-a-host input.
   const services = [
     { service: "prowlarr", label: "Prowlarr — search indexers", netscanOpts: { finding: findingByService.prowlarr } },
     { service: "qbittorrent", label: "qBittorrent — torrent downloads", netscanOpts: { finding: findingByService.qbittorrent } },
     { service: "nzbget", label: "NZBGet — usenet downloads", netscanOpts: { finding: findingByService.nzbget } },
     { service: "jellyfin", label: "Jellyfin — media player", netscanOpts: { finding: findingByService.jellyfin, allowHostProbe: true } },
-    { service: "whisparr", label: "Whisparr — Adult", netscanOpts: null },
   ];
 
   const fs = el("fieldset", {}, [
@@ -1421,12 +1419,11 @@ async function renderTag(container) {
 
 // ---- Settings view ----
 
-// No "radarr" here — Movies owns its own library instead of proxying it
-// (see internal/library's package doc), so there's nothing left to connect.
-// "sonarr" is kept even though Series is off it too now — a user migrating
-// from Sonarr still needs to connect it once, to run the one-time importer
-// (see renderSonarrImport / internal/sonarrimport's package doc).
-const CONNECTION_SERVICES = ["sonarr", "whisparr", "prowlarr", "qbittorrent", "nzbget", "tmdb", "ollama", "openai", "gemini", "anthropic", "stashdb", "fansdb", "tpdb", "brave", "stash", "jellyfin"];
+// No "radarr" or "sonarr" here — Movies/Series each own their own library
+// instead of proxying Radarr/Sonarr (see internal/library's package doc), and
+// the one-time Sonarr importer that used to justify keeping "sonarr" around
+// has been removed entirely (2026-07-12) — there's nothing left to connect.
+const CONNECTION_SERVICES = ["prowlarr", "qbittorrent", "nzbget", "tmdb", "ollama", "openai", "gemini", "anthropic", "stashdb", "fansdb", "tpdb", "brave", "stash", "jellyfin"];
 const AI_PROVIDERS = ["ollama", "openai", "gemini", "anthropic"];
 const QUALITY_TIERS = ["low", "medium", "high", "lossless"];
 const MAX_RESOLUTIONS = [0, 480, 720, 1080, 2160];
@@ -1452,7 +1449,6 @@ async function renderSettings(container) {
   await renderQualityPrefs(container);
   await renderNamingPreset(container);
   await renderKidsRootPath(container);
-  await renderSonarrImport(container);
 }
 
 // renderLibrarySettings is Movies'/Series' library root folder setting —
@@ -1480,54 +1476,6 @@ async function renderLibrarySettings(container, m) {
     el("div", { class: "row", style: "margin-top:0.5rem" }, [saveBtn, status]),
   ]));
   fs.appendChild(el("div", { class: "muted", text: "Where Rename/Purge/Dedup and Search's Check & Import look for and place " + MODE_LABELS[m] + " files — no " + (m === "movies" ? "Radarr" : "Sonarr") + " involved." }));
-  container.appendChild(fs);
-}
-
-// renderSonarrImport shows the one-time "Import from Sonarr" action —
-// Series only, and only if a sonarr connection still exists to migrate
-// from (see internal/sonarrimport's package doc). Safe to run more than
-// once; the button doesn't hide itself after a successful run.
-async function renderSonarrImport(container) {
-  if (state.mode !== "series") return;
-  let existing = [];
-  try { existing = await api("/api/connections"); } catch (e) {}
-  if (!existing.some((c) => c.service === "sonarr")) return;
-
-  const fs = el("fieldset", {}, [el("legend", { text: "Import from Sonarr" })]);
-  fs.appendChild(el("div", { class: "muted", text: "One-time import of every show Sonarr currently tracks into SAK's own library, including which episodes are still missing (from TMDB's season data). Read-only against Sonarr — makes no changes there." }));
-
-  const resultSlot = el("div");
-  const importBtn = el("button", { class: "primary", text: "Import from Sonarr", onclick: async () => {
-    importBtn.disabled = true;
-    resultSlot.innerHTML = "";
-    resultSlot.appendChild(el("div", { class: "muted", text: "Importing…" }));
-    try {
-      const result = await api("/api/series/import-from-sonarr", { method: "POST" });
-      resultSlot.innerHTML = "";
-      const list = result.series || [];
-      if (!list.length) { resultSlot.appendChild(el("div", { class: "empty", text: "Sonarr has nothing tracked to import." })); }
-      else {
-        const table = el("table", {}, [
-          el("thead", {}, [el("tr", {}, ["Show", "Result", "Episodes found", "Episodes missing"].map((h) => el("th", { text: h })))]),
-        ]);
-        const tbody = el("tbody");
-        for (const sr of list) {
-          tbody.appendChild(el("tr", {}, [
-            el("td", { text: sr.title }),
-            el("td", { text: sr.imported ? "Imported" : ("Skipped: " + (sr.reason || "unknown reason")) }),
-            el("td", { text: String(sr.episodesFound || 0) }),
-            el("td", { text: String(sr.episodesMissing || 0) }),
-          ]));
-        }
-        table.appendChild(tbody);
-        resultSlot.appendChild(table);
-      }
-    } catch (e) { resultSlot.innerHTML = ""; resultSlot.appendChild(fmtErr(e)); }
-    importBtn.disabled = false;
-  } });
-
-  fs.appendChild(el("div", { class: "row", style: "margin-top:0.5rem" }, [importBtn]));
-  fs.appendChild(resultSlot);
   container.appendChild(fs);
 }
 

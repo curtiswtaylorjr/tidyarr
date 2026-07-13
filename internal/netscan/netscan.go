@@ -1,19 +1,20 @@
 // Package netscan probes the local network for the download/indexer/player
-// services SAK talks to (Prowlarr, qBittorrent, NZBGet, Jellyfin), so the
-// setup wizard can offer to pre-fill a connection's URL instead of making the
-// operator type it by hand.
+// services SAK talks to (Prowlarr, qBittorrent, NZBGet, Jellyfin),
+// so the setup wizard can offer to pre-fill a connection's URL instead of
+// making the operator type it by hand.
 //
 // SECURITY POSTURE — every result is a HINT TO VERIFY, NEVER A TRUSTED FACT.
 // Each service here is identified by an UNAUTHENTICATED endpoint (Prowlarr's
-// /initialize.json, qBittorrent's webapiVersion, NZBGet's Server header,
-// Jellyfin's /System/Info/Public). Any host reachable on the same network can
-// serve a fake response and impersonate one of these — so a Finding only ever
-// says "possible X instance," and nothing here auto-saves a connection or
-// treats a URL as confirmed. That is why the returned Finding type carries no
-// credential of any kind: even for Prowlarr, whose /initialize.json exposes a
-// live API key in plaintext, this package deliberately decodes only the
-// identity field and discards the key. Retrieving the key is a separate,
-// explicit operator action (FetchProwlarrAPIKey), never bundled into a probe.
+// /initialize.json, qBittorrent's
+// webapiVersion, NZBGet's Server header, Jellyfin's /System/Info/Public). Any
+// host reachable on the same network can serve a fake response and
+// impersonate one of these — so a Finding only ever says "possible X
+// instance," and nothing here auto-saves a connection or treats a URL as
+// confirmed. That is why the returned Finding type carries no credential of
+// any kind: even for Prowlarr, whose /initialize.json exposes a live
+// API key in plaintext, this package deliberately decodes only the identity
+// field and discards the key. Retrieving the key is a separate, explicit
+// operator action (FetchProwlarrAPIKey), never bundled into a probe.
 //
 // There is deliberately NO subnet/CIDR sweep and no worker pool: only a short
 // fixed list of conventional container hostnames (ProbeKnownHosts) and a
@@ -162,7 +163,9 @@ func probeService(ctx context.Context, httpClient *http.Client, name, baseURL st
 // /initialize.json. CRITICAL: that endpoint also returns a live API key in
 // plaintext, but this decodes ONLY instanceName — the key is never read into
 // memory here, so the returned Finding is provably credential-free. Fetching
-// the key is a separate, explicit action (FetchProwlarrAPIKey).
+// the key is a separate, explicit action (FetchProwlarrAPIKey). The
+// instanceName field is matched case-insensitively to confirm identity (not
+// just "something Servarr-shaped is listening").
 func probeProwlarr(ctx context.Context, httpClient *http.Client, baseURL string) (Finding, bool) {
 	ctx, cancel := context.WithTimeout(ctx, probeTimeout)
 	defer cancel()
@@ -284,14 +287,14 @@ func probeJellyfin(ctx context.Context, httpClient *http.Client, baseURL string)
 	return Finding{Service: "jellyfin", URL: baseURL, Label: "possible Jellyfin instance"}, true
 }
 
-// FetchProwlarrAPIKey re-fetches Prowlarr's /initialize.json fresh from url
-// specifically to retrieve the live API key it exposes in plaintext. This is
-// SEPARATE from the probes on purpose: it's the only path that reads the key,
-// and it runs ONLY when the operator explicitly asks for it (a dedicated
-// button/route) — never bundled into a discovery response, never fired
-// automatically. The returned key is still a hint to verify: it's whatever
-// the host at url served, which is only trustworthy if url really is the
-// operator's own Prowlarr.
+// FetchProwlarrAPIKey re-fetches a Prowlarr instance's /initialize.json fresh
+// from url specifically to retrieve the live API key it exposes in plaintext.
+// This is SEPARATE from the probes on purpose: it's the only path that reads
+// the key, and it runs ONLY when the operator explicitly asks for it (a
+// dedicated button/route) — never bundled into a discovery response, never
+// fired automatically. The returned key is still a hint to verify: it's
+// whatever the host at url served, which is only trustworthy if url really is
+// the operator's own instance.
 //
 // url is validated the same way ProbeHost validates a host — must resolve to
 // a private/LAN address — before any request is made. Unlike ProbeHost/
@@ -325,7 +328,7 @@ func FetchProwlarrAPIKey(ctx context.Context, httpClient *http.Client, rawURL st
 		return "", err
 	}
 	if payload.APIKey == "" {
-		return "", errors.New("no API key found at that URL — is it really a Prowlarr instance?")
+		return "", fmt.Errorf("no API key found at that URL — is it really a Prowlarr instance?")
 	}
 	return payload.APIKey, nil
 }
