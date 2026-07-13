@@ -6,29 +6,48 @@ normal UI and need the out-of-band recovery credential.
 
 ## When you need this
 
-SAK's deploy on server1 (`sakms-auto-update.service`, container `sakms`,
-`media-admin.zaena.us`) **wipes `/mnt/iscsi/sakms` on every run** — that's the
-standing pre-alpha data policy (see `~/CLAUDE.md`). The wipe deletes the
-SQLite DB **and** `secret.key`. On the next container start SAK regenerates
-`secret.key` and, because the auth store is now empty, mints a **fresh
-`X-Api-Key`** and logs it **exactly once**:
+**Corrected 2026-07-13**: as of 2026-07-12, `sakms-auto-update.py`'s `deploy()`
+no longer wipes `/mnt/iscsi/sakms` on a *normal* successful deploy — that
+wipe-every-run pre-alpha policy was removed (Wade's explicit ask, see the
+script's own header comment on server1). Data now only gets wiped in two
+cases: **(1)** the failure-path `rollback()` still wipes unconditionally
+before restoring the last-known-good version, and **(2)** a manual, opt-in
+`--wipe-data` CLI flag run directly on server1 (not reachable via the
+systemd service). A normal, successful deploy — even one that ships a
+runtime-broken frontend shell — does **not** wipe anything, because
+`health_ok()` only checks the unconditional `GET /healthz` and never
+exercises the frontend/auth-boot path, so it can report "succeeded" on a
+broken build without ever reaching the rollback (and therefore the wipe)
+path at all.
 
-```
-API key generated (shown once, store it now): <KEY>
-```
+This means the scenario below is now **two separate cases with different
+recovery paths**, not one:
 
-(Source: `cmd/sakms/main.go:104`, gated on `internal/auth`'s `EnsureAPIKey`
-returning a non-empty key — which only happens when the store is empty, i.e.
-first boot or post-wipe. A restart that did **not** wipe reuses the persisted
-key and logs nothing.)
+- **A rolled-back or manually-wiped instance** genuinely has an empty auth
+  store, and SAK regenerates `secret.key` + mints a **fresh `X-Api-Key`**,
+  logged **exactly once**:
 
-That `X-Api-Key` is the last-resort recovery credential. You need it when a
-deploy lands with a **broken auth-boot shell** — the frontend builds and
-serves, but the login screen / setup wizard is broken at runtime, so you
-cannot authenticate through the browser. Because the deploy just wiped the DB,
-you're also dropped onto a fresh setup state. There is deliberately **no
-`/legacy` frontend fallback** (dead code, against this project's conventions),
-so this key is the actual safety net for the frontend cutover.
+  ```
+  API key generated (shown once, store it now): <KEY>
+  ```
+
+  (Source: `cmd/sakms/main.go:104`, gated on `internal/auth`'s
+  `EnsureAPIKey` returning non-empty — only true when the store is empty,
+  i.e. first boot, post-rollback, or post-manual-wipe. A normal successful
+  deploy does **not** hit this path and logs nothing new.)
+
+- **A normal deploy that ships a runtime-broken shell** leaves the *existing*
+  auth store and `X-Api-Key` completely intact — no new key is minted, no
+  data is lost, but the frontend/auth-boot may be too broken to use the UI
+  at all. The **already-existing** `X-Api-Key` (from whenever the instance
+  was last actually rolled-back or wiped — possibly a long time ago) is
+  still the recovery credential in this case; you just aren't looking for a
+  *freshly logged* one.
+
+There is deliberately **no `/legacy` frontend fallback** (dead code, against
+this project's conventions), so the `X-Api-Key` — fresh or pre-existing,
+depending on which case above applies — is the actual safety net for the
+frontend cutover.
 
 ## Step 1 — Retrieve the key from the container log
 
@@ -69,16 +88,19 @@ curl -s https://media-admin.zaena.us/api/auth/status
 ```
 
 The right recovery depends on `configured`, and **the break-glass key is only
-actually required in Case B** — a fresh post-wipe instance (Case A) recovers
-through public endpoints.
+actually required in Case B** — a fresh post-rollback/post-wipe instance
+(Case A) recovers through public endpoints. **`configured:false` is no
+longer the normal state after an ordinary deploy** (see the corrected note
+above — normal deploys preserve data now); you'll see it after a
+`rollback()` or a manual `--wipe-data` run specifically, not routinely.
 
-### Case A — `configured:false` (the normal post-wipe state)
+### Case A — `configured:false` (after a rollback or manual wipe only)
 
-A wiped instance has no login yet, so boot lands on the **public setup
-wizard**. If the wizard renders, just use it — no key needed. If the wizard
-shell is broken at runtime, POST the setup body directly. This route is public
-(first-run bootstrap) — password mode returns `204` and configures the
-operator login in one call:
+A wiped/rolled-back instance has no login yet, so boot lands on the **public
+setup wizard**. If the wizard renders, just use it — no key needed. If the
+wizard shell is broken at runtime, POST the setup body directly. This route
+is public (first-run bootstrap) — password mode returns `204` and configures
+the operator login in one call:
 
 ```sh
 curl -X POST https://media-admin.zaena.us/api/auth/setup \
