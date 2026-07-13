@@ -127,6 +127,47 @@ func TestUpdateStatus_NotFound(t *testing.T) {
 	}
 }
 
+func TestFlag_RoundTripsAndDefaultsUnflagged(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	created, err := s.Create(ctx, Grab{
+		Mode: mode.Movies, Title: "Some Movie", TMDBID: 123,
+		Indexer: "I", Protocol: "torrent", DownloadClient: "qbittorrent", RootFolderPath: "/movies",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// A brand-new grab is unflagged by default.
+	if created.FlaggedForReview || created.FlagReason != "" {
+		t.Fatalf("new grab should be unflagged, got flagged=%v reason=%q", created.FlaggedForReview, created.FlagReason)
+	}
+
+	const reason = "imported file runs 4 min but TMDB lists 100 min — possible mislabel or wrong content"
+	if err := s.Flag(ctx, created.ID, reason); err != nil {
+		t.Fatalf("Flag: %v", err)
+	}
+
+	got, err := s.Get(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if !got.FlaggedForReview || got.FlagReason != reason {
+		t.Fatalf("after Flag: flagged=%v reason=%q, want true/%q", got.FlaggedForReview, got.FlagReason, reason)
+	}
+	// The flag must NOT touch the lifecycle status — the import still succeeded.
+	if got.Status != Queued {
+		t.Fatalf("Flag changed status to %q; it must leave the lifecycle status alone", got.Status)
+	}
+}
+
+func TestFlag_NotFound(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.Flag(context.Background(), 999, "x"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected ErrNotFound flagging a missing grab, got %v", err)
+	}
+}
+
 func TestList_ScopedByModeAndOrderedNewestFirst(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()

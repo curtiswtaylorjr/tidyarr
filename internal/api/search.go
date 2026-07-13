@@ -12,7 +12,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/curtiswtaylorjr/sakms/internal/autograb"
 	"github.com/curtiswtaylorjr/sakms/internal/connections"
+	"github.com/curtiswtaylorjr/sakms/internal/dedup"
 	"github.com/curtiswtaylorjr/sakms/internal/grabs"
 	"github.com/curtiswtaylorjr/sakms/internal/library"
 	"github.com/curtiswtaylorjr/sakms/internal/mode"
@@ -295,7 +297,7 @@ func classifyNZBGetState(state string) grabs.Status {
 // a manual, human-triggered refresh (there is no background poller anywhere
 // in this program) — the user clicks it, same as every other mutating
 // action in SAK.
-func checkImportHandler(httpClient *http.Client, connStore *connections.Store, settingsStore *settings.Store, grabsStore *grabs.Store, libStore *library.Store) http.HandlerFunc {
+func checkImportHandler(httpClient *http.Client, connStore *connections.Store, settingsStore *settings.Store, grabsStore *grabs.Store, libStore *library.Store, prober dedup.Prober) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 		id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
@@ -466,6 +468,12 @@ func checkImportHandler(httpClient *http.Client, connStore *connections.Store, s
 				http.Error(w, fmt.Sprintf("unknown mode %q", g.Mode), http.StatusInternalServerError)
 				return
 			}
+			// Post-grab mislabel check (auto-grab safety net): probe the
+			// imported file's real duration and flag the grab for review if it's
+			// wildly inconsistent with the known TMDB runtime. Strictly advisory
+			// — the import already succeeded — so it never fails the handler.
+			postGrabRuntimeReview(ctx, prober, grabsStore, sess, g, changes)
+
 			sess.NotifyPlayers(ctx, changes)
 			newStatus = grabs.Imported
 		}
@@ -483,4 +491,50 @@ func checkImportHandler(httpClient *http.Client, connStore *connections.Store, s
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(updated)
 	}
+}
+
+// postGrabRuntimeReview runs auto-grab's post-grab mislabel check on a
+// freshly imported grab: it probes the imported file's actual duration and, on
+// a gross mismatch with the title's known TMDB runtime, flags the grab for
+// operator review (internal/autograb.RuntimeMismatch defines "gross").
+//
+// It is strictly ADVISORY — the import has already succeeded by the time it
+// runs — so every uncertain path is a silent skip, never an error that fails
+// the import or a false-positive flag: nil prober/TMDB client, unknown TMDB
+// id, more than one imported file (ambiguous which to probe), a probe error,
+// or an unknown/zero duration on either side all skip the check.
+//
+// Only Movies is wired: it's the one mode with a single file and a single,
+// unambiguous known runtime (TMDB /movie/{id}). Series is skipped because the
+// current TMDB client doesn't fetch a per-episode runtime (and a season pack's
+// total is ambiguous regardless); Adult is skipped because TPDB's pre-grab
+// scene runtime is unconfirmed (see the plan's Open Items). Both are safe
+// skips, consistent with never false-positive-flagging.
+func postGrabRuntimeReview(ctx context.Context, prober dedup.Prober, grabsStore *grabs.Store, sess *mode.Session, g *grabs.Grab, changes []mode.PathChange) {
+	if prober == nil || sess.TMDB == nil || g.TMDBID == 0 {
+		return
+	}
+	if g.Mode != mode.Movies || len(changes) != 1 {
+		return
+	}
+
+	details, err := sess.TMDB.MovieDetails(ctx, g.TMDBID)
+	if err != nil || details.Runtime <= 0 {
+		return
+	}
+
+	probe, err := prober.Probe(ctx, changes[0].Path)
+	if err != nil {
+		return
+	}
+
+	mismatch, checked := autograb.RuntimeMismatch(probe.Duration, float64(details.Runtime*60))
+	if !checked || !mismatch {
+		return
+	}
+
+	// Best-effort: a flag failure must not undo an already-successful import.
+	_ = grabsStore.Flag(ctx, g.ID, fmt.Sprintf(
+		"imported file runs %.0f min but TMDB lists %d min — possible mislabel or wrong content",
+		probe.Duration/60, details.Runtime))
 }

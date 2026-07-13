@@ -64,8 +64,16 @@ type Grab struct {
 	ClientRef      string `json:"clientRef,omitempty"`
 	Status         Status `json:"status"`
 	RootFolderPath string `json:"rootFolderPath"`
-	CreatedAt      string `json:"createdAt"`
-	UpdatedAt      string `json:"updatedAt"`
+	// FlaggedForReview is set by auto-grab's post-grab mislabel check (see
+	// internal/autograb.RuntimeMismatch) when an imported file's actual
+	// duration is wildly inconsistent with the known TMDB/TPDB runtime. The
+	// import still succeeded — this is an advisory signal for the operator to
+	// review, and for the Discover UI to badge — not a lifecycle status.
+	// FlagReason is a short human-readable explanation ("" when not flagged).
+	FlaggedForReview bool   `json:"flaggedForReview,omitempty"`
+	FlagReason       string `json:"flagReason,omitempty"`
+	CreatedAt        string `json:"createdAt"`
+	UpdatedAt        string `json:"updatedAt"`
 }
 
 type Store struct {
@@ -99,7 +107,7 @@ func (s *Store) Create(ctx context.Context, g Grab) (Grab, error) {
 func (s *Store) List(ctx context.Context, m mode.Mode) ([]Grab, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, mode, title, tmdb_id, tvdb_id, season_number, episode_number, season_specified, quality_profile_id, indexer, protocol,
-		       download_client, client_ref, status, root_folder_path, created_at, updated_at
+		       download_client, client_ref, status, root_folder_path, flagged_for_review, flag_reason, created_at, updated_at
 		FROM grabs WHERE mode = ? ORDER BY created_at DESC
 	`, string(m))
 	if err != nil {
@@ -125,7 +133,7 @@ func (s *Store) List(ctx context.Context, m mode.Mode) ([]Grab, error) {
 func (s *Store) Get(ctx context.Context, id int64) (*Grab, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT id, mode, title, tmdb_id, tvdb_id, season_number, episode_number, season_specified, quality_profile_id, indexer, protocol,
-		       download_client, client_ref, status, root_folder_path, created_at, updated_at
+		       download_client, client_ref, status, root_folder_path, flagged_for_review, flag_reason, created_at, updated_at
 		FROM grabs WHERE id = ?
 	`, id)
 	g, err := scanGrab(row)
@@ -151,6 +159,22 @@ func (s *Store) UpdateStatus(ctx context.Context, id int64, status Status) error
 	return checkAffected(res, id)
 }
 
+// Flag marks a grab for operator review — used by auto-grab's post-grab
+// mislabel check when the imported file's actual duration is wildly
+// inconsistent with the known TMDB/TPDB runtime. It does not touch the grab's
+// lifecycle status (the import still succeeded); it only sets the advisory
+// flag and its reason. Idempotent — re-flagging with the same reason is a
+// harmless no-op beyond the updated_at bump.
+func (s *Store) Flag(ctx context.Context, id int64, reason string) error {
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE grabs SET flagged_for_review = 1, flag_reason = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?
+	`, reason, id)
+	if err != nil {
+		return fmt.Errorf("flagging grab %d: %w", id, err)
+	}
+	return checkAffected(res, id)
+}
+
 // rowScanner is satisfied by both *sql.Row and *sql.Rows, so scanGrab works
 // for List and Get alike.
 type rowScanner interface {
@@ -161,7 +185,7 @@ func scanGrab(row rowScanner) (Grab, error) {
 	var g Grab
 	var m string
 	err := row.Scan(&g.ID, &m, &g.Title, &g.TMDBID, &g.TVDBID, &g.SeasonNumber, &g.EpisodeNumber, &g.SeasonSpecified, &g.QualityProfileID, &g.Indexer, &g.Protocol,
-		&g.DownloadClient, &g.ClientRef, &g.Status, &g.RootFolderPath, &g.CreatedAt, &g.UpdatedAt)
+		&g.DownloadClient, &g.ClientRef, &g.Status, &g.RootFolderPath, &g.FlaggedForReview, &g.FlagReason, &g.CreatedAt, &g.UpdatedAt)
 	g.Mode = mode.Mode(m)
 	return g, err
 }
