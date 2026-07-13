@@ -392,10 +392,12 @@ type AutoGrabResponse struct {
 // of internal/proposals.Proposal's wire shape — only the fields the Rename view
 // actually reads (see internal/web/static/index.html's renderRename, ported to
 // frontend/src/screens/Rename.tsx). It is deliberately NOT a full mirror of the
-// domain struct: the Dedup-only Candidates slice and the Adult-give-back-only
-// Studio/Date fields belong to the Purge/Dedup/Tag waves and are added here
-// when those land, per Guardrail #4's "DTO set grows per stage." Rename being
-// the first Stage-3 wave, this establishes the shared core the siblings extend.
+// domain struct: the Dedup-only Candidates slice belongs to the Purge/Dedup/Tag
+// waves and is added here when those land, per Guardrail #4's "DTO set grows
+// per stage." Studio/Date/PHash (Adult) and SeasonNumber/EpisodeNumber (Series)
+// were added in Rename's per-mode-columns follow-up (Wade-approved, see
+// .omc/handoffs/stage-3-rename.md) once the review table started surfacing
+// them — before that they were deliberately omitted as unused by the view.
 //
 // Status mirrors proposals.Status exactly ("pending" | "unmatched" | "applied"
 // | "dismissed"); the TS client narrows it to a string-literal union locally
@@ -407,7 +409,9 @@ type AutoGrabResponse struct {
 // SourceName/RootFolderPath/Reason are always present; Title/Year are only
 // meaningful once Status is pending/applied; Reason explains an unmatched row;
 // DraftID is set once a successful submit-draft ("give back") has run, so the
-// button renders as already-done and can't re-submit.
+// button renders as already-done and can't re-submit. Studio/Date/PHash are
+// Adult-only (captured from Adult identification); SeasonNumber/EpisodeNumber
+// are Series-only (a season-pack orphan produces one proposal per episode).
 type Proposal struct {
 	ID             int64  `json:"id"`
 	Status         string `json:"status"`
@@ -415,8 +419,36 @@ type Proposal struct {
 	RootFolderPath string `json:"rootFolderPath"`
 	Title          string `json:"title,omitempty"`
 	Year           int    `json:"year,omitempty"`
+	SeasonNumber   int    `json:"seasonNumber,omitempty"`
+	EpisodeNumber  int    `json:"episodeNumber,omitempty"`
+	Studio         string `json:"studio,omitempty"`
+	Date           string `json:"date,omitempty"`
+	PHash          string `json:"phash,omitempty"`
 	Reason         string `json:"reason,omitempty"`
 	DraftID        string `json:"draftId,omitempty"`
+}
+
+// --- Purge allowlist (Stage 3) --------------------------------------------
+//
+// Purge's allowlist is an editable set of tag NAMES; any tracked item whose
+// tags match one becomes a delete proposal (see internal/purge's package doc).
+// The list itself crosses the wire as a bare JSON array of strings
+// (GET /api/modes/{mode}/purge/allowlist → []string), so it needs no named
+// response DTO — the client types it as string[] directly. Only the add-body
+// warrants a DTO, below. Removal is path-only
+// (DELETE /api/modes/{mode}/purge/allowlist/{tag}), no body.
+//
+// Purge reuses the shared Proposal type above unchanged — its queue rows read
+// only Title/Status/RootFolderPath/Reason, all already present. No
+// Purge-specific proposal fields exist (no re-pick / give-back / draft), so
+// none are added here.
+
+// AllowlistAddRequest is the body of POST /api/modes/{mode}/purge/allowlist —
+// adds one tag rule to a mode's Purge allowlist. Mirrors internal/api's
+// unexported addAllowlistTagRequest exactly. Adding a tag already present is
+// not an error (see allowlist.Store.Add).
+type AllowlistAddRequest struct {
+	Tag string `json:"tag"`
 }
 
 // RepickRequest is the body of POST /api/proposals/{id}/repick — Rename's

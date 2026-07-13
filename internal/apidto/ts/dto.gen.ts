@@ -398,7 +398,9 @@ export interface AutoGrabResponse {
  * SourceName/RootFolderPath/Reason are always present; Title/Year are only
  * meaningful once Status is pending/applied; Reason explains an unmatched row;
  * DraftID is set once a successful submit-draft ("give back") has run, so the
- * button renders as already-done and can't re-submit.
+ * button renders as already-done and can't re-submit. Studio/Date/PHash are
+ * Adult-only (captured from Adult identification); SeasonNumber/EpisodeNumber
+ * are Series-only (a season-pack orphan produces one proposal per episode).
  */
 export interface Proposal {
   id: number /* int64 */;
@@ -407,8 +409,22 @@ export interface Proposal {
   rootFolderPath: string;
   title?: string;
   year?: number /* int */;
+  seasonNumber?: number /* int */;
+  episodeNumber?: number /* int */;
+  studio?: string;
+  date?: string;
+  phash?: string;
   reason?: string;
   draftId?: string;
+}
+/**
+ * AllowlistAddRequest is the body of POST /api/modes/{mode}/purge/allowlist —
+ * adds one tag rule to a mode's Purge allowlist. Mirrors internal/api's
+ * unexported addAllowlistTagRequest exactly. Adding a tag already present is
+ * not an error (see allowlist.Store.Add).
+ */
+export interface AllowlistAddRequest {
+  tag: string;
 }
 /**
  * RepickRequest is the body of POST /api/proposals/{id}/repick — Rename's
