@@ -29,17 +29,30 @@ type Scene struct {
 	Title string
 	Date  string
 	Site  string // studio name
+	Image string // scene thumbnail/poster URL (may be empty; see rawScene.Image)
 }
 
 type rawSite struct {
 	Name string `json:"name"`
 }
 
+// rawScene mirrors the fields this client consumes from a TPDB v2 scene object.
+// Image is TPDB's top-level "image" field — the primary scene still/poster URL,
+// served from TPDB's own image CDN (cdn.theporndb.net, and legacy
+// cdn.metadataapi.net — both subdomains of the domains internal/imageproxy
+// already allowlists). The scene object also carries poster_image/poster and a
+// posters[] array, but the flat "image" field is the one universally present
+// and is what the Discover thumbnail uses. It can be empty for scenes with no
+// art, so consumers must degrade gracefully. Anchored to TPDB's documented v2
+// scene shape (Jellyfin/Plex TPDB agents, community Go clients); the field is
+// modeled from that documentation, not confirmed against a live authenticated
+// instance in-repo.
 type rawScene struct {
 	ID    string   `json:"_id"`
 	Title string   `json:"title"`
 	Date  string   `json:"date"`
 	Site  *rawSite `json:"site"`
+	Image string   `json:"image"`
 }
 
 func (s rawScene) toScene() Scene {
@@ -47,7 +60,7 @@ func (s rawScene) toScene() Scene {
 	if s.Site != nil {
 		site = s.Site.Name
 	}
-	return Scene{ID: s.ID, Title: s.Title, Date: s.Date, Site: site}
+	return Scene{ID: s.ID, Title: s.Title, Date: s.Date, Site: site, Image: s.Image}
 }
 
 type scenesResponse struct {

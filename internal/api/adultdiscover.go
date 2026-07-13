@@ -16,11 +16,18 @@ import (
 // lowercase-tagged tmdb.Item. tpdbrest.Scene itself carries NO json tags, so
 // encoding it raw would emit capitalized keys (ID/Title/Site/Date) the frontend
 // doesn't read — hence this explicit mapping (note Site → studio).
+//
+// Image is the scene thumbnail URL (TPDB's flat "image" field, served from
+// cdn.theporndb.net — already covered by internal/imageproxy's allowlist). It
+// is often empty (many scenes carry no art), so the frontend must render a
+// text-only card when it's blank and route non-empty values through the image
+// proxy, never hot-link TPDB directly (plan Decision #7).
 type adultScene struct {
 	ID     string `json:"id"`
 	Title  string `json:"title"`
 	Studio string `json:"studio"`
 	Date   string `json:"date"`
+	Image  string `json:"image"`
 }
 
 // adultDiscoverHandler backs Adult's Discover screen against ThePornDB's REST
@@ -71,7 +78,7 @@ func adultDiscoverHandler(httpClient *http.Client, connStore *connections.Store)
 
 		out := make([]adultScene, len(scenes))
 		for i, s := range scenes {
-			out[i] = adultScene{ID: s.ID, Title: s.Title, Studio: s.Site, Date: s.Date}
+			out[i] = adultScene{ID: s.ID, Title: s.Title, Studio: s.Site, Date: s.Date, Image: s.Image}
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(out)

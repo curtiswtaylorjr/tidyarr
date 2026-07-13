@@ -122,10 +122,15 @@ describe("boot branch: authed app shell", () => {
         return jsonResponse(authStatus({ mode: "password", authenticated: true }));
       }
       if (url === "/api/setup/status") return jsonResponse({ dismissed: true });
+      // The app shell renders the read-only Discover view, which fetches the
+      // Movies trending/popular rows on mount — stub them empty (no cards, so
+      // no availability probes fire).
+      if (url.includes("/discover")) return jsonResponse([]);
       throw new Error("unexpected " + url);
     });
     render(() => <App />);
-    expect(await screen.findByText(/You're in\./)).toBeInTheDocument();
+    // The header's "Log out" control is the stable "we're in the app" marker.
+    expect(await screen.findByText("Log out")).toBeInTheDocument();
   });
 
   it("auth mode = none boots straight to the app with the disabled-auth banner", async () => {
@@ -134,10 +139,11 @@ describe("boot branch: authed app shell", () => {
         return jsonResponse(authStatus({ mode: "none", authenticated: true }));
       }
       if (url === "/api/setup/status") return jsonResponse({ dismissed: true });
+      if (url.includes("/discover")) return jsonResponse([]);
       throw new Error("unexpected " + url);
     });
     render(() => <App />);
-    expect(await screen.findByText(/You're in\./)).toBeInTheDocument();
+    expect(await screen.findByText("Log out")).toBeInTheDocument();
     expect(
       screen.getByText(/Authentication is disabled for this instance/),
     ).toBeInTheDocument();
@@ -152,12 +158,16 @@ describe("session expiry mid-app (requirement #6)", () => {
         return jsonResponse(authStatus({ mode: "password", authenticated: authed }));
       }
       if (url === "/api/setup/status") return jsonResponse({ dismissed: true });
-      // any protected app request 401s once the session is gone
-      return new Response("unauthorized", { status: 401 });
+      // While the session is live, the app-shell Discover view's row fetches
+      // succeed (empty). Once the session is gone, any protected app request
+      // 401s — the condition this test exercises.
+      if (!authed) return new Response("unauthorized", { status: 401 });
+      if (url.includes("/discover")) return jsonResponse([]);
+      return jsonResponse([]);
     });
 
     render(() => <App />);
-    expect(await screen.findByText(/You're in\./)).toBeInTheDocument();
+    expect(await screen.findByText("Log out")).toBeInTheDocument();
 
     // The session expires; a mid-app request to a protected endpoint 401s.
     authed = false;

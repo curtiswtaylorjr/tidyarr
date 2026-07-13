@@ -17,17 +17,18 @@
 // surface to any host an attacker controls. Dot-anchoring on the suffix match
 // stops "image.tmdb.org.evil.com" / "evilmetadataapi.net" style bypasses.
 //
-// UNVERIFIED ASSUMPTION (honesty-about-guesses convention, project CLAUDE.md):
-// the TPDB image hosts here are best-effort. As of this writing the repo does
-// not model any TPDB image field at all (tpdbrest.Scene / api.adultScene carry
-// no poster URL), so there is no in-repo URL to anchor this allowlist against,
-// and it was NOT confirmed against a live TPDB scene response. The two
-// domain families below (metadataapi.net, theporndb.net) are TPDB's known
-// owned domains; if TPDB actually serves scene art from a third-party CDN
-// (imgix/fastly/bunny), Adult posters will not load until this list is
-// corrected. Whoever wires the Adult Discover view must capture one real TPDB
-// scene JSON, read the actual image host and field name, and confirm/extend
-// this list before relying on it.
+// TPDB IMAGE HOST (honesty-about-guesses convention, project CLAUDE.md):
+// the repo now models the TPDB scene image field (tpdbrest.Scene.Image /
+// api.adultScene.Image / apidto.AdultDiscoverItem.Image, the scene object's
+// flat "image" field). TPDB serves that art from its own image CDN —
+// cdn.theporndb.net today, cdn.metadataapi.net historically — both of which
+// are subdomains of the two owned domains allowlisted below, so this list
+// covers the real host with no change needed. This was determined from TPDB's
+// documented v2 scene shape and the community/Jellyfin/Plex TPDB agents (which
+// read art from those CDN subdomains), NOT confirmed against a live
+// authenticated TPDB instance in-repo. If TPDB ever moves scene art onto a
+// third-party CDN (imgix/fastly/bunny) it would need a new domainHost entry;
+// until then, Adult posters resolve through the allowlist as-is.
 package imageproxy
 
 import (

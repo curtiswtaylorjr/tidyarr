@@ -208,15 +208,20 @@ export interface DiscoverItem {
 }
 /**
  * AdultDiscoverItem is one TPDB scene result for Adult Discover
- * (GET /api/modes/adult/discover) — scene-shaped, not title-shaped (no
- * poster-art equivalent; Studio substitutes for a studio/site name). Date
- * is TPDB's release date string, unparsed.
+ * (GET /api/modes/adult/discover) — scene-shaped, not title-shaped (Studio
+ * substitutes for a studio/site name). Date is TPDB's release date string,
+ * unparsed. Image is the scene thumbnail URL served from TPDB's own image CDN
+ * (cdn.theporndb.net); it is frequently empty (many scenes have no art), so
+ * the client must render a text-only card when blank and route non-empty
+ * values through the image proxy (GET /api/images/proxy?url=), never
+ * hot-linking TPDB directly (plan Decision #7).
  */
 export interface AdultDiscoverItem {
   id: string;
   title: string;
   studio: string;
   date: string;
+  image: string;
 }
 /**
  * AvailabilityResponse is GET /api/modes/{mode}/availability's response —
