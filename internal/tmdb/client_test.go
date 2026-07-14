@@ -581,6 +581,80 @@ func TestDiscoverTVByNetwork_SendsNetworkID(t *testing.T) {
 	}
 }
 
+func TestSearchKeywords_ParsesResults(t *testing.T) {
+	var gotPath, gotQuery string
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotQuery = r.URL.Query().Get("query")
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"results": [{"id": 818, "name": "based on novel"}]}`))
+	})
+
+	keywords, err := c.SearchKeywords(context.Background(), "based on novel")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if gotPath != "/search/keyword" {
+		t.Errorf("unexpected path: %s", gotPath)
+	}
+	if gotQuery != "based on novel" {
+		t.Errorf("expected query param %q, got %q", "based on novel", gotQuery)
+	}
+	if len(keywords) != 1 || keywords[0].ID != 818 || keywords[0].Name != "based on novel" {
+		t.Errorf("unexpected keywords: %+v", keywords)
+	}
+}
+
+func TestDiscoverMoviesByKeyword_SendsKeywordID(t *testing.T) {
+	var gotPath, gotKeyword string
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotKeyword = r.URL.Query().Get("with_keywords")
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(movieFixture))
+	})
+
+	items, err := c.DiscoverMoviesByKeyword(context.Background(), 818, 1)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if gotPath != "/discover/movie" {
+		t.Errorf("unexpected path: %s", gotPath)
+	}
+	if gotKeyword != "818" {
+		t.Errorf("expected with_keywords=818, got %q", gotKeyword)
+	}
+	if len(items) != 1 || items[0].MediaType != Movie {
+		t.Errorf("unexpected items: %+v", items)
+	}
+}
+
+// TestDiscoverTVByKeyword is DiscoverMoviesByKeyword's direct sibling for
+// the TV catalog.
+func TestDiscoverTVByKeyword_SendsKeywordID(t *testing.T) {
+	var gotPath, gotKeyword string
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotKeyword = r.URL.Query().Get("with_keywords")
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(tvFixture))
+	})
+
+	items, err := c.DiscoverTVByKeyword(context.Background(), 818, 1)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if gotPath != "/discover/tv" {
+		t.Errorf("unexpected path: %s", gotPath)
+	}
+	if gotKeyword != "818" {
+		t.Errorf("expected with_keywords=818, got %q", gotKeyword)
+	}
+	if len(items) != 1 || items[0].MediaType != TV {
+		t.Errorf("unexpected items: %+v", items)
+	}
+}
+
 func TestKnownStudiosAndNetworks_NotEmpty(t *testing.T) {
 	if len(KnownStudios) == 0 {
 		t.Error("expected a non-empty KnownStudios seed list")

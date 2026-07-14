@@ -435,9 +435,11 @@ func (c *Client) DiscoverTVByGenre(ctx context.Context, genreID int, page int) (
 
 // Studio is a well-known movie production company, keyed by TMDB's company
 // id — DiscoverMoviesByStudio's with_companies filter operates on this id.
+// JSON-tagged (unlike a bare internal Go type) because KnownStudios is
+// served directly to the frontend as a slider-editor reference list.
 type Studio struct {
-	ID   int
-	Name string
+	ID   int    `json:"id"`
+	Name string `json:"name"`
 }
 
 // KnownStudios is a starting seed list of major movie studios for a "browse
@@ -475,10 +477,10 @@ func (c *Client) DiscoverMoviesByStudio(ctx context.Context, companyID int, page
 // network id — DiscoverTVByNetwork's with_networks filter operates on this
 // id. Direct sibling of Studio for the TV catalog; TMDB tracks companies
 // and networks as separate id spaces, so a network id is never a company id
-// or vice versa.
+// or vice versa. JSON-tagged for the same reason as Studio.
 type Network struct {
-	ID   int
-	Name string
+	ID   int    `json:"id"`
+	Name string `json:"name"`
 }
 
 // KnownNetworks is a starting seed list of major TV networks/streaming
@@ -505,6 +507,55 @@ var KnownNetworks = []Network{
 func (c *Client) DiscoverTVByNetwork(ctx context.Context, networkID int, page int) ([]Item, error) {
 	var resp listResponse
 	if err := c.do(ctx, "/discover/tv", discoverQuery(page, "with_networks", networkID), &resp); err != nil {
+		return nil, err
+	}
+	return normalizeAll(resp.Results, TV), nil
+}
+
+// Keyword is one TMDB keyword, as returned by /search/keyword — unlike
+// Genre/Studio/Network, TMDB has no fixed enumerable keyword list (there are
+// hundreds of thousands), so a keyword-filtered slider's FilterValue is
+// resolved from free-typed admin text via SearchKeywords rather than picked
+// from a seed list.
+type Keyword struct {
+	ID   int    `json:"id"`
+	Name string `json:"name"`
+}
+
+type keywordListResponse struct {
+	Results []Keyword `json:"results"`
+}
+
+// SearchKeywords looks up TMDB keywords by free-typed text (/search/keyword)
+// — the admin slider editor's way of turning "heist" into the numeric
+// keyword id DiscoverMoviesByKeyword/DiscoverTVByKeyword actually filter on.
+func (c *Client) SearchKeywords(ctx context.Context, query string) ([]Keyword, error) {
+	q := url.Values{}
+	q.Set("query", query)
+	var resp keywordListResponse
+	if err := c.do(ctx, "/search/keyword", q, &resp); err != nil {
+		return nil, err
+	}
+	return resp.Results, nil
+}
+
+// DiscoverMoviesByKeyword returns TMDB movies tagged with keywordID (one of
+// SearchKeywords' ids), for the given 1-based page. Direct sibling of
+// DiscoverMoviesByGenre/DiscoverMoviesByStudio, filtering on with_keywords
+// instead.
+func (c *Client) DiscoverMoviesByKeyword(ctx context.Context, keywordID int, page int) ([]Item, error) {
+	var resp listResponse
+	if err := c.do(ctx, "/discover/movie", discoverQuery(page, "with_keywords", keywordID), &resp); err != nil {
+		return nil, err
+	}
+	return normalizeAll(resp.Results, Movie), nil
+}
+
+// DiscoverTVByKeyword is DiscoverMoviesByKeyword's direct sibling for the TV
+// catalog.
+func (c *Client) DiscoverTVByKeyword(ctx context.Context, keywordID int, page int) ([]Item, error) {
+	var resp listResponse
+	if err := c.do(ctx, "/discover/tv", discoverQuery(page, "with_keywords", keywordID), &resp); err != nil {
 		return nil, err
 	}
 	return normalizeAll(resp.Results, TV), nil
