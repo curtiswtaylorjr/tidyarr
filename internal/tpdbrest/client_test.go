@@ -32,6 +32,28 @@ func TestSearchByHash_ParsesResponse(t *testing.T) {
 	}
 }
 
+// TestSearchByHash_ToleratesNumericSceneID regression-covers a real production
+// error: TPDB returns a bare JSON number for _id on some scenes, not always a
+// quoted string, which the plain-string rawScene.ID field used to reject
+// outright ("json: cannot unmarshal number into Go struct field
+// rawScene.data._id of type string"). flexID must decode either shape.
+func TestSearchByHash_ToleratesNumericSceneID(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"_id":42,"title":"Numeric ID Scene","date":"2024-03-03","site":{"name":"Some Site"}}]}`))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "testkey", &http.Client{Timeout: 5 * time.Second})
+	out, err := c.SearchByHash(context.Background(), "abc123")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(out) != 1 || out[0].ID != "42" || out[0].Title != "Numeric ID Scene" {
+		t.Fatalf("got %+v", out)
+	}
+}
+
 func TestBrowseScenes_PaginatesWithoutSearchTerm(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()

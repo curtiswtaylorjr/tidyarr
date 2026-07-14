@@ -5,6 +5,7 @@ package tpdbrest
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -41,6 +42,29 @@ type rawSite struct {
 	Name string `json:"name"`
 }
 
+// flexID unmarshals a TPDB "_id" field that's normally a quoted string but
+// has been observed coming back as a bare JSON number for some scenes —
+// encoding/json refuses that straight into a string field, so every _id in
+// this package uses flexID instead of string and stringifies either shape.
+// Every downstream consumer (internal/identify, internal/library's
+// TEXT scene_id column) already treats the id as an opaque string, so this
+// stays purely a decode-time tolerance — no type changes ripple outward.
+type flexID string
+
+func (f *flexID) UnmarshalJSON(b []byte) error {
+	var s string
+	if err := json.Unmarshal(b, &s); err == nil {
+		*f = flexID(s)
+		return nil
+	}
+	var n json.Number
+	if err := json.Unmarshal(b, &n); err != nil {
+		return fmt.Errorf("_id is neither a string nor a number: %w", err)
+	}
+	*f = flexID(n.String())
+	return nil
+}
+
 // rawScene mirrors the fields this client consumes from a TPDB v2 scene object.
 // Image is TPDB's top-level "image" field — the primary scene still/poster URL,
 // served from TPDB's own image CDN (cdn.theporndb.net, and legacy
@@ -67,7 +91,7 @@ type rawSite struct {
 // byte-for-byte, indicating it targets the same API version. Confidence:
 // documented-shape + strong corroboration, NOT live-confirmed.
 type rawScene struct {
-	ID       string   `json:"_id"`
+	ID       flexID   `json:"_id"`
 	Title    string   `json:"title"`
 	Date     string   `json:"date"`
 	Site     *rawSite `json:"site"`
@@ -80,7 +104,7 @@ func (s rawScene) toScene() Scene {
 	if s.Site != nil {
 		site = s.Site.Name
 	}
-	return Scene{ID: s.ID, Title: s.Title, Date: s.Date, Site: site, Image: s.Image, Duration: s.Duration}
+	return Scene{ID: string(s.ID), Title: s.Title, Date: s.Date, Site: site, Image: s.Image, Duration: s.Duration}
 }
 
 type scenesResponse struct {
@@ -173,7 +197,7 @@ type Performer struct {
 }
 
 type rawPerformer struct {
-	ID   string `json:"_id"`
+	ID   flexID `json:"_id"`
 	Name string `json:"name"`
 }
 
@@ -191,7 +215,7 @@ func (c *Client) SearchPerformers(ctx context.Context, term string) ([]Performer
 	}
 	out := make([]Performer, len(pr.Data))
 	for i, rp := range pr.Data {
-		out[i] = Performer{ID: rp.ID, Name: rp.Name}
+		out[i] = Performer{ID: string(rp.ID), Name: rp.Name}
 	}
 	return out, nil
 }
@@ -203,7 +227,7 @@ type Site struct {
 }
 
 type rawSiteEntry struct {
-	ID   string `json:"_id"`
+	ID   flexID `json:"_id"`
 	Name string `json:"name"`
 }
 
@@ -219,7 +243,7 @@ func (c *Client) SearchSites(ctx context.Context, term string) ([]Site, error) {
 	}
 	out := make([]Site, len(sr.Data))
 	for i, rs := range sr.Data {
-		out[i] = Site{ID: rs.ID, Name: rs.Name}
+		out[i] = Site{ID: string(rs.ID), Name: rs.Name}
 	}
 	return out, nil
 }
