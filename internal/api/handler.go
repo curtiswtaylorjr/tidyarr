@@ -7,6 +7,7 @@ import (
 	"github.com/curtiswtaylorjr/sakms/internal/allowlist"
 	"github.com/curtiswtaylorjr/sakms/internal/connections"
 	"github.com/curtiswtaylorjr/sakms/internal/dedup"
+	"github.com/curtiswtaylorjr/sakms/internal/discoversliders"
 	"github.com/curtiswtaylorjr/sakms/internal/grabs"
 	"github.com/curtiswtaylorjr/sakms/internal/library"
 	"github.com/curtiswtaylorjr/sakms/internal/mode"
@@ -37,8 +38,11 @@ import (
 // in production, a fake satisfying rename.PHasher in tests) — a SEPARATE,
 // StashDB-compatible hasher from `hasher` above (internal/phash's Movies/Series
 // Dedup algorithm is a different, incompatible scheme; the two must not be
-// blurred).
-func NewMux(httpClient *http.Client, connStore *connections.Store, propStore *proposals.Store, allowStore *allowlist.Store, prober dedup.Prober, hasher dedup.PHasher, videoHasher rename.PHasher, settingsStore *settings.Store, grabsStore *grabs.Store, libStore *library.Store) *http.ServeMux {
+// blurred). slidersStore backs the admin-defined custom Discover slider
+// CRUD + resolve routes (see discover_sliders.go) — a separate concept from
+// Discover's fixed trending/popular/upcoming/genre/studio/network
+// categories above it.
+func NewMux(httpClient *http.Client, connStore *connections.Store, propStore *proposals.Store, allowStore *allowlist.Store, prober dedup.Prober, hasher dedup.PHasher, videoHasher rename.PHasher, settingsStore *settings.Store, grabsStore *grabs.Store, libStore *library.Store, slidersStore *discoversliders.Store) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/connections/test", connectionsTestHandler(httpClient))
 	mux.HandleFunc("GET /api/connections", listConnectionsHandler(connStore))
@@ -99,6 +103,26 @@ func NewMux(httpClient *http.Client, connStore *connections.Store, propStore *pr
 	// concrete path wins over the {mode} wildcard above for Adult (see
 	// adultDiscoverHandler).
 	mux.HandleFunc("GET /api/modes/adult/discover", adultDiscoverHandler(httpClient, connStore))
+	// discoverHandler's category query param now also accepts upcoming/genre/
+	// studio/network (see discover.go) alongside trending/popular — this route
+	// is unchanged, just a richer dispatch behind it.
+	mux.HandleFunc("GET /api/modes/{mode}/discover/genres", discoverGenresHandler(httpClient, connStore, settingsStore))
+	// Studio/network/keyword reference lists are global, not mode-scoped — a
+	// TMDB company/network/keyword id means the same thing regardless of
+	// which mode's Discover screen or admin slider editor is asking.
+	mux.HandleFunc("GET /api/discover/studios", discoverStudiosHandler())
+	mux.HandleFunc("GET /api/discover/networks", discoverNetworksHandler())
+	mux.HandleFunc("GET /api/discover/keywords", discoverKeywordsHandler(httpClient, connStore, settingsStore))
+	// Admin-defined custom Discover sliders (Seerr's CreateSlider/
+	// DiscoverSliderEdit equivalent) — CRUD + reorder on the stored config,
+	// plus resolve to fetch a slider's actual TMDB items (see
+	// discover_sliders.go).
+	mux.HandleFunc("GET /api/discover/sliders", listSlidersHandler(slidersStore))
+	mux.HandleFunc("POST /api/discover/sliders", createSliderHandler(slidersStore))
+	mux.HandleFunc("PUT /api/discover/sliders/{id}", updateSliderHandler(slidersStore))
+	mux.HandleFunc("DELETE /api/discover/sliders/{id}", deleteSliderHandler(slidersStore))
+	mux.HandleFunc("POST /api/discover/sliders/reorder", reorderSlidersHandler(slidersStore))
+	mux.HandleFunc("GET /api/discover/sliders/{id}/resolve", resolveSliderHandler(httpClient, connStore, settingsStore, slidersStore))
 	// Image proxy: server-side-fetch + cache poster/thumbnail art from the
 	// allowlisted TMDB/TPDB image hosts so the browser never hot-links them
 	// (see images.go / internal/imageproxy). Read-only, auth-gated like every

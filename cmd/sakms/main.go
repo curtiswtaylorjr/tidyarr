@@ -19,6 +19,7 @@ import (
 	"github.com/curtiswtaylorjr/sakms/internal/config"
 	"github.com/curtiswtaylorjr/sakms/internal/connections"
 	"github.com/curtiswtaylorjr/sakms/internal/db"
+	"github.com/curtiswtaylorjr/sakms/internal/discoversliders"
 	"github.com/curtiswtaylorjr/sakms/internal/grabs"
 	"github.com/curtiswtaylorjr/sakms/internal/library"
 	"github.com/curtiswtaylorjr/sakms/internal/mediainfo"

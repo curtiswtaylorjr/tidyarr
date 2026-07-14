@@ -705,3 +705,90 @@ export interface NetscanProwlarrKeyRequest {
 export interface NetscanProwlarrKeyResponse {
   apiKey: string;
 }
+/**
+ * Genre is one TMDB genre — mirrors tmdb.Genre's wire shape. Backs GET
+ * /api/modes/{mode}/discover/genres (a movie or TV genre list depending on
+ * {mode}'s media type) and is the reference list a "genre" slider's
+ * FilterValue picks from.
+ */
+export interface Genre {
+  id: number /* int */;
+  name: string;
+}
+/**
+ * Studio is a well-known movie production company — mirrors tmdb.Studio.
+ * Backs GET /api/discover/studios, the fixed seed-list reference a "browse
+ * by studio" row / "studio" slider's FilterValue picks from. Movies-only —
+ * TMDB companies are a movie-catalog concept with no TV equivalent (see
+ * Network below for TV's parallel concept).
+ */
+export interface Studio {
+  id: number /* int */;
+  name: string;
+}
+/**
+ * Network is a well-known TV network/streaming service — mirrors
+ * tmdb.Network. Backs GET /api/discover/networks, Studio's direct sibling
+ * for the TV catalog (TV-only, symmetric restriction to Studio's
+ * movies-only one).
+ */
+export interface Network {
+  id: number /* int */;
+  name: string;
+}
+/**
+ * Keyword is one TMDB keyword search result — mirrors tmdb.Keyword. Backs
+ * GET /api/discover/keywords?q=, the free-text lookup an admin slider editor
+ * uses to resolve typed text (e.g. "heist") into the numeric TMDB keyword id
+ * a "keyword" filter_type slider actually stores as FilterValue — unlike
+ * Genre/Studio/Network, TMDB has no fixed enumerable keyword list to serve
+ * as a seed list.
+ */
+export interface Keyword {
+  id: number /* int */;
+  name: string;
+}
+/**
+ * Slider is one admin-defined custom Discover row — mirrors
+ * discoversliders.Slider's wire shape. FilterType is one of "genre" |
+ * "keyword" | "studio" | "network" | "upcoming" | "trending" | "popular";
+ * Target restricts results to "movie" | "tv" | "mixed". FilterValue is a
+ * stringified TMDB id (genre/studio/network/keyword) and is empty for the
+ * three fixed feeds (upcoming/trending/popular) — see
+ * discoversliders.Store's validate for the enforced pairing rule.
+ */
+export interface Slider {
+  id: number /* int */;
+  title: string;
+  filterType: string;
+  filterValue?: string;
+  target: string;
+  sortOrder: number /* int */;
+  enabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+/**
+ * SliderUpsertRequest is the body of POST /api/discover/sliders (create) and
+ * PUT /api/discover/sliders/{id} (update) — every editable field, mirroring
+ * discoversliders.Store.Create/Update's parameters exactly. Nothing in a
+ * slider is a secret, so unlike ConnectionUpsertRequest.APIKey every field
+ * here is a plain (non-pointer) required value — there is no "preserve
+ * unchanged" partial-update mode; a save always sends the full slider.
+ */
+export interface SliderUpsertRequest {
+  title: string;
+  filterType: string;
+  filterValue?: string;
+  target: string;
+  enabled: boolean;
+}
+/**
+ * SliderReorderRequest is POST /api/discover/sliders/reorder's body — ids in
+ * display order, covering every existing slider exactly once. One explicit
+ * "here is the full new order" action, not a per-item bulk mutation (see
+ * discoversliders.Store.Reorder's doc comment for why).
+ */
+export interface SliderReorderRequest {
+  ids: number /* int */[];
+}

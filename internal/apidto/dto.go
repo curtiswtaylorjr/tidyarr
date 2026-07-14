@@ -754,3 +754,94 @@ type NetscanProwlarrKeyRequest struct {
 type NetscanProwlarrKeyResponse struct {
 	APIKey string `json:"apiKey"`
 }
+
+// --- Discover: TMDB categories + custom sliders (mainstream-discover-seerr) -
+//
+// Seerr-inspired Discover category rows layered on top of the existing
+// trending/popular DiscoverItem rows: fixed built-in categories (Upcoming,
+// browse-by-genre/studio/network) plus a fully admin-defined custom-slider
+// system (Seerr's CreateSlider/DiscoverSliderEdit equivalent). Item rows for
+// every one of these categories (including a resolved slider) reuse
+// DiscoverItem unchanged above — Upcoming/genre/studio/network/keyword
+// results are still just TMDB movie/TV titles, wire-identical to
+// trending/popular, so no new item type is introduced here.
+
+// Genre is one TMDB genre — mirrors tmdb.Genre's wire shape. Backs GET
+// /api/modes/{mode}/discover/genres (a movie or TV genre list depending on
+// {mode}'s media type) and is the reference list a "genre" slider's
+// FilterValue picks from.
+type Genre struct {
+	ID   int    `json:"id"`
+	Name string `json:"name"`
+}
+
+// Studio is a well-known movie production company — mirrors tmdb.Studio.
+// Backs GET /api/discover/studios, the fixed seed-list reference a "browse
+// by studio" row / "studio" slider's FilterValue picks from. Movies-only —
+// TMDB companies are a movie-catalog concept with no TV equivalent (see
+// Network below for TV's parallel concept).
+type Studio struct {
+	ID   int    `json:"id"`
+	Name string `json:"name"`
+}
+
+// Network is a well-known TV network/streaming service — mirrors
+// tmdb.Network. Backs GET /api/discover/networks, Studio's direct sibling
+// for the TV catalog (TV-only, symmetric restriction to Studio's
+// movies-only one).
+type Network struct {
+	ID   int    `json:"id"`
+	Name string `json:"name"`
+}
+
+// Keyword is one TMDB keyword search result — mirrors tmdb.Keyword. Backs
+// GET /api/discover/keywords?q=, the free-text lookup an admin slider editor
+// uses to resolve typed text (e.g. "heist") into the numeric TMDB keyword id
+// a "keyword" filter_type slider actually stores as FilterValue — unlike
+// Genre/Studio/Network, TMDB has no fixed enumerable keyword list to serve
+// as a seed list.
+type Keyword struct {
+	ID   int    `json:"id"`
+	Name string `json:"name"`
+}
+
+// Slider is one admin-defined custom Discover row — mirrors
+// discoversliders.Slider's wire shape. FilterType is one of "genre" |
+// "keyword" | "studio" | "network" | "upcoming" | "trending" | "popular";
+// Target restricts results to "movie" | "tv" | "mixed". FilterValue is a
+// stringified TMDB id (genre/studio/network/keyword) and is empty for the
+// three fixed feeds (upcoming/trending/popular) — see
+// discoversliders.Store's validate for the enforced pairing rule.
+type Slider struct {
+	ID          int    `json:"id"`
+	Title       string `json:"title"`
+	FilterType  string `json:"filterType"`
+	FilterValue string `json:"filterValue,omitempty"`
+	Target      string `json:"target"`
+	SortOrder   int    `json:"sortOrder"`
+	Enabled     bool   `json:"enabled"`
+	CreatedAt   string `json:"createdAt"`
+	UpdatedAt   string `json:"updatedAt"`
+}
+
+// SliderUpsertRequest is the body of POST /api/discover/sliders (create) and
+// PUT /api/discover/sliders/{id} (update) — every editable field, mirroring
+// discoversliders.Store.Create/Update's parameters exactly. Nothing in a
+// slider is a secret, so unlike ConnectionUpsertRequest.APIKey every field
+// here is a plain (non-pointer) required value — there is no "preserve
+// unchanged" partial-update mode; a save always sends the full slider.
+type SliderUpsertRequest struct {
+	Title       string `json:"title"`
+	FilterType  string `json:"filterType"`
+	FilterValue string `json:"filterValue,omitempty"`
+	Target      string `json:"target"`
+	Enabled     bool   `json:"enabled"`
+}
+
+// SliderReorderRequest is POST /api/discover/sliders/reorder's body — ids in
+// display order, covering every existing slider exactly once. One explicit
+// "here is the full new order" action, not a per-item bulk mutation (see
+// discoversliders.Store.Reorder's doc comment for why).
+type SliderReorderRequest struct {
+	IDs []int `json:"ids"`
+}
