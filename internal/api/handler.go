@@ -14,6 +14,7 @@ import (
 	"github.com/curtiswtaylorjr/sakms/internal/proposals"
 	"github.com/curtiswtaylorjr/sakms/internal/rename"
 	"github.com/curtiswtaylorjr/sakms/internal/settings"
+	"github.com/curtiswtaylorjr/sakms/internal/trakt"
 )
 
 // NewMux returns an http.ServeMux with SAK's API routes mounted.
@@ -41,8 +42,11 @@ import (
 // blurred). slidersStore backs the admin-defined custom Discover slider
 // CRUD + resolve routes (see discover_sliders.go) — a separate concept from
 // Discover's fixed trending/popular/upcoming/genre/studio/network
-// categories above it.
-func NewMux(httpClient *http.Client, connStore *connections.Store, propStore *proposals.Store, allowStore *allowlist.Store, prober dedup.Prober, hasher dedup.PHasher, videoHasher rename.PHasher, settingsStore *settings.Store, grabsStore *grabs.Store, libStore *library.Store, slidersStore *discoversliders.Store) *http.ServeMux {
+// categories above it. traktStore backs the Trakt watchlist connection
+// (settings-save, connection-summary, OAuth device flow, watchlist row —
+// see trakt.go, a self-contained file task #9 wrote independently of this
+// one; NewMux just registers its handlers).
+func NewMux(httpClient *http.Client, connStore *connections.Store, propStore *proposals.Store, allowStore *allowlist.Store, prober dedup.Prober, hasher dedup.PHasher, videoHasher rename.PHasher, settingsStore *settings.Store, grabsStore *grabs.Store, libStore *library.Store, slidersStore *discoversliders.Store, traktStore *trakt.Store) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/connections/test", connectionsTestHandler(httpClient))
 	mux.HandleFunc("GET /api/connections", listConnectionsHandler(connStore))
@@ -123,6 +127,19 @@ func NewMux(httpClient *http.Client, connStore *connections.Store, propStore *pr
 	mux.HandleFunc("DELETE /api/discover/sliders/{id}", deleteSliderHandler(slidersStore))
 	mux.HandleFunc("POST /api/discover/sliders/reorder", reorderSlidersHandler(slidersStore))
 	mux.HandleFunc("GET /api/discover/sliders/{id}/resolve", resolveSliderHandler(httpClient, connStore, settingsStore, slidersStore))
+	// Trakt: watchlist connection (Settings) + Discover watchlist row. See
+	// trakt.go for the handlers and the full route-table rationale — this is
+	// just the one-line mux registration. traktFlow is one shared in-memory
+	// device-flow state for the whole mux (single-operator app, at most one
+	// device authorization in progress at a time — see traktDeviceFlow's doc
+	// comment).
+	traktFlow := newTraktDeviceFlow()
+	mux.HandleFunc("GET /api/trakt/status", traktStatusHandler(traktStore))
+	mux.HandleFunc("PUT /api/trakt/credentials", traktSaveCredentialsHandler(traktStore))
+	mux.HandleFunc("POST /api/trakt/device/start", traktDeviceStartHandler(traktStore, traktFlow, httpClient, trakt.DefaultBaseURL))
+	mux.HandleFunc("POST /api/trakt/device/poll", traktDevicePollHandler(traktStore, traktFlow, httpClient, trakt.DefaultBaseURL))
+	mux.HandleFunc("POST /api/trakt/disconnect", traktDisconnectHandler(traktStore))
+	mux.HandleFunc("GET /api/trakt/watchlist", traktWatchlistHandler(traktStore, httpClient, trakt.DefaultBaseURL))
 	// Image proxy: server-side-fetch + cache poster/thumbnail art from the
 	// allowlisted TMDB/TPDB image hosts so the browser never hot-links them
 	// (see images.go / internal/imageproxy). Read-only, auth-gated like every

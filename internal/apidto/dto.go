@@ -845,3 +845,74 @@ type SliderUpsertRequest struct {
 type SliderReorderRequest struct {
 	IDs []int `json:"ids"`
 }
+
+// --- Trakt (mainstream-discover-seerr): watchlist connection + OAuth device flow -
+//
+// Mirrors internal/api/trakt.go's local request/response structs field-for-
+// field (that file is deliberately self-contained and doesn't import this
+// package — see its own doc comment); these DTOs exist purely for the
+// TypeScript codegen boundary. Route table:
+//   GET  /api/trakt/status          -> TraktStatusResponse
+//   PUT  /api/trakt/credentials     -> TraktCredentialsRequest
+//   POST /api/trakt/device/start    -> TraktDeviceStartResponse
+//   POST /api/trakt/device/poll     -> TraktDevicePollResponse
+//   POST /api/trakt/disconnect      -> (204, no body)
+//   GET  /api/trakt/watchlist       -> []TraktWatchlistItem
+
+// TraktStatusResponse is GET /api/trakt/status's response — the general
+// "is Trakt usable right now" summary, consumed by both Settings and the
+// Discover watchlist row. An unconfigured connection returns the zero
+// value (Configured: false), not an error. Never exposes the real secret
+// or tokens.
+type TraktStatusResponse struct {
+	Configured     bool   `json:"configured"`
+	Linked         bool   `json:"linked"`
+	TokenExpiresAt string `json:"tokenExpiresAt,omitempty"`
+}
+
+// TraktCredentialsRequest is PUT /api/trakt/credentials's body — the
+// operator-entered Trakt application. ClientSecret follows the same
+// three-state rule as ConnectionUpsertRequest.APIKey (nil = preserve
+// stored secret, "" = clear, non-empty = set) — see that field's doc
+// comment for the full rule; a naive `clientSecret?: string` would
+// silently wipe the stored secret on an untouched save here too.
+type TraktCredentialsRequest struct {
+	ClientID     string  `json:"clientId"`
+	ClientSecret *string `json:"clientSecret,omitempty"`
+}
+
+// TraktDeviceStartResponse is POST /api/trakt/device/start's response —
+// everything the frontend needs to show the operator (a code to enter and
+// a URL to visit) and to know how often to call POST /api/trakt/device/poll.
+// The device_code itself (the secret the server polls with) is deliberately
+// not included; polling is server-side.
+type TraktDeviceStartResponse struct {
+	UserCode        string `json:"userCode"`
+	VerificationURL string `json:"verificationUrl"`
+	ExpiresIn       int    `json:"expiresIn"`
+	Interval        int    `json:"interval"`
+}
+
+// TraktDevicePollResponse is POST /api/trakt/device/poll's response — one
+// non-blocking poll attempt against the in-progress device authorization
+// started by TraktDeviceStartResponse. Status is one of "pending" |
+// "linked" | "expired" | "denied". Deliberately a separate endpoint from
+// TraktStatusResponse above: this one drives the Connect-flow UI's polling
+// loop, the other answers "is Trakt usable right now" everywhere else.
+type TraktDevicePollResponse struct {
+	Status string `json:"status"`
+}
+
+// TraktWatchlistItem is one entry of GET /api/trakt/watchlist's response —
+// a near-direct mirror of internal/trakt.WatchlistItem's fields. Note this
+// is deliberately NOT DiscoverItem's shape: Trakt's watchlist API provides
+// no poster/overview/rating at all, so there is nothing to mirror there;
+// any TMDB enrichment by TmdbId is the frontend's job, not done server-side
+// (an N-item watchlist would otherwise mean N extra TMDB calls per page
+// load).
+type TraktWatchlistItem struct {
+	Type   string `json:"type"`
+	Title  string `json:"title"`
+	Year   int    `json:"year,omitempty"`
+	TMDBID int    `json:"tmdbId"`
+}

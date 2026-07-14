@@ -16,6 +16,7 @@ import (
 	"github.com/curtiswtaylorjr/sakms/internal/stashbox"
 	"github.com/curtiswtaylorjr/sakms/internal/tmdb"
 	"github.com/curtiswtaylorjr/sakms/internal/tpdbrest"
+	"github.com/curtiswtaylorjr/sakms/internal/trakt"
 )
 
 // ConnectionTestRequest is enough to construct a client and make one real,
@@ -68,6 +69,12 @@ func TestConnection(ctx context.Context, httpClient *http.Client, req Connection
 		return testNZBGet(ctx, httpClient, req)
 	case "tmdb":
 		return testTMDB(ctx, httpClient, req)
+	case "trakt":
+		// Trakt has no dedicated client_id field on ConnectionTestRequest, so
+		// by convention (see trakt.go's testTrakt doc comment) the generic
+		// APIKey field carries client_id here — client_secret isn't needed,
+		// Ping only validates client_id against a public endpoint.
+		return testTrakt(ctx, httpClient, trakt.DefaultBaseURL, req.APIKey)
 	default:
 		return ConnectionTestResult{Error: fmt.Sprintf("unsupported service %q", req.Service)}
 	}

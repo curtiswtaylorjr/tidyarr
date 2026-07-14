@@ -792,3 +792,66 @@ export interface SliderUpsertRequest {
 export interface SliderReorderRequest {
   ids: number /* int */[];
 }
+/**
+ * TraktStatusResponse is GET /api/trakt/status's response — the general
+ * "is Trakt usable right now" summary, consumed by both Settings and the
+ * Discover watchlist row. An unconfigured connection returns the zero
+ * value (Configured: false), not an error. Never exposes the real secret
+ * or tokens.
+ */
+export interface TraktStatusResponse {
+  configured: boolean;
+  linked: boolean;
+  tokenExpiresAt?: string;
+}
+/**
+ * TraktCredentialsRequest is PUT /api/trakt/credentials's body — the
+ * operator-entered Trakt application. ClientSecret follows the same
+ * three-state rule as ConnectionUpsertRequest.APIKey (nil = preserve
+ * stored secret, "" = clear, non-empty = set) — see that field's doc
+ * comment for the full rule; a naive `clientSecret?: string` would
+ * silently wipe the stored secret on an untouched save here too.
+ */
+export interface TraktCredentialsRequest {
+  clientId: string;
+  clientSecret?: string;
+}
+/**
+ * TraktDeviceStartResponse is POST /api/trakt/device/start's response —
+ * everything the frontend needs to show the operator (a code to enter and
+ * a URL to visit) and to know how often to call POST /api/trakt/device/poll.
+ * The device_code itself (the secret the server polls with) is deliberately
+ * not included; polling is server-side.
+ */
+export interface TraktDeviceStartResponse {
+  userCode: string;
+  verificationUrl: string;
+  expiresIn: number /* int */;
+  interval: number /* int */;
+}
+/**
+ * TraktDevicePollResponse is POST /api/trakt/device/poll's response — one
+ * non-blocking poll attempt against the in-progress device authorization
+ * started by TraktDeviceStartResponse. Status is one of "pending" |
+ * "linked" | "expired" | "denied". Deliberately a separate endpoint from
+ * TraktStatusResponse above: this one drives the Connect-flow UI's polling
+ * loop, the other answers "is Trakt usable right now" everywhere else.
+ */
+export interface TraktDevicePollResponse {
+  status: string;
+}
+/**
+ * TraktWatchlistItem is one entry of GET /api/trakt/watchlist's response —
+ * a near-direct mirror of internal/trakt.WatchlistItem's fields. Note this
+ * is deliberately NOT DiscoverItem's shape: Trakt's watchlist API provides
+ * no poster/overview/rating at all, so there is nothing to mirror there;
+ * any TMDB enrichment by TmdbId is the frontend's job, not done server-side
+ * (an N-item watchlist would otherwise mean N extra TMDB calls per page
+ * load).
+ */
+export interface TraktWatchlistItem {
+  type: string;
+  title: string;
+  year?: number /* int */;
+  tmdbId: number /* int */;
+}
