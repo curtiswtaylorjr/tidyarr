@@ -1,0 +1,23 @@
+<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
+  <rect x="8" y="8" width="84" height="84" rx="20" fill="#F3E8C7"/>
+
+  <!-- clip body -->
+  <rect x="26" y="16" width="48" height="68" fill="#1B2A4A"/>
+
+  <!-- left sprocket notches -->
+  <rect x="22" y="19" width="8" height="8" fill="#F3E8C7"/>
+  <rect x="22" y="32.5" width="8" height="8" fill="#F3E8C7"/>
+  <rect x="22" y="46" width="8" height="8" fill="#F3E8C7"/>
+  <rect x="22" y="59.5" width="8" height="8" fill="#F3E8C7"/>
+  <rect x="22" y="73" width="8" height="8" fill="#F3E8C7"/>
+
+  <!-- right sprocket notches -->
+  <rect x="70" y="19" width="8" height="8" fill="#F3E8C7"/>
+  <rect x="70" y="32.5" width="8" height="8" fill="#F3E8C7"/>
+  <rect x="70" y="46" width="8" height="8" fill="#F3E8C7"/>
+  <rect x="70" y="59.5" width="8" height="8" fill="#F3E8C7"/>
+  <rect x="70" y="73" width="8" height="8" fill="#F3E8C7"/>
+
+  <!-- play triangle -->
+  <polygon points="43,37 43,63 65,50" fill="#F3E8C7"/>
+</svg>

@@ -25,14 +25,18 @@ export const inputClass =
 export const labelClass = "block text-xs font-medium text-muted";
 
 // AuthScreen centers a single auth panel on the page — the setup wizard, the
-// login form, and the SSO notice all share this frame.
+// login form, and the SSO notice all share this frame. The full logo (not
+// just the favicon glyph) gets its one prominent moment here — this is the
+// only screen an operator sees before the persistent app shell (with its own
+// small header) takes over.
 export function AuthScreen(props: {
   title: string;
   children: JSX.Element;
 }): JSX.Element {
   return (
     <div class="flex min-h-screen items-center justify-center p-6">
-      <div class="w-full max-w-md rounded-xl border border-border bg-surface p-6 shadow-lg">
+      <div class="w-full max-w-md rounded-xl border border-border bg-surface p-6 shadow-2xl">
+        <img src="/logo.svg" alt="SAK Media Server" class="mx-auto mb-4 w-full max-w-xs" />
         <h2 class="mb-3 text-lg font-semibold text-fg">{props.title}</h2>
         {props.children}
       </div>

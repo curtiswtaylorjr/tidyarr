@@ -1,0 +1,33 @@
+<svg viewBox="0 0 700 500" xmlns="http://www.w3.org/2000/svg">
+  <!-- ticket body -->
+  <rect x="40" y="90" width="620" height="280" rx="12" fill="#F3E9C8" stroke="#1B2A4A" stroke-width="3"/>
+
+  <!-- perforation notches top and bottom -->
+  <g fill="#FFFFFF" stroke="#1B2A4A" stroke-width="1.5">
+    <circle cx="70" cy="90" r="9"/><circle cx="130" cy="90" r="9"/><circle cx="190" cy="90" r="9"/><circle cx="250" cy="90" r="9"/><circle cx="310" cy="90" r="9"/><circle cx="370" cy="90" r="9"/><circle cx="430" cy="90" r="9"/><circle cx="490" cy="90" r="9"/><circle cx="550" cy="90" r="9"/><circle cx="610" cy="90" r="9"/>
+    <circle cx="70" cy="370" r="9"/><circle cx="130" cy="370" r="9"/><circle cx="190" cy="370" r="9"/><circle cx="250" cy="370" r="9"/><circle cx="310" cy="370" r="9"/><circle cx="370" cy="370" r="9"/><circle cx="430" cy="370" r="9"/><circle cx="490" cy="370" r="9"/><circle cx="550" cy="370" r="9"/><circle cx="610" cy="370" r="9"/>
+  </g>
+
+  <!-- tear line + stub -->
+  <line x1="190" y1="90" x2="190" y2="370" stroke="#1B2A4A" stroke-width="2" stroke-dasharray="7,7"/>
+
+  <!-- stub content -->
+  <polygon points="95,150 95,210 135,180" fill="#1B2A4A"/>
+  <text x="115" y="290" text-anchor="middle" font-family="'Courier New', monospace" font-weight="700" font-size="15" letter-spacing="2" fill="#1B2A4A" transform="rotate(-90 115 290)">ADMIT ONE</text>
+
+  <!-- feature presentation banner -->
+  <rect x="230" y="108" width="380" height="28" fill="#C1272D"/>
+  <text x="420" y="127" text-anchor="middle" font-family="'Courier New', monospace" font-weight="700" font-size="14" letter-spacing="4" fill="#F3E9C8">FEATURE PRESENTATION</text>
+
+  <!-- stars -->
+  <text x="245" y="248" text-anchor="middle" font-family="Arial" font-size="26" fill="#F2B705">★</text>
+  <text x="595" y="248" text-anchor="middle" font-family="Arial" font-size="26" fill="#F2B705">★</text>
+
+  <!-- wordmark -->
+  <text x="420" y="240" text-anchor="middle" font-family="Georgia, 'Times New Roman', serif" font-weight="700" font-size="60" letter-spacing="1" fill="#1B2A4A">SAK MEDIA</text>
+  <text x="420" y="278" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-weight="700" font-size="22" letter-spacing="10" fill="#C1272D">SERVER</text>
+
+  <!-- serial + fine print -->
+  <text x="610" y="352" text-anchor="end" font-family="'Courier New', monospace" font-size="12" letter-spacing="1" fill="#5B6472">NO. 000001</text>
+  <text x="230" y="352" text-anchor="start" font-family="'Courier New', monospace" font-size="12" letter-spacing="1" fill="#5B6472">GOOD FOR ONE STREAM, ANY SCREEN</text>
+</svg>

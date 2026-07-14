@@ -152,14 +152,14 @@ export const Sidebar: Component<{
   onToggle: () => void;
 }> = (props) => (
   <nav
-    class="flex shrink-0 flex-col gap-1 border-r border-border bg-surface p-2 transition-all"
+    class="z-10 flex shrink-0 flex-col gap-1 bg-gradient-to-r from-chrome to-chrome-2 p-2 shadow-xl transition-all"
     classList={{ "w-48": !props.collapsed(), "w-14": props.collapsed() }}
     aria-label="Primary"
   >
     <button
       type="button"
       onClick={props.onToggle}
-      class="mb-2 flex items-center rounded-md px-2 py-2 text-muted transition hover:text-fg"
+      class="mb-2 flex items-center rounded-md px-2 py-2 text-chrome-fg/60 transition hover:text-chrome-fg"
       title={props.collapsed() ? "Expand sidebar" : "Collapse sidebar"}
       aria-label={props.collapsed() ? "Expand sidebar" : "Collapse sidebar"}
       aria-expanded={!props.collapsed()}
@@ -171,9 +171,8 @@ export const Sidebar: Component<{
         <A
           href={item.href}
           title={item.label}
-          class="flex items-center gap-3 rounded-md px-2 py-2 text-sm font-medium transition hover:bg-surface-2"
-          activeClass="bg-surface-2 text-fg"
-          inactiveClass="text-muted"
+          class="flex items-center gap-3 rounded-md px-2 py-2 text-sm font-medium text-chrome-fg/60 transition hover:bg-white/10 hover:text-chrome-fg"
+          activeClass="!bg-white/10 !text-chrome-fg"
         >
           <span class="flex shrink-0 items-center">{item.icon({})}</span>
           <Show when={!props.collapsed()}>
@@ -227,8 +226,9 @@ export const AppShell: Component<{
         <div class="flex min-h-screen">
           <Sidebar collapsed={collapsed} onToggle={() => setCollapsed(!collapsed())} />
           <div class="flex min-w-0 flex-1 flex-col">
-            <header class="flex items-center gap-4 border-b border-border bg-surface px-6 py-3">
-              <span class="font-semibold text-fg">SAK Media Server</span>
+            <header class="z-10 flex items-center gap-4 bg-gradient-to-b from-chrome to-chrome-2 px-6 py-3 shadow-xl">
+              <img src="/favicon.svg" alt="" class="h-6 w-6 shrink-0" />
+              <span class="font-semibold text-chrome-fg">SAK Media Server</span>
               <div class="ml-auto">
                 <Button onClick={logout}>Log out</Button>
               </div>

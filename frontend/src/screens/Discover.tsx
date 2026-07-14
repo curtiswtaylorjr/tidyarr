@@ -141,7 +141,7 @@ const Modal: Component<{
     onClick={props.onClose}
   >
     <div
-      class="max-h-[85vh] w-full max-w-lg overflow-y-auto rounded-xl border border-border bg-surface p-5 shadow-lg"
+      class="max-h-[85vh] w-full max-w-lg overflow-y-auto rounded-xl border border-border bg-surface p-5 shadow-2xl"
       onClick={(e) => e.stopPropagation()}
     >
       <div class="mb-3 flex items-center justify-between gap-3">
