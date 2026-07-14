@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen } from "@solidjs/testing-library";
+import { fireEvent, render, screen, within } from "@solidjs/testing-library";
 import type { AdultDiscoverItem, DiscoverItem, TrackedItem } from "@dto";
 import { Discover } from "./Discover";
 
@@ -133,8 +133,94 @@ describe("Discover — Mainstream combined rows", () => {
   });
 });
 
-describe("Discover — Show more pagination (append, not replace)", () => {
-  it("appends the next TMDB page to the row instead of replacing it", async () => {
+describe("Discover — Upcoming rows (PROVISIONAL, pending task #5)", () => {
+  it("renders Upcoming Movies/Upcoming Shows rows with cards from category=upcoming", async () => {
+    stubFetch((url) => {
+      if (url.includes("/api/modes/movies/discover") && url.includes("category=upcoming"))
+        return jsonResponse([movie({ id: 1, title: "Upcoming Movie" })]);
+      if (url.includes("/api/modes/series/discover") && url.includes("category=upcoming"))
+        return jsonResponse([movie({ id: 2, title: "Upcoming Show", mediaType: "tv" })]);
+      const d = mainstreamDefaults(url);
+      if (d) return d;
+      throw new Error("unexpected fetch: " + url);
+    });
+
+    render(() => <Discover />);
+
+    expect(await screen.findByText("Upcoming Movies")).toBeInTheDocument();
+    expect(screen.getByText("Upcoming Shows")).toBeInTheDocument();
+    expect(await screen.findByText("Upcoming Movie")).toBeInTheDocument();
+    expect(await screen.findByText("Upcoming Show")).toBeInTheDocument();
+  });
+});
+
+describe("Discover — custom slider rows (PROVISIONAL, pending task #5/#7)", () => {
+  it("renders one carousel row per enabled slider, from /api/discover-sliders + its items endpoint", async () => {
+    stubFetch((url) => {
+      if (url === "/api/discover-sliders") {
+        return jsonResponse([
+          { id: 1, title: "Heist Movies", filterType: "keyword", filterValue: "heist", target: "movie", sortOrder: 0, enabled: true },
+          { id: 2, title: "Disabled Row", filterType: "genre", filterValue: "35", target: "movie", sortOrder: 1, enabled: false },
+        ]);
+      }
+      if (url.includes("/api/discover-sliders/1/items"))
+        return jsonResponse([movie({ id: 100, title: "Heist Movie One" })]);
+      const d = mainstreamDefaults(url);
+      if (d) return d;
+      throw new Error("unexpected fetch: " + url);
+    });
+
+    render(() => <Discover />);
+
+    expect(await screen.findByText("Heist Movies")).toBeInTheDocument();
+    expect(await screen.findByText("Heist Movie One")).toBeInTheDocument();
+    // A disabled slider is filtered out client-side — no row, no fetch of its items.
+    expect(screen.queryByText("Disabled Row")).not.toBeInTheDocument();
+  });
+
+  it("routes a mixed-target slider's per-item grab mode from the item's own mediaType", async () => {
+    stubFetch((url) => {
+      if (url === "/api/discover-sliders") {
+        return jsonResponse([
+          { id: 5, title: "Mixed Row", filterType: "trending", filterValue: "", target: "mixed", sortOrder: 0, enabled: true },
+        ]);
+      }
+      if (url.includes("/api/discover-sliders/5/items")) {
+        return jsonResponse([
+          movie({ id: 200, title: "Mixed Movie Item", mediaType: "movie" }),
+          movie({ id: 201, title: "Mixed Show Item", mediaType: "tv" }),
+        ]);
+      }
+      const d = mainstreamDefaults(url);
+      if (d) return d;
+      throw new Error("unexpected fetch: " + url);
+    });
+
+    render(() => <Discover />);
+
+    expect(await screen.findByText("Mixed Movie Item")).toBeInTheDocument();
+    expect(await screen.findByText("Mixed Show Item")).toBeInTheDocument();
+
+    // The movie card grabs directly (no season/episode picker); the tv card
+    // reveals the picker first — same per-item routing LibraryRow/ModedTitle
+    // already rely on elsewhere in this file.
+    const movieCard = screen
+      .getByText("Mixed Movie Item")
+      .closest("div.w-36") as HTMLElement;
+    fireEvent.click(within(movieCard).getByText("Grab"));
+    expect(await screen.findByText(/Grab — Mixed Movie Item/)).toBeInTheDocument();
+    fireEvent.click(screen.getByText("Close"));
+
+    const showCard = screen
+      .getByText("Mixed Show Item")
+      .closest("div.w-36") as HTMLElement;
+    fireEvent.click(within(showCard).getByText("Grab"));
+    expect(within(showCard).getByLabelText("Season")).toBeInTheDocument();
+  });
+});
+
+describe("Discover — Carousel lazy-load-more pagination (append, not replace)", () => {
+  it("appends the next TMDB page to the row once the carousel scrolls near the end", async () => {
     const fetchMock = stubFetch((url) => {
       if (url.includes("/api/modes/movies/discover") && url.includes("trending")) {
         if (url.includes("page=2"))
@@ -147,9 +233,21 @@ describe("Discover — Show more pagination (append, not replace)", () => {
     });
 
     render(() => <Discover />);
-    // Only the Trending Movies row has items → exactly one "Show more" button.
     expect(await screen.findByText("Page One Movie")).toBeInTheDocument();
-    fireEvent.click(await screen.findByText("Show more"));
+
+    // The Carousel component's own lazy-load trigger is scroll-position-driven
+    // (see components/Carousel.tsx), not a button — jsdom has no real layout
+    // engine, so scrollWidth/clientWidth/scrollLeft are stubbed on the row's
+    // scroll track to simulate "scrolled near the trailing edge", same
+    // approach as components/Carousel.test.tsx.
+    const track = screen
+      .getByText("Trending Movies")
+      .closest("section")!
+      .querySelector("div.overflow-x-auto") as HTMLElement;
+    Object.defineProperty(track, "scrollWidth", { value: 2000, configurable: true });
+    Object.defineProperty(track, "clientWidth", { value: 300, configurable: true });
+    Object.defineProperty(track, "scrollLeft", { value: 1700, configurable: true });
+    fireEvent.scroll(track);
 
     // Page two's card appears AND page one's is still present (append).
     expect(await screen.findByText("Page Two Movie")).toBeInTheDocument();

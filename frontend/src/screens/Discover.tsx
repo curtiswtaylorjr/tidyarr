@@ -66,6 +66,12 @@ import {
   yearOf,
 } from "../components/ui";
 import { buildConnectionUpsertBody, upsertConnection } from "../api/settings";
+import { Carousel } from "../components/Carousel";
+import {
+  type Slider,
+  fetchDiscoverSliders,
+  fetchSliderItems,
+} from "../api/discoverSliders";
 
 // MAINSTREAM_TITLE is the mode a merged card belongs to — the per-item mode a
 // combined (movies+series) row/grid MUST carry so each card grabs via its own
@@ -75,7 +81,9 @@ import { buildConnectionUpsertBody, upsertConnection } from "../api/settings";
 type ModedTitle = { mode: "movies" | "series"; item: DiscoverItem };
 
 // MAINSTREAM_ROWS is the fixed set of TMDB category rows the Mainstream page
-// stacks: both modes × both categories. Each row paginates independently.
+// stacks: both modes × both categories. Each row paginates independently. The
+// two "Upcoming" entries are PROVISIONAL (task #6, speculative pending task
+// #5 — see DiscoverCategory's doc comment in src/api/discover.ts).
 const MAINSTREAM_ROWS: {
   title: string;
   mode: "movies" | "series";
@@ -85,6 +93,8 @@ const MAINSTREAM_ROWS: {
   { title: "Trending Shows", mode: "series", category: "trending" },
   { title: "Popular Movies", mode: "movies", category: "popular" },
   { title: "Popular Shows", mode: "series", category: "popular" },
+  { title: "Upcoming Movies", mode: "movies", category: "upcoming" },
+  { title: "Upcoming Shows", mode: "series", category: "upcoming" },
 ];
 
 // MAINSTREAM_TABS replaces the old Movies/Series/Adult set: Mainstream (all
@@ -97,7 +107,10 @@ const MAINSTREAM_TABS: TabDef[] = [
 // GrabTarget is one pending auto-grab: which mode, a human label for the
 // dialog title, and the exact request body the backend needs. For Series the
 // season/episode picker has already resolved before a target exists.
-type GrabTarget = { mode: Mode; label: string; request: AutoGrabRequest };
+// Exported for task #8's TraktWatchlistRow (task #6's added scope): its
+// onGrab prop needs this exact shape to feed the same shared GrabDialog
+// MainstreamDiscover already owns, rather than reinventing grab wiring.
+export type GrabTarget = { mode: Mode; label: string; request: AutoGrabRequest };
 
 // STATUS_COPY turns an autograb.Grade Status into a short human reason for a
 // fallback pick-list row — so the operator sees WHY each release wasn't
@@ -439,8 +452,11 @@ const SeasonEpisodePicker: Component<{
 
 // GrabButton is the per-title grab affordance. Movies grab on click. Series
 // first reveal the season/episode picker (the gating step) and only build a
-// GrabTarget once the picker is submitted.
-const GrabButton: Component<{
+// GrabTarget once the picker is submitted. Exported so task #8's
+// TraktWatchlistRow (task #6's added scope) can reuse this exact grab
+// affordance for its Trakt watchlist cards instead of reinventing it — a
+// Trakt watchlist item is itself a TMDB movie/show, so it grabs identically.
+export const GrabButton: Component<{
   mode: "movies" | "series";
   item: DiscoverItem;
   onGrab: (t: GrabTarget) => void;
@@ -585,36 +601,16 @@ const PaginatedRow: Component<{
   );
 
   return (
-    <section class="mt-6">
-      <h2 class="mb-2 text-sm font-semibold uppercase tracking-wide text-muted">
-        {props.title}
-      </h2>
-      <Show
-        when={items().length > 0}
-        fallback={
-          <Muted>{loading() ? "Loading…" : "Nothing here yet."}</Muted>
-        }
-      >
-        <div class="flex items-stretch gap-3 overflow-x-auto pb-2">
-          <For each={items()}>
-            {(item) => (
-              <PosterCard mode={props.mode} item={item} onGrab={props.onGrab} />
-            )}
-          </For>
-          <Show when={!exhausted()}>
-            <div class="flex w-28 shrink-0 items-center justify-center">
-              <Button
-                class="!py-1 text-xs"
-                onClick={() => void load(false)}
-                disabled={loading()}
-              >
-                {loading() ? "Loading…" : "Show more"}
-              </Button>
-            </div>
-          </Show>
-        </div>
-      </Show>
-    </section>
+    <Carousel
+      title={props.title}
+      items={items()}
+      renderItem={(item) => (
+        <PosterCard mode={props.mode} item={item} onGrab={props.onGrab} />
+      )}
+      onLoadMore={() => void load(false)}
+      hasMore={!exhausted()}
+      loading={loading()}
+    />
   );
 };
 
@@ -706,29 +702,117 @@ const LibraryRow: Component<{
 
   return (
     <Show when={(entries()?.length ?? 0) > 0}>
-      <section class="mt-6">
-        <h2 class="mb-2 text-sm font-semibold uppercase tracking-wide text-muted">
-          In your library
-        </h2>
-        <div class="flex items-stretch gap-3 overflow-x-auto pb-2">
-          <For each={shown()}>
-            {(e) => (
-              <LibraryCard mode={e.mode} item={e.item} onGrab={props.onGrab} />
-            )}
-          </For>
-          <Show when={hasMore()}>
-            <div class="flex w-28 shrink-0 items-center justify-center">
-              <Button
-                class="!py-1 text-xs"
-                onClick={() => setVisible((n) => n + LIBRARY_PAGE_SIZE)}
-              >
-                Show more
-              </Button>
-            </div>
-          </Show>
-        </div>
-      </section>
+      <Carousel
+        title="In your library"
+        items={shown()}
+        renderItem={(e) => (
+          <LibraryCard mode={e.mode} item={e.item} onGrab={props.onGrab} />
+        )}
+        onLoadMore={() => setVisible((n) => n + LIBRARY_PAGE_SIZE)}
+        hasMore={hasMore()}
+      />
     </Show>
+  );
+};
+
+// sliderItemMode picks the per-item grab mode for one SliderRow card. A
+// movie/tv-targeted slider is unambiguous; a "mixed" slider (both movies and
+// series in one row) falls back to the item's own mediaType, the same
+// per-item-mode pattern ModedTitle/LibraryRow already use for merged rows.
+function sliderItemMode(
+  target: Slider["target"],
+  item: DiscoverItem,
+): "movies" | "series" {
+  if (target === "movie") return "movies";
+  if (target === "tv") return "series";
+  return item.mediaType === "tv" ? "series" : "movies";
+}
+
+// SliderRow is one admin-defined custom slider (PROVISIONAL — task #6,
+// speculative pending task #5's slider-items endpoint; see
+// src/api/discoverSliders.ts's file-level doc comment), paginated the same
+// way PaginatedRow is. A fetch failure bubbles to onError so it raises the
+// same setup modal a built-in row's failure would (sliders are TMDB-sourced
+// too).
+const SliderRow: Component<{
+  slider: Slider;
+  reloadToken: () => number;
+  onGrab: (t: GrabTarget) => void;
+  onError: (err: unknown) => void;
+}> = (props) => {
+  const [items, setItems] = createSignal<DiscoverItem[]>([]);
+  const [page, setPage] = createSignal(0);
+  const [loading, setLoading] = createSignal(false);
+  const [exhausted, setExhausted] = createSignal(false);
+
+  const load = async (reset: boolean) => {
+    const next = reset ? 1 : page() + 1;
+    setLoading(true);
+    try {
+      const batch = await fetchSliderItems(props.slider.id, next);
+      setItems((prev) => (reset ? batch : [...prev, ...batch]));
+      setPage(next);
+      if (batch.length === 0) setExhausted(true);
+    } catch (e) {
+      props.onError(e);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  createEffect(
+    on(props.reloadToken, () => {
+      setItems([]);
+      setPage(0);
+      setExhausted(false);
+      void load(true);
+    }),
+  );
+
+  return (
+    <Carousel
+      title={props.slider.title}
+      items={items()}
+      renderItem={(item) => (
+        <PosterCard
+          mode={sliderItemMode(props.slider.target, item)}
+          item={item}
+          onGrab={props.onGrab}
+        />
+      )}
+      onLoadMore={() => void load(false)}
+      hasMore={!exhausted()}
+      loading={loading()}
+    />
+  );
+};
+
+// SliderRows fetches the admin-defined slider list (PROVISIONAL — task #6,
+// speculative pending task #5/#7; see src/api/discoverSliders.ts) and renders
+// one SliderRow per enabled slider, in the backend's own sort_order. Renders
+// nothing while empty (no custom sliders configured yet, or task #7's editor
+// hasn't shipped) rather than an empty-state row per absent slider.
+const SliderRows: Component<{
+  reloadToken: () => number;
+  onGrab: (t: GrabTarget) => void;
+  onError: (err: unknown) => void;
+}> = (props) => {
+  const [sliders] = createResource(props.reloadToken, () =>
+    fetchDiscoverSliders().catch(() => [] as Slider[]),
+  );
+  const enabled = () => (sliders() ?? []).filter((s) => s.enabled);
+
+  return (
+    <For each={enabled()}>
+      {(slider) => (
+        <SliderRow
+          slider={slider}
+          reloadToken={props.reloadToken}
+          onGrab={props.onGrab}
+          onError={props.onError}
+        />
+      )}
+    </For>
   );
 };
 
@@ -836,6 +920,11 @@ const MainstreamDiscover: Component = () => {
                 />
               )}
             </For>
+            <SliderRows
+              reloadToken={reloadToken}
+              onGrab={setGrabTarget}
+              onError={setSetupError}
+            />
             <LibraryRow reloadToken={reloadToken} onGrab={setGrabTarget} />
           </>
         }
