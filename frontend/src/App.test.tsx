@@ -125,6 +125,9 @@ describe("boot branch: authed app shell", () => {
       // The app shell renders the read-only Discover view, which fetches the
       // trending/popular category rows on mount — stub them empty (no cards).
       if (url.includes("/discover")) return jsonResponse([]);
+      // TraktWatchlistRow's own status check — not linked, so it stays hidden.
+      if (url.includes("/api/trakt/status"))
+        return jsonResponse({ configured: false, linked: false });
       throw new Error("unexpected " + url);
     });
     render(() => <App />);
@@ -139,6 +142,8 @@ describe("boot branch: authed app shell", () => {
       }
       if (url === "/api/setup/status") return jsonResponse({ dismissed: true });
       if (url.includes("/discover")) return jsonResponse([]);
+      if (url.includes("/api/trakt/status"))
+        return jsonResponse({ configured: false, linked: false });
       throw new Error("unexpected " + url);
     });
     render(() => <App />);

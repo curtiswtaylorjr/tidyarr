@@ -47,14 +47,19 @@ const stubFetch = (handler: Handler) => {
 };
 
 // mainstreamDefaults answers the background fetches the combined Mainstream page
-// fires on mount (four category rows + the library row's two tracked calls +
-// per-card poster probes) with empties, so each test only has to special-case
-// the calls it actually asserts on. Returns null for anything it doesn't
-// recognize, so the caller can fall through to its own handler / throw.
+// fires on mount (category rows + the library row's two tracked calls +
+// per-card poster probes + TraktWatchlistRow's status check) with empties, so
+// each test only has to special-case the calls it actually asserts on.
+// Returns null for anything it doesn't recognize, so the caller can fall
+// through to its own handler / throw. Trakt defaults to "not linked" so
+// TraktWatchlistRow (mounted unconditionally by MainstreamDiscover) stays
+// invisible in every test that doesn't explicitly opt into it.
 const mainstreamDefaults = (url: string): Response | null => {
   if (url.includes("/discover")) return jsonResponse([]);
   if (url.includes("/tracked")) return jsonResponse([]);
   if (url.includes("/poster")) return jsonResponse({ posterPath: "" });
+  if (url.includes("/api/trakt/status"))
+    return jsonResponse({ configured: false, linked: false });
   return null;
 };
 
@@ -392,6 +397,8 @@ describe("Discover — TMDB/TPDB not-configured setup pop-up", () => {
     stubFetchWithCalls((url) => {
       if (url.includes("/discover")) return notConfigured("tmdb");
       if (url.includes("/tracked")) return jsonResponse([]);
+      if (url.includes("/api/trakt/status"))
+        return jsonResponse({ configured: false, linked: false });
       throw new Error("unexpected fetch: " + url);
     });
 
@@ -416,6 +423,8 @@ describe("Discover — TMDB/TPDB not-configured setup pop-up", () => {
       }
       if (url.includes("/discover")) return configured ? jsonResponse([]) : notConfigured("tmdb");
       if (url.includes("/tracked")) return jsonResponse([]);
+      if (url.includes("/api/trakt/status"))
+        return jsonResponse({ configured: false, linked: false });
       if (url === "/api/connections/tmdb" && init?.method === "PUT") {
         configured = true;
         return new Response(null, { status: 204 });
@@ -463,6 +472,8 @@ describe("Discover — TMDB/TPDB not-configured setup pop-up", () => {
     stubFetchWithCalls((url) => {
       if (url.includes("/discover")) return new Response("internal server error", { status: 500 });
       if (url.includes("/tracked")) return jsonResponse([]);
+      if (url.includes("/api/trakt/status"))
+        return jsonResponse({ configured: false, linked: false });
       throw new Error("unexpected fetch: " + url);
     });
 

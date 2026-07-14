@@ -72,6 +72,7 @@ import {
   fetchDiscoverSliders,
   fetchSliderItems,
 } from "../api/discoverSliders";
+import { TraktWatchlistRow } from "../components/TraktWatchlistRow";
 
 // MAINSTREAM_TITLE is the mode a merged card belongs to — the per-item mode a
 // combined (movies+series) row/grid MUST carry so each card grabs via its own
@@ -908,6 +909,7 @@ const MainstreamDiscover: Component = () => {
         when={searching()}
         fallback={
           <>
+            <TraktWatchlistRow onGrab={setGrabTarget} />
             <For each={MAINSTREAM_ROWS}>
               {(row) => (
                 <PaginatedRow

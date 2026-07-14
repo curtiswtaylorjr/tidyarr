@@ -59,12 +59,14 @@ const autograbCalls = (calls: Call[]) =>
   calls.filter((c) => c.url.includes("/autograb"));
 
 // mainstreamDefaults quiets the combined page's background fetches (the other
-// three category rows, the library row, per-card poster probes) so each test
-// only special-cases the mode + call it asserts on.
+// category rows, the library row, per-card poster probes, TraktWatchlistRow's
+// status check) so each test only special-cases the mode + call it asserts on.
 const mainstreamDefaults = (url: string): Response | null => {
   if (url.includes("/discover")) return jsonResponse([]);
   if (url.includes("/tracked")) return jsonResponse([]);
   if (url.includes("/poster")) return jsonResponse({ posterPath: "" });
+  if (url.includes("/api/trakt/status"))
+    return jsonResponse({ configured: false, linked: false });
   return null;
 };
 
