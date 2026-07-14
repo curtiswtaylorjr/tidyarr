@@ -23,7 +23,7 @@ import (
 // read-only call against it — the same thing Settings' "Test connection"
 // button does. Nothing here is persisted.
 type ConnectionTestRequest struct {
-	Service  string `json:"service"` // "ollama" | "stash" | "jellyfin" | "stashdb" | "fansdb" | "tpdb" | "brave" | "prowlarr" | "qbittorrent" | "nzbget" | "tmdb"
+	Service  string `json:"service"` // "ollama" | "stash" | "jellyfin" | "stashdb" | "fansdb" | "tpdb" | "brave" | "prowlarr" | "qbittorrent" | "nzbget" | "tmdb" | "trakt"
 	URL      string `json:"url"`
 	Username string `json:"username,omitempty"` // only qbittorrent/nzbget use this
 	APIKey   string `json:"apiKey,omitempty"`

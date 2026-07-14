@@ -173,7 +173,7 @@ func TestTraktStatusHandler(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	status = get()
-	if !status.Configured || status.Linked {
+	if !status.Configured || status.Linked || status.ClientID != "client-abc" {
 		t.Fatalf("unexpected status after saving credentials: %+v", status)
 	}
 
@@ -308,8 +308,8 @@ func TestTraktDeviceFlow_FullHappyPath(t *testing.T) {
 	}
 	var poll traktDevicePollResponse
 	json.NewDecoder(pollResp.Body).Decode(&poll)
-	if poll.Status != string(traktDeviceStatusPending) {
-		t.Fatalf("expected pending, got %+v", poll)
+	if poll.Linked || !poll.Pending {
+		t.Fatalf("expected {linked:false, pending:true}, got %+v", poll)
 	}
 
 	// Second poll -> linked, tokens saved.
@@ -318,8 +318,8 @@ func TestTraktDeviceFlow_FullHappyPath(t *testing.T) {
 		t.Fatalf("POST failed: %v", err)
 	}
 	json.NewDecoder(pollResp.Body).Decode(&poll)
-	if poll.Status != string(traktDeviceStatusLinked) {
-		t.Fatalf("expected linked, got %+v", poll)
+	if !poll.Linked || poll.Pending {
+		t.Fatalf("expected {linked:true, pending:false}, got %+v", poll)
 	}
 
 	conn, err := store.Get(context.Background())
@@ -380,8 +380,8 @@ func TestTraktDeviceFlow_Denied(t *testing.T) {
 	}
 	var poll traktDevicePollResponse
 	json.NewDecoder(pollResp.Body).Decode(&poll)
-	if poll.Status != string(traktDeviceStatusDenied) {
-		t.Fatalf("expected denied, got %+v", poll)
+	if poll.Linked || poll.Pending {
+		t.Fatalf("expected {linked:false, pending:false} for a denied code, got %+v", poll)
 	}
 }
 

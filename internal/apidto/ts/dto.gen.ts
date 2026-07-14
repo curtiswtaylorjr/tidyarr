@@ -794,14 +794,18 @@ export interface SliderReorderRequest {
 }
 /**
  * TraktStatusResponse is GET /api/trakt/status's response — the general
- * "is Trakt usable right now" summary, consumed by both Settings and the
- * Discover watchlist row. An unconfigured connection returns the zero
- * value (Configured: false), not an error. Never exposes the real secret
- * or tokens.
+ * "is Trakt usable right now" summary, consumed by both Settings (to render
+ * configured/linked state and pre-fill the client_id field via ClientID)
+ * and the Discover watchlist row. An unconfigured connection returns the
+ * zero value (Configured: false), not an error. ClientID is not secret
+ * (Trakt sends it as a plain header on every request, same as
+ * ConnectionSummary.URL's pre-fill convention) — never the client_secret or
+ * tokens themselves.
  */
 export interface TraktStatusResponse {
   configured: boolean;
   linked: boolean;
+  clientId?: string;
   tokenExpiresAt?: string;
 }
 /**
@@ -832,13 +836,20 @@ export interface TraktDeviceStartResponse {
 /**
  * TraktDevicePollResponse is POST /api/trakt/device/poll's response — one
  * non-blocking poll attempt against the in-progress device authorization
- * started by TraktDeviceStartResponse. Status is one of "pending" |
- * "linked" | "expired" | "denied". Deliberately a separate endpoint from
- * TraktStatusResponse above: this one drives the Connect-flow UI's polling
- * loop, the other answers "is Trakt usable right now" everywhere else.
+ * started by TraktDeviceStartResponse. Deliberately a separate endpoint
+ * from TraktStatusResponse above: this one drives the Connect-flow UI's
+ * polling loop, the other answers "is Trakt usable right now" everywhere
+ * else. Linked true means tokens were saved and the flow is done; Pending
+ * true means keep polling; both false (a denied or expired device code)
+ * means the flow is over without success — the frontend's own
+ * client-side deadline (from TraktDeviceStartResponse.ExpiresIn) and the
+ * 409 a subsequent poll gets (the server clears the flow on any terminal
+ * outcome) are what surface that to the operator, since there's no
+ * separate "denied"/"expired" field on the wire.
  */
 export interface TraktDevicePollResponse {
-  status: string;
+  linked: boolean;
+  pending: boolean;
 }
 /**
  * TraktWatchlistItem is one entry of GET /api/trakt/watchlist's response —

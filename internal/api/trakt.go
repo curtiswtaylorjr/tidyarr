@@ -91,15 +91,19 @@ func traktSaveCredentialsHandler(store *trakt.Store) http.HandlerFunc {
 
 // traktStatus is GET /api/trakt/status's response — the general "is Trakt
 // usable right now" summary consumed both by Settings (to render
-// configured/linked state) and by the Discover watchlist row (to decide
-// whether to render at all). Deliberately minimal per the authoritative
-// contract (team-lead, adopting worker-5's already-tested frontend shape):
-// no ClientID/HasClientSecret here — this is a general-purpose status
-// check, not a Settings-only detail view. Never exposes the real secret or
-// tokens, only whether they're set.
+// configured/linked state and pre-fill the client_id field) and by the
+// Discover watchlist row (to decide whether to render at all). ClientID
+// mirrors ConnectionSummary's URL-style convention (the non-secret half of a
+// credential pair is safe to echo back to pre-fill an edit form — see
+// trakt.Credentials' doc comment: ClientID is not secret, Trakt sends it as
+// a plain header on every request). Never exposes the real client_secret or
+// tokens, only whether they're set. Verified against worker-5's actual
+// frontend/src/api/trakt.ts + Settings.tsx (not just the relayed
+// description) — that file reads `status.clientId` to pre-fill the form.
 type traktStatus struct {
 	Configured     bool   `json:"configured"`
 	Linked         bool   `json:"linked"`
+	ClientID       string `json:"clientId,omitempty"`
 	TokenExpiresAt string `json:"tokenExpiresAt,omitempty"`
 }
 
@@ -121,6 +125,7 @@ func traktStatusHandler(store *trakt.Store) http.HandlerFunc {
 		status := traktStatus{
 			Configured: true,
 			Linked:     conn.Tokens.Linked(),
+			ClientID:   conn.ClientID,
 		}
 		if !conn.ExpiresAt.IsZero() {
 			status.TokenExpiresAt = conn.ExpiresAt.UTC().Format(time.RFC3339)
@@ -294,8 +299,21 @@ func traktDeviceStartHandler(store *trakt.Store, flow *traktDeviceFlow, httpClie
 }
 
 // traktDevicePollResponse is POST /api/trakt/device/poll's response.
+// Linked/Pending mirror worker-5's actual frontend/src/api/trakt.ts +
+// Settings.tsx contract exactly (`if (r.linked) { ...success... }`) —
+// verified against that file directly, not the relayed description, which
+// (like an earlier draft of this handler) had said a single Status string
+// enum instead. Internally the poll still distinguishes pending/expired/
+// denied for logging/clarity (see traktDeviceStatus below); only linked and
+// pending cross the wire because that's all the tested frontend reads.
+// expired/denied both collapse to {linked:false, pending:false} — the
+// frontend's own client-side pollDeadline (computed from the device/start
+// response's expiresIn) independently detects expiry, and a denied/expired
+// poll clears the pending flow here, so the NEXT poll attempt 409s with a
+// clear "start over" error instead of polling a dead code forever.
 type traktDevicePollResponse struct {
-	Status string `json:"status"` // "pending" | "linked" | "expired" | "denied"
+	Linked  bool `json:"linked"`
+	Pending bool `json:"pending"`
 }
 
 // traktDevicePollHandler makes one poll attempt and reports the outcome.
@@ -327,7 +345,10 @@ func traktDevicePollHandler(store *trakt.Store, flow *traktDeviceFlow, httpClien
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(traktDevicePollResponse{Status: string(status)})
+		json.NewEncoder(w).Encode(traktDevicePollResponse{
+			Linked:  status == traktDeviceStatusLinked,
+			Pending: status == traktDeviceStatusPending,
+		})
 	}
 }
 
