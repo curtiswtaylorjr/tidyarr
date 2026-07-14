@@ -191,7 +191,7 @@ func TestTraktConnectionSummaryHandler(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	status = get()
-	if !status.Configured || status.Linked {
+	if !status.Configured || status.Linked || status.ClientID != "client-abc" {
 		t.Fatalf("unexpected status after saving credentials: %+v", status)
 	}
 
@@ -326,7 +326,7 @@ func TestTraktDeviceFlow_FullHappyPath(t *testing.T) {
 	}
 	var poll traktDevicePollResponse
 	json.NewDecoder(pollResp.Body).Decode(&poll)
-	if poll.Status != string(traktDeviceStatusPending) {
+	if !poll.Pending || poll.Linked {
 		t.Fatalf("expected pending, got %+v", poll)
 	}
 
@@ -336,7 +336,7 @@ func TestTraktDeviceFlow_FullHappyPath(t *testing.T) {
 		t.Fatalf("POST failed: %v", err)
 	}
 	json.NewDecoder(pollResp.Body).Decode(&poll)
-	if poll.Status != string(traktDeviceStatusLinked) {
+	if !poll.Linked || poll.Pending {
 		t.Fatalf("expected linked, got %+v", poll)
 	}
 
@@ -398,8 +398,8 @@ func TestTraktDeviceFlow_Denied(t *testing.T) {
 	}
 	var poll traktDevicePollResponse
 	json.NewDecoder(pollResp.Body).Decode(&poll)
-	if poll.Status != string(traktDeviceStatusDenied) {
-		t.Fatalf("expected denied, got %+v", poll)
+	if poll.Linked || poll.Pending {
+		t.Fatalf("expected denied (linked:false, pending:false), got %+v", poll)
 	}
 }
 
@@ -495,6 +495,48 @@ func TestTraktWatchlistItem_JSONFieldNames(t *testing.T) {
 		t.Fatalf("unmarshal failed: %v", err)
 	}
 	for _, field := range []string{"type", "title", "year", "tmdbId"} {
+		if _, ok := raw[field]; !ok {
+			t.Errorf("expected JSON field %q, got %+v", field, raw)
+		}
+	}
+}
+
+// TestTraktDevicePollResponse_JSONFieldNames locks in {linked, pending} —
+// NOT {status: string} — since worker-1 found the original {status: ...}
+// shape was never read by worker-5's tested frontend (it branches on
+// r.linked/r.pending), which would have polled forever after a real,
+// successful link. A regression here reintroduces that exact bug.
+func TestTraktDevicePollResponse_JSONFieldNames(t *testing.T) {
+	b, err := json.Marshal(traktDevicePollResponse{Linked: true, Pending: false})
+	if err != nil {
+		t.Fatalf("marshal failed: %v", err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(b, &raw); err != nil {
+		t.Fatalf("unmarshal failed: %v", err)
+	}
+	for _, field := range []string{"linked", "pending"} {
+		if _, ok := raw[field]; !ok {
+			t.Errorf("expected JSON field %q, got %+v", field, raw)
+		}
+	}
+	if _, ok := raw["status"]; ok {
+		t.Errorf("expected no legacy 'status' field, got %+v", raw)
+	}
+}
+
+// TestTraktConnectionSummary_JSONFieldNames locks in clientId's presence —
+// worker-1 found Settings.tsx reads status.clientId to pre-fill the form.
+func TestTraktConnectionSummary_JSONFieldNames(t *testing.T) {
+	b, err := json.Marshal(traktConnectionSummary{Configured: true, Linked: true, ClientID: "abc"})
+	if err != nil {
+		t.Fatalf("marshal failed: %v", err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(b, &raw); err != nil {
+		t.Fatalf("unmarshal failed: %v", err)
+	}
+	for _, field := range []string{"configured", "linked", "clientId"} {
 		if _, ok := raw[field]; !ok {
 			t.Errorf("expected JSON field %q, got %+v", field, raw)
 		}

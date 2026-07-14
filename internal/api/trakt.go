@@ -107,15 +107,18 @@ func saveTraktCredentialsHandler(store *trakt.Store) http.HandlerFunc {
 
 // traktConnectionSummary is GET /api/trakt/status's response — the general
 // "is Trakt usable right now" summary consumed both by Settings (to render
-// configured/linked state) and by the Discover watchlist row (to decide
-// whether to render at all). Deliberately minimal per the authoritative
-// contract (team-lead, adopting worker-5's already-tested frontend shape):
-// no ClientID/HasClientSecret here — this is a general-purpose status
-// check, not a Settings-only detail view. Never exposes the real secret or
-// tokens, only whether they're set.
+// configured/linked state and pre-fill the credential form) and by the
+// Discover watchlist row (to decide whether to render at all). ClientID is
+// not secret — Trakt sends it as a plain header on every request, same
+// non-secret status as connections.Summary's URL field — included so
+// Settings.tsx can pre-fill the client_id input; ClientSecret/AccessToken/
+// RefreshToken never appear here, only booleans/timestamps derived from
+// them. (ClientID added 2026-07-14 after worker-1 found Settings.tsx reads
+// status.clientId to pre-fill the form.)
 type traktConnectionSummary struct {
 	Configured     bool   `json:"configured"`
 	Linked         bool   `json:"linked"`
+	ClientID       string `json:"clientId,omitempty"`
 	TokenExpiresAt string `json:"tokenExpiresAt,omitempty"`
 }
 
@@ -137,6 +140,7 @@ func traktConnectionSummaryHandler(store *trakt.Store) http.HandlerFunc {
 		summary := traktConnectionSummary{
 			Configured: true,
 			Linked:     conn.Tokens.Linked(),
+			ClientID:   conn.ClientID,
 		}
 		if !conn.ExpiresAt.IsZero() {
 			summary.TokenExpiresAt = conn.ExpiresAt.UTC().Format(time.RFC3339)
@@ -315,8 +319,19 @@ func startTraktDeviceFlowHandlerWithBaseURL(store *trakt.Store, flow *traktDevic
 }
 
 // traktDevicePollResponse is POST /api/trakt/device/poll's response.
+// {linked, pending} rather than the internal 4-state traktDeviceStatus
+// directly — worker-5's tested frontend polling loop only ever branches on
+// `linked` (success) vs. not, so `linked`/`pending` is the wire contract;
+// expired and denied both collapse to {linked:false, pending:false}. No
+// information the frontend actually reads is lost: the frontend has its
+// own client-side deadline for "expired", and a poll after either terminal
+// state clears (errNoTraktDeviceFlow, 409) is what surfaces "start over."
+// (Fixed 2026-07-14 after worker-1 found the mismatch against the real
+// frontend/src/api/trakt.ts — the original {status: string} shape here was
+// never read by the frontend, so a real link would poll forever.)
 type traktDevicePollResponse struct {
-	Status string `json:"status"` // "pending" | "linked" | "expired" | "denied"
+	Linked  bool `json:"linked"`
+	Pending bool `json:"pending"`
 }
 
 // traktDeviceFlowStatusHandler makes one poll attempt and reports the
@@ -358,7 +373,10 @@ func traktDeviceFlowStatusHandlerWithBaseURL(store *trakt.Store, flow *traktDevi
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(traktDevicePollResponse{Status: string(status)})
+		json.NewEncoder(w).Encode(traktDevicePollResponse{
+			Linked:  status == traktDeviceStatusLinked,
+			Pending: status == traktDeviceStatusPending,
+		})
 	}
 }
 
