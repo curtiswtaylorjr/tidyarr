@@ -34,6 +34,7 @@ const scene = (over: Partial<AdultDiscoverItem>): AdultDiscoverItem => ({
   date: "2023-02-02",
   image: "",
   durationSeconds: 1800,
+  rating: 0,
   ...over,
 });
 
@@ -58,15 +59,19 @@ const stubFetch = (handler: Handler) => {
 const autograbCalls = (calls: Call[]) =>
   calls.filter((c) => c.url.includes("/autograb"));
 
-// mainstreamDefaults quiets the combined page's background fetches (the other
-// category rows, the library row, per-card poster probes, TraktWatchlistRow's
-// status check) so each test only special-cases the mode + call it asserts on.
+// mainstreamDefaults quiets the combined page's background fetches (the
+// three category rows, the library row, per-card poster probes,
+// TraktWatchlistRow's status check) plus the Adult browse rows
+// (studios/performers) so each test only special-cases the mode + call it
+// asserts on.
 const mainstreamDefaults = (url: string): Response | null => {
   if (url.includes("/discover")) return jsonResponse([]);
   if (url.includes("/tracked")) return jsonResponse([]);
   if (url.includes("/poster")) return jsonResponse({ posterPath: "" });
   if (url.includes("/api/trakt/status"))
     return jsonResponse({ configured: false, linked: false });
+  if (url.includes("/studios")) return jsonResponse([]);
+  if (url.includes("/performers")) return jsonResponse([]);
   return null;
 };
 
@@ -319,7 +324,10 @@ describe("Discover auto-grab — Series (per-item picker gates the grab)", () =>
 describe("Discover auto-grab — Adult (runtime-sourced)", () => {
   it("grabs a scene sourcing durationSeconds as the scorer runtime", async () => {
     const calls = stubFetch((url) => {
-      if (url.includes("/api/modes/adult/discover"))
+      // The Adult browse now stacks two scene rows (Recently Released,
+      // Highest Rated). Return the scene from ONLY the recent row so exactly one
+      // "Grab" button renders — the grab-flow assertions below are unchanged.
+      if (url.includes("/api/modes/adult/discover") && url.includes("category=recent"))
         return jsonResponse([scene({ id: "s1", title: "Scene One", studio: "Vixen", durationSeconds: 2400 })]);
       if (url.includes("/api/modes/adult/autograb"))
         return jsonResponse({

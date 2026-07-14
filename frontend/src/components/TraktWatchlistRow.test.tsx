@@ -10,7 +10,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@solidjs/testing-library";
 import { TraktWatchlistRow } from "./TraktWatchlistRow";
-import type { GrabTarget } from "../screens/Discover";
+import type { GrabTarget } from "../screens/discover/shared";
 
 const jsonResponse = (obj: unknown): Response =>
   new Response(JSON.stringify(obj), {

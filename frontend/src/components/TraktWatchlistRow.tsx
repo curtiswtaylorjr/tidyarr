@@ -1,28 +1,24 @@
-// TraktWatchlistRow — Discover's "Trakt Watchlist" row (task #8): titles the
-// operator marked "want to watch" on Trakt but doesn't own yet. Self-guards on
-// Trakt's connection status so it renders nothing until an account is linked
-// (Settings' Trakt section, Settings.tsx's TraktConnectionSection, is where
-// that happens) — no other Discover code needs to know whether Trakt is
-// configured.
+// TraktWatchlistRow — Discover's "Trakt Watchlist" row: titles the operator
+// marked "want to watch" on Trakt but doesn't own yet. Self-guards on Trakt's
+// connection status so it renders nothing until an account is linked
+// (Settings' Connections tab is where that happens) — no other Discover code
+// needs to know whether Trakt is configured.
 //
-// Not wired into Discover.tsx yet (same "component built standalone, wired by
-// a later task" pattern worker-3's Carousel.tsx used) — mount
-// `<TraktWatchlistRow onGrab={setGrabTarget} />` inside MainstreamDiscover,
-// sharing its existing grab dialog. GrabButton/GrabTarget are imported from
-// Discover.tsx (exported there for exactly this reuse) rather than
-// reimplemented, so a watchlist card grabs through the identical
-// auto-grab/season-episode-picker path every other Discover card does.
-//
-// PLACEHOLDER: fetchTraktStatus/fetchTraktWatchlist (src/api/trakt.ts) call a
-// proposed, not-yet-confirmed backend contract — task #5 (worker-1) owns the
-// real routes/DTOs. See trakt.ts's file doc comment.
+// Mounted as `<TraktWatchlistRow onGrab={setGrabTarget} />` inside
+// MainstreamDiscover (discover/Mainstream.tsx), sharing its existing grab
+// dialog. GrabButton/GrabTarget come from discover/Mainstream.tsx and
+// discover/shared.tsx respectively (Discover.tsx is now just a thin
+// re-export shim over discover/index.tsx) rather than reimplemented, so a
+// watchlist card grabs through the identical auto-grab/season-episode-picker
+// path every other Discover card does.
 
 import { type Component, createResource, Show } from "solid-js";
 import { Carousel } from "./Carousel";
 import { ErrorText } from "./ui";
 import { fetchTraktStatus, fetchTraktWatchlist, type TraktWatchlistItem } from "../api/trakt";
 import { fetchTitlePoster, tmdbPoster, type DiscoverItem } from "../api/discover";
-import { GrabButton, type GrabTarget } from "../screens/Discover";
+import { GrabButton } from "../screens/discover/Mainstream";
+import { type GrabTarget } from "../screens/discover/shared";
 
 // TextPoster mirrors Discover.tsx's own fallback tile (not exported from
 // there — small enough to duplicate rather than grow that file's export
