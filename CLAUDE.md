@@ -309,3 +309,55 @@ above, so don't drop them for convenience:
     this fix — the old handler used `availability.Result` directly). Left
     alone since removing it means regenerating `ts/dto.gen.ts`; fine to clean
     up in a future pass.
+
+- **Mainstream Discover — Seerr-parity expansion (2026-07-14)**: supersedes
+  this section's earlier "paginated Trending/Popular rows" description —
+  rows are now horizontal arrow-navigated carousels
+  (`frontend/src/components/Carousel.tsx`, bounds-aware disable, lazy-load
+  near the trailing edge), and Mainstream gained fixed **Upcoming
+  Movies/Upcoming Shows** rows alongside Trending/Popular (still TMDB-only,
+  the no-Prowlarr rule above still holds). Two new features layer on top:
+  - **Admin-defined custom Discover sliders** (Seerr's CreateSlider/
+    DiscoverSliderEdit equivalent) — `internal/discoversliders` (SQLite-backed
+    CRUD + reorder, migration `0023`), `internal/api/discover_sliders.go`
+    (CRUD + resolve-to-TMDB-items routes), a Settings → **Sliders** tab
+    (`frontend/src/screens/SliderAdmin.tsx`) to create/edit/reorder/delete.
+    Filter types: `genre|keyword|studio|network|upcoming|trending|popular`;
+    `filter_value` required for the first four, forbidden for the fixed
+    three (enforced both by the Store and the editor's picker UI, not a
+    freeform text field). Target `movie|tv|mixed` — a mixed slider's items
+    are movie-then-tv concatenated server-side; each card still grabs
+    through its own mode's path (never routed through the wrong one).
+  - **Trakt.tv watchlist integration** — `internal/trakt` (OAuth device-code
+    flow, encrypted credential/token storage via `internal/secrets`,
+    migration `0022`), a Settings → Connections "Trakt (Watchlist)" card
+    (client_id/secret, three-state secret semantics, Connect button →
+    device code + verification URL → polls to Connected), and a Discover
+    "Trakt Watchlist" row that only renders once linked. **Config-driven,
+    not hardcoded** — client_id/secret come from a Trakt application the
+    operator registers themselves at trakt.tv/oauth/applications, same
+    externally-owned-app pattern as any OAuth integration.
+  - **Auto-grab's "service isn't configured" failures now get an in-dialog
+    setup prompt** instead of a bare error (or, before a same-day fix,
+    getting permanently stuck — see below): `GrabError` in Discover.tsx
+    detects a missing Prowlarr/qBittorrent/NZBGet from the backend's fixed
+    error strings and renders a URL(+username/password or +API key) form
+    reusing the same `upsertConnection`/`buildConnectionUpsertBody` Settings'
+    own form calls, plus a LAN-discovery hint (`fetchNetscanKnown`,
+    confirm-first — never silently auto-fills, same convention as Settings'
+    `ConnectionRow`). Shared by both Mainstream and Adult (one `GrabDialog`
+    component, Prowlarr/qBittorrent/NZBGet are global connections, not
+    per-mode) — no separate Adult-specific work needed.
+  - **Real bug found and fixed during this work's own verification pass**:
+    `GrabDialog`'s error and success branches were sibling `<Show>` blocks,
+    so the success branch's `result()` read still executed even while
+    `result.error` was set — Solid resources re-throw on read after the
+    fetcher errors (by design, for `ErrorBoundary` integration), and that
+    uncaught throw happened mid-render, leaving the dialog stuck on
+    "Searching and scoring releases…" forever. Fixed by nesting the success
+    Show inside `when={!result.error}`. Independently architect-reviewed
+    (fresh context, own build/test run): PASS, no blocking findings.
+  - See `docs/ROADMAP.md`'s new "Unified downloader" backlog entry — this
+    work's two-separate-external-apps friction (Prowlarr for search, then
+    qBittorrent *or* NZBGet for the actual download) is the concrete driver
+    for that idea, not yet started.
