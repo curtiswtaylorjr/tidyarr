@@ -23,15 +23,14 @@ export type Mode = "movies" | "series" | "adult";
 // mirror.
 export type ProposalStatus = "pending" | "unmatched" | "applied" | "dismissed";
 
-// DiscoverCategory selects which TMDB list a Movies/Series row renders.
-// "trending"/"popular" are confirmed — the only two the backend's
-// discoverHandler accepts today. "upcoming" is PROVISIONAL (task #6,
-// speculative pending task #5's endpoint wiring of worker-1's already-
-// committed tmdb.Client.UpcomingMovies/UpcomingTV): it assumes discoverHandler
-// grows an "upcoming" case on the same `category=` query param, mirroring
-// UpcomingMovies/UpcomingTV's identical (ctx, page) shape to Popular's. If #5
-// lands with a different param/path, only this line and MAINSTREAM_ROWS'
-// two "Upcoming" entries in Discover.tsx need to change.
+// DiscoverCategory selects which TMDB list a Movies/Series row renders —
+// "trending" | "popular" | "upcoming", all three confirmed against task #5's
+// committed discoverHandler (internal/api/discover.go), which also accepts
+// "genre"/"studio"/"network" (with a required genreId/studioId/networkId
+// query param) for the admin slider system's per-filter resolve path — those
+// three aren't used directly here since Discover's genre/studio/network rows
+// go through discoverSliders.ts's slider-resolve endpoint instead of a fixed
+// category row.
 export type DiscoverCategory = "trending" | "popular" | "upcoming";
 
 // TMDB_POSTER_BASE builds a full image.tmdb.org URL from a bare posterPath

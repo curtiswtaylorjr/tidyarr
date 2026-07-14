@@ -82,9 +82,8 @@ import { TraktWatchlistRow } from "../components/TraktWatchlistRow";
 type ModedTitle = { mode: "movies" | "series"; item: DiscoverItem };
 
 // MAINSTREAM_ROWS is the fixed set of TMDB category rows the Mainstream page
-// stacks: both modes × both categories. Each row paginates independently. The
-// two "Upcoming" entries are PROVISIONAL (task #6, speculative pending task
-// #5 — see DiscoverCategory's doc comment in src/api/discover.ts).
+// stacks: both modes × three categories (trending/popular/upcoming). Each row
+// paginates independently.
 const MAINSTREAM_ROWS: {
   title: string;
   mode: "movies" | "series";
@@ -729,12 +728,11 @@ function sliderItemMode(
   return item.mediaType === "tv" ? "series" : "movies";
 }
 
-// SliderRow is one admin-defined custom slider (PROVISIONAL — task #6,
-// speculative pending task #5's slider-items endpoint; see
-// src/api/discoverSliders.ts's file-level doc comment), paginated the same
-// way PaginatedRow is. A fetch failure bubbles to onError so it raises the
-// same setup modal a built-in row's failure would (sliders are TMDB-sourced
-// too).
+// SliderRow is one admin-defined custom slider, paginated the same way
+// PaginatedRow is (GET /api/discover/sliders/{id}/resolve, see
+// src/api/discoverSliders.ts). A fetch failure bubbles to onError so it
+// raises the same setup modal a built-in row's failure would (sliders are
+// TMDB-sourced too).
 const SliderRow: Component<{
   slider: Slider;
   reloadToken: () => number;
@@ -788,11 +786,11 @@ const SliderRow: Component<{
   );
 };
 
-// SliderRows fetches the admin-defined slider list (PROVISIONAL — task #6,
-// speculative pending task #5/#7; see src/api/discoverSliders.ts) and renders
-// one SliderRow per enabled slider, in the backend's own sort_order. Renders
-// nothing while empty (no custom sliders configured yet, or task #7's editor
-// hasn't shipped) rather than an empty-state row per absent slider.
+// SliderRows fetches the admin-defined slider list (GET /api/discover/sliders,
+// see src/api/discoverSliders.ts) and renders one SliderRow per enabled
+// slider, in the backend's own sort_order. Renders nothing while empty (no
+// custom sliders configured yet, or task #7's editor hasn't shipped) rather
+// than an empty-state row per absent slider.
 const SliderRows: Component<{
   reloadToken: () => number;
   onGrab: (t: GrabTarget) => void;

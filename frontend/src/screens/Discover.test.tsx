@@ -138,7 +138,7 @@ describe("Discover — Mainstream combined rows", () => {
   });
 });
 
-describe("Discover — Upcoming rows (PROVISIONAL, pending task #5)", () => {
+describe("Discover — Upcoming rows", () => {
   it("renders Upcoming Movies/Upcoming Shows rows with cards from category=upcoming", async () => {
     stubFetch((url) => {
       if (url.includes("/api/modes/movies/discover") && url.includes("category=upcoming"))
@@ -159,16 +159,16 @@ describe("Discover — Upcoming rows (PROVISIONAL, pending task #5)", () => {
   });
 });
 
-describe("Discover — custom slider rows (PROVISIONAL, pending task #5/#7)", () => {
-  it("renders one carousel row per enabled slider, from /api/discover-sliders + its items endpoint", async () => {
+describe("Discover — custom slider rows", () => {
+  it("renders one carousel row per enabled slider, from /api/discover/sliders + its resolve endpoint", async () => {
     stubFetch((url) => {
-      if (url === "/api/discover-sliders") {
+      if (url === "/api/discover/sliders") {
         return jsonResponse([
-          { id: 1, title: "Heist Movies", filterType: "keyword", filterValue: "heist", target: "movie", sortOrder: 0, enabled: true },
-          { id: 2, title: "Disabled Row", filterType: "genre", filterValue: "35", target: "movie", sortOrder: 1, enabled: false },
+          { id: 1, title: "Heist Movies", filterType: "keyword", filterValue: "heist", target: "movie", sortOrder: 0, enabled: true, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z" },
+          { id: 2, title: "Disabled Row", filterType: "genre", filterValue: "35", target: "movie", sortOrder: 1, enabled: false, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z" },
         ]);
       }
-      if (url.includes("/api/discover-sliders/1/items"))
+      if (url.includes("/api/discover/sliders/1/resolve"))
         return jsonResponse([movie({ id: 100, title: "Heist Movie One" })]);
       const d = mainstreamDefaults(url);
       if (d) return d;
@@ -185,12 +185,12 @@ describe("Discover — custom slider rows (PROVISIONAL, pending task #5/#7)", ()
 
   it("routes a mixed-target slider's per-item grab mode from the item's own mediaType", async () => {
     stubFetch((url) => {
-      if (url === "/api/discover-sliders") {
+      if (url === "/api/discover/sliders") {
         return jsonResponse([
-          { id: 5, title: "Mixed Row", filterType: "trending", filterValue: "", target: "mixed", sortOrder: 0, enabled: true },
+          { id: 5, title: "Mixed Row", filterType: "trending", filterValue: "", target: "mixed", sortOrder: 0, enabled: true, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z" },
         ]);
       }
-      if (url.includes("/api/discover-sliders/5/items")) {
+      if (url.includes("/api/discover/sliders/5/resolve")) {
         return jsonResponse([
           movie({ id: 200, title: "Mixed Movie Item", mediaType: "movie" }),
           movie({ id: 201, title: "Mixed Show Item", mediaType: "tv" }),
