@@ -25,33 +25,49 @@ import (
 // Every handler below builds its own *trakt.Client per request from
 // whatever credentials are currently in trakt.Store, rather than holding a
 // long-lived *trakt.Client/*trakt.Session — client_id/secret can change at
-// any time via traktSaveCredentialsHandler, and a stale cached Client would
-// silently keep using the old pair.
+// any time via saveTraktCredentialsHandler, and a stale cached Client would
+// silently keep using the old pair. baseURL is trakt.DefaultBaseURL in every
+// production call site; each public handler has a *WithBaseURL sibling so
+// tests can still point it at a fake server (see this project's house HTTP
+// client convention: an explicit Config.BaseURL, never a literal baked into
+// the call site).
 //
 // Route shape (authoritative contract, adopted from worker-5's already-
 // tested frontend — supersedes an earlier draft that incorrectly merged
 // device-poll and general-status into one endpoint):
 //
-//	GET  /api/trakt/status          -> traktStatusHandler
-//	PUT  /api/trakt/credentials     -> traktSaveCredentialsHandler
-//	POST /api/trakt/device/start    -> traktDeviceStartHandler
-//	POST /api/trakt/device/poll     -> traktDevicePollHandler
+//	GET  /api/trakt/status          -> traktConnectionSummaryHandler
+//	PUT  /api/trakt/credentials     -> saveTraktCredentialsHandler
+//	POST /api/trakt/device/start    -> startTraktDeviceFlowHandler
+//	POST /api/trakt/device/poll     -> traktDeviceFlowStatusHandler
 //	POST /api/trakt/disconnect      -> traktDisconnectHandler
 //	GET  /api/trakt/watchlist       -> traktWatchlistHandler
 //
 // plus TestConnection's "trakt" case (testTrakt), unrelated to this route
 // table since it's dispatched from the existing /api/connections/test route.
+//
+// NOTE on /api/trakt/device/poll: it is POST, not GET, and its handler
+// builds a fresh *trakt.Client per request from the store rather than
+// taking a pre-built *trakt.Client — both deliberate (see each handler's
+// doc comment below) — flagged here because an earlier integration request
+// asked for GET + a long-lived *trakt.Client param instead.
 
 // testTrakt is TestConnection's "trakt" case content — mirrors
-// testTMDB/testOllama/etc.'s shape exactly (same ConnectionTestResult
-// return type, already defined in connections.go). Trakt's
-// ConnectionTestRequest has no dedicated client_id field, so by convention
-// the existing generic APIKey field carries client_id here (client_secret
-// isn't needed — Ping only validates client_id against a public,
-// non-OAuth endpoint). baseURL is threaded through explicitly (rather than
-// reaching for trakt.DefaultBaseURL internally) so tests can point it at a
-// fake server; production wiring passes trakt.DefaultBaseURL.
-func testTrakt(ctx context.Context, httpClient *http.Client, baseURL, clientID string) ConnectionTestResult {
+// testTMDB/testOllama/etc.'s shape exactly: takes the existing
+// ConnectionTestRequest unchanged (no new fields) and returns the existing
+// ConnectionTestResult. Trakt's ConnectionTestRequest has no dedicated
+// client_id field, so by convention the generic APIKey field carries
+// client_id here (client_secret isn't needed — Ping only validates
+// client_id against a public, non-OAuth endpoint).
+func testTrakt(ctx context.Context, httpClient *http.Client, req ConnectionTestRequest) ConnectionTestResult {
+	return testTraktWithBaseURL(ctx, httpClient, trakt.DefaultBaseURL, req.APIKey)
+}
+
+// testTraktWithBaseURL is testTrakt's actual implementation, with baseURL
+// broken out so tests can point it at a fake server — testTrakt itself
+// always passes trakt.DefaultBaseURL, per this project's convention of a
+// real Config.BaseURL rather than a literal baked into the call site.
+func testTraktWithBaseURL(ctx context.Context, httpClient *http.Client, baseURL, clientID string) ConnectionTestResult {
 	c := trakt.New(trakt.Config{BaseURL: baseURL, ClientID: clientID}, httpClient)
 	if err := c.Ping(ctx); err != nil {
 		return ConnectionTestResult{Error: err.Error()}
@@ -67,10 +83,10 @@ type traktCredentialsRequest struct {
 	ClientSecret *string `json:"clientSecret,omitempty"`
 }
 
-// traktSaveCredentialsHandler persists the operator-entered Trakt
+// saveTraktCredentialsHandler persists the operator-entered Trakt
 // application (client_id/client_secret). Doesn't touch any linked account's
 // tokens — see trakt.Store.SaveCredentials.
-func traktSaveCredentialsHandler(store *trakt.Store) http.HandlerFunc {
+func saveTraktCredentialsHandler(store *trakt.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req traktCredentialsRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -89,43 +105,43 @@ func traktSaveCredentialsHandler(store *trakt.Store) http.HandlerFunc {
 	}
 }
 
-// traktStatus is GET /api/trakt/status's response — the general "is Trakt
-// usable right now" summary consumed both by Settings (to render
+// traktConnectionSummary is GET /api/trakt/status's response — the general
+// "is Trakt usable right now" summary consumed both by Settings (to render
 // configured/linked state) and by the Discover watchlist row (to decide
 // whether to render at all). Deliberately minimal per the authoritative
 // contract (team-lead, adopting worker-5's already-tested frontend shape):
 // no ClientID/HasClientSecret here — this is a general-purpose status
 // check, not a Settings-only detail view. Never exposes the real secret or
 // tokens, only whether they're set.
-type traktStatus struct {
+type traktConnectionSummary struct {
 	Configured     bool   `json:"configured"`
 	Linked         bool   `json:"linked"`
 	TokenExpiresAt string `json:"tokenExpiresAt,omitempty"`
 }
 
-// traktStatusHandler returns the current Trakt connection state. An
-// unconfigured connection is not an error — it returns the zero-value
-// status (Configured: false).
-func traktStatusHandler(store *trakt.Store) http.HandlerFunc {
+// traktConnectionSummaryHandler returns the current Trakt connection state
+// (route: GET /api/trakt/status). An unconfigured connection is not an
+// error — it returns the zero-value summary (Configured: false).
+func traktConnectionSummaryHandler(store *trakt.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		conn, err := store.Get(r.Context())
 		w.Header().Set("Content-Type", "application/json")
 		if errors.Is(err, trakt.ErrNotConfigured) {
-			json.NewEncoder(w).Encode(traktStatus{})
+			json.NewEncoder(w).Encode(traktConnectionSummary{})
 			return
 		}
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		status := traktStatus{
+		summary := traktConnectionSummary{
 			Configured: true,
 			Linked:     conn.Tokens.Linked(),
 		}
 		if !conn.ExpiresAt.IsZero() {
-			status.TokenExpiresAt = conn.ExpiresAt.UTC().Format(time.RFC3339)
+			summary.TokenExpiresAt = conn.ExpiresAt.UTC().Format(time.RFC3339)
 		}
-		json.NewEncoder(w).Encode(status)
+		json.NewEncoder(w).Encode(summary)
 	}
 }
 
@@ -150,8 +166,9 @@ func traktDisconnectHandler(store *trakt.Store) http.HandlerFunc {
 // device flow is inherently two-step (RequestDeviceCode, then repeated
 // PollDeviceToken) and the frontend can't be trusted/expected to hold the
 // device_code itself across polls. Deliberately separate from
-// traktStatusHandler above (that's the general "is Trakt usable" check used
-// everywhere; this is Connect-flow-only, in-progress-authorization state).
+// traktConnectionSummaryHandler above (that's the general "is Trakt usable"
+// check used everywhere; this is Connect-flow-only, in-progress-
+// authorization state).
 // A single mutex-guarded field is correct, not a premature simplification,
 // because this project is single-operator/single-connection throughout
 // (CLAUDE.md) — there is never more than one Trakt account being linked at
@@ -184,7 +201,7 @@ func (f *traktDeviceFlow) start(ctx context.Context, client *trakt.Client) (*tra
 	return dc, nil
 }
 
-// traktDeviceStatus is one of the four values traktDevicePollHandler's
+// traktDeviceStatus is one of the four values traktDeviceFlowStatusHandler's
 // JSON response reports.
 type traktDeviceStatus string
 
@@ -263,10 +280,14 @@ type traktDeviceStartResponse struct {
 	Interval        int    `json:"interval"`
 }
 
-// traktDeviceStartHandler starts a new device-code authorization. Returns
-// 412 Precondition Failed if no client_id/secret has been saved yet — there's
-// nothing to authorize against.
-func traktDeviceStartHandler(store *trakt.Store, flow *traktDeviceFlow, httpClient *http.Client, baseURL string) http.HandlerFunc {
+// startTraktDeviceFlowHandler starts a new device-code authorization.
+// Returns 412 Precondition Failed if no client_id/secret has been saved yet
+// — there's nothing to authorize against.
+func startTraktDeviceFlowHandler(store *trakt.Store, flow *traktDeviceFlow, httpClient *http.Client) http.HandlerFunc {
+	return startTraktDeviceFlowHandlerWithBaseURL(store, flow, httpClient, trakt.DefaultBaseURL)
+}
+
+func startTraktDeviceFlowHandlerWithBaseURL(store *trakt.Store, flow *traktDeviceFlow, httpClient *http.Client, baseURL string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 		client, err := traktClientFromStore(ctx, store, httpClient, baseURL)
@@ -298,14 +319,24 @@ type traktDevicePollResponse struct {
 	Status string `json:"status"` // "pending" | "linked" | "expired" | "denied"
 }
 
-// traktDevicePollHandler makes one poll attempt and reports the outcome.
-// Returns 409 Conflict if no flow is in progress (start wasn't called, or
-// the pending code was already resolved/cleared by an earlier poll). This
-// is intentionally a separate endpoint from traktStatusHandler (GET
-// /api/trakt/status) — one drives the Connect-flow UI's polling loop, the
-// other answers "is Trakt usable right now" everywhere else; conflating them
-// was an earlier draft's mistake, corrected per the authoritative contract.
-func traktDevicePollHandler(store *trakt.Store, flow *traktDeviceFlow, httpClient *http.Client, baseURL string) http.HandlerFunc {
+// traktDeviceFlowStatusHandler makes one poll attempt and reports the
+// outcome. Returns 409 Conflict if no flow is in progress (start wasn't
+// called, or the pending code was already resolved/cleared by an earlier
+// poll). Wired as POST /api/trakt/device/poll — intentionally a separate
+// endpoint from traktConnectionSummaryHandler (GET /api/trakt/status): one
+// drives the Connect-flow UI's polling loop (and has a side effect on
+// success — persisting tokens — hence POST, not GET), the other answers "is
+// Trakt usable right now" everywhere else; conflating them was an earlier
+// draft's mistake, corrected per the authoritative contract. Builds its own
+// *trakt.Client per call (via traktClientFromStore) rather than taking one
+// as a parameter, for the same staleness reason as every other handler in
+// this file — a client_id/secret update mid-flow must be picked up on the
+// very next poll, not require a server restart.
+func traktDeviceFlowStatusHandler(store *trakt.Store, flow *traktDeviceFlow, httpClient *http.Client) http.HandlerFunc {
+	return traktDeviceFlowStatusHandlerWithBaseURL(store, flow, httpClient, trakt.DefaultBaseURL)
+}
+
+func traktDeviceFlowStatusHandlerWithBaseURL(store *trakt.Store, flow *traktDeviceFlow, httpClient *http.Client, baseURL string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 		client, err := traktClientFromStore(ctx, store, httpClient, baseURL)
@@ -353,8 +384,16 @@ type traktWatchlistItem struct {
 // /api/trakt/status reports configured/linked; a 4xx here would just be
 // extra error-handling the frontend doesn't need for a read-only row. Any
 // other failure (e.g. Trakt itself erroring) is a real 502, since that's an
-// actual fetch failure worth surfacing.
-func traktWatchlistHandler(store *trakt.Store, httpClient *http.Client, baseURL string) http.HandlerFunc {
+// actual fetch failure worth surfacing. Builds its own *trakt.Session per
+// request (via traktClientFromStore) rather than taking one as a parameter
+// — same staleness reasoning as every other handler in this file, and it
+// also means callers don't need to manage a long-lived Session at wiring
+// time either.
+func traktWatchlistHandler(store *trakt.Store, httpClient *http.Client) http.HandlerFunc {
+	return traktWatchlistHandlerWithBaseURL(store, httpClient, trakt.DefaultBaseURL)
+}
+
+func traktWatchlistHandlerWithBaseURL(store *trakt.Store, httpClient *http.Client, baseURL string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 		client, err := traktClientFromStore(ctx, store, httpClient, baseURL)

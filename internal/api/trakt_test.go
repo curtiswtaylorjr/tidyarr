@@ -42,13 +42,31 @@ func newTraktTestStore(t *testing.T) *trakt.Store {
 func newTraktTestMux(store *trakt.Store, flow *traktDeviceFlow, traktSrvURL string) *http.ServeMux {
 	httpClient := testHTTPClient()
 	mux := http.NewServeMux()
-	mux.HandleFunc("PUT /trakt/credentials", traktSaveCredentialsHandler(store))
-	mux.HandleFunc("GET /trakt/status", traktStatusHandler(store))
+	mux.HandleFunc("PUT /trakt/credentials", saveTraktCredentialsHandler(store))
+	mux.HandleFunc("GET /trakt/status", traktConnectionSummaryHandler(store))
 	mux.HandleFunc("POST /trakt/disconnect", traktDisconnectHandler(store))
-	mux.HandleFunc("POST /trakt/device/start", traktDeviceStartHandler(store, flow, httpClient, traktSrvURL))
-	mux.HandleFunc("POST /trakt/device/poll", traktDevicePollHandler(store, flow, httpClient, traktSrvURL))
-	mux.HandleFunc("GET /trakt/watchlist", traktWatchlistHandler(store, httpClient, traktSrvURL))
+	mux.HandleFunc("POST /trakt/device/start", startTraktDeviceFlowHandlerWithBaseURL(store, flow, httpClient, traktSrvURL))
+	mux.HandleFunc("POST /trakt/device/poll", traktDeviceFlowStatusHandlerWithBaseURL(store, flow, httpClient, traktSrvURL))
+	mux.HandleFunc("GET /trakt/watchlist", traktWatchlistHandlerWithBaseURL(store, httpClient, traktSrvURL))
 	return mux
+}
+
+// TestTraktPublicWrapperSignatures locks in the exact public signatures
+// worker-1 wires into handler.go/NewMux — these are NOT exercised here
+// (calling them would hit the real Trakt API, since they hardcode
+// trakt.DefaultBaseURL internally with no override); the *WithBaseURL
+// siblings above cover actual behavior against a fake server. If any of
+// these assignments stop compiling, worker-1's wiring call sites broke.
+func TestTraktPublicWrapperSignatures(t *testing.T) {
+	var (
+		_ func(context.Context, *http.Client, ConnectionTestRequest) ConnectionTestResult = testTrakt
+		_ func(*trakt.Store) http.HandlerFunc                                             = saveTraktCredentialsHandler
+		_ func(*trakt.Store) http.HandlerFunc                                             = traktConnectionSummaryHandler
+		_ func(*trakt.Store) http.HandlerFunc                                             = traktDisconnectHandler
+		_ func(*trakt.Store, *traktDeviceFlow, *http.Client) http.HandlerFunc             = startTraktDeviceFlowHandler
+		_ func(*trakt.Store, *traktDeviceFlow, *http.Client) http.HandlerFunc             = traktDeviceFlowStatusHandler
+		_ func(*trakt.Store, *http.Client) http.HandlerFunc                               = traktWatchlistHandler
+	)
 }
 
 func TestTestTrakt_ValidAndInvalidClientID(t *testing.T) {
@@ -62,12 +80,12 @@ func TestTestTrakt_ValidAndInvalidClientID(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	result := testTrakt(context.Background(), testHTTPClient(), srv.URL, "good-id")
+	result := testTraktWithBaseURL(context.Background(), testHTTPClient(), srv.URL, "good-id")
 	if !result.OK || result.Error != "" {
 		t.Fatalf("expected success for a valid client_id, got %+v", result)
 	}
 
-	result = testTrakt(context.Background(), testHTTPClient(), srv.URL, "bad-id")
+	result = testTraktWithBaseURL(context.Background(), testHTTPClient(), srv.URL, "bad-id")
 	if result.OK {
 		t.Fatal("expected failure for an invalid client_id")
 	}
@@ -144,18 +162,18 @@ func TestTraktSaveCredentialsHandler_RequiresClientID(t *testing.T) {
 	}
 }
 
-func TestTraktStatusHandler(t *testing.T) {
+func TestTraktConnectionSummaryHandler(t *testing.T) {
 	store := newTraktTestStore(t)
 	mux := newTraktTestMux(store, newTraktDeviceFlow(), "")
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	get := func() traktStatus {
+	get := func() traktConnectionSummary {
 		resp, err := http.Get(srv.URL + "/trakt/status")
 		if err != nil {
 			t.Fatalf("GET failed: %v", err)
 		}
-		var status traktStatus
+		var status traktConnectionSummary
 		if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
 			t.Fatalf("decoding response: %v", err)
 		}
@@ -344,7 +362,7 @@ func TestTraktDeviceFlow_FullHappyPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET failed: %v", err)
 	}
-	var status traktStatus
+	var status traktConnectionSummary
 	json.NewDecoder(statusResp.Body).Decode(&status)
 	if !status.Linked {
 		t.Fatalf("expected /trakt/status to report linked, got %+v", status)
