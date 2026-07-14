@@ -108,7 +108,7 @@ func (s *Store) List(ctx context.Context, m mode.Mode) ([]Grab, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, mode, title, tmdb_id, tvdb_id, season_number, episode_number, season_specified, quality_profile_id, indexer, protocol,
 		       download_client, client_ref, status, root_folder_path, flagged_for_review, flag_reason, created_at, updated_at
-		FROM grabs WHERE mode = ? ORDER BY created_at DESC
+		FROM grabs WHERE mode = ? ORDER BY created_at DESC, id DESC
 	`, string(m))
 	if err != nil {
 		return nil, fmt.Errorf("listing grabs: %w", err)
