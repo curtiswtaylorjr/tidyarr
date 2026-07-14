@@ -23,9 +23,15 @@ export type Mode = "movies" | "series" | "adult";
 // mirror.
 export type ProposalStatus = "pending" | "unmatched" | "applied" | "dismissed";
 
-// DiscoverCategory selects which TMDB list a Movies/Series row renders. These
-// are the only two the backend's discoverHandler accepts (trending | popular).
-export type DiscoverCategory = "trending" | "popular";
+// DiscoverCategory selects which TMDB list a Movies/Series row renders —
+// "trending" | "popular" | "upcoming", all three confirmed against task #5's
+// committed discoverHandler (internal/api/discover.go), which also accepts
+// "genre"/"studio"/"network" (with a required genreId/studioId/networkId
+// query param) for the admin slider system's per-filter resolve path — those
+// three aren't used directly here since Discover's genre/studio/network rows
+// go through discoverSliders.ts's slider-resolve endpoint instead of a fixed
+// category row.
+export type DiscoverCategory = "trending" | "popular" | "upcoming";
 
 // TMDB_POSTER_BASE builds a full image.tmdb.org URL from a bare posterPath
 // (e.g. "/abc.jpg"). The browser never requests this host directly —
