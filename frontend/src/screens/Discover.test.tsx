@@ -422,15 +422,27 @@ describe("Discover — Adult tab (row-based browse)", () => {
   });
 
   it("appends the next page to an admin newest row on Show more (append, not replace)", async () => {
+    // Page 1 returns a FULL page (20 items, matching PaginatedStrip's
+    // exhaustion heuristic — see shared.tsx's defaultStripPageSize) so
+    // "Show more" renders after page 1; a batch smaller than a full page
+    // marks the row exhausted immediately (this is itself the regression
+    // test's whole point — see the sibling "hides Show more" test below).
+    const pageOneItems = Array.from({ length: 20 }, (_, i) => ({
+      id: `r1-${i}`,
+      title: `Newest Page One Item ${i}`,
+      studio: "Vixen",
+      date: "2026-01-01",
+      image: "https://cdn.theporndb.net/scenes/one.jpg",
+      source: "tpdb",
+      rowType: "scene",
+    }));
     const fetchMock = stubFetch((url) => {
       if (url.includes("/newest-rows/1/resolve")) {
         if (url.includes("page=2"))
           return jsonResponse([
             { id: "r2", title: "Newest Page Two", studio: "Vixen", date: "2026-01-01", image: "https://cdn.theporndb.net/scenes/two.jpg", source: "tpdb", rowType: "scene" },
           ]);
-        return jsonResponse([
-          { id: "r1", title: "Newest Page One", studio: "Vixen", date: "2026-01-01", image: "https://cdn.theporndb.net/scenes/one.jpg", source: "tpdb", rowType: "scene" },
-        ]);
+        return jsonResponse(pageOneItems);
       }
       if (url.includes("/newest-rows"))
         return jsonResponse([
@@ -445,16 +457,44 @@ describe("Discover — Adult tab (row-based browse)", () => {
     fireEvent.click(await screen.findByText("Adult"));
 
     // Only the Newest Scenes row has items → exactly one "Show more".
-    expect(await screen.findByText("Newest Page One")).toBeInTheDocument();
+    expect(await screen.findByText("Newest Page One Item 0")).toBeInTheDocument();
     fireEvent.click(await screen.findByText("Show more"));
 
     expect(await screen.findByText("Newest Page Two")).toBeInTheDocument();
-    expect(screen.getByText("Newest Page One")).toBeInTheDocument();
+    expect(screen.getByText("Newest Page One Item 0")).toBeInTheDocument();
     expect(
       fetchMock.mock.calls.some(([u]) =>
         String(u).includes("/newest-rows/1/resolve") && String(u).includes("page=2"),
       ),
     ).toBe(true);
+  });
+
+  // Regression test for the live "Show more doesn't do anything" report
+  // (2026-07-15): a row with fewer than a full page of items used to still
+  // render "Show more" (the old exhaustion check only fired on a fully
+  // EMPTY page), so clicking it silently fetched an empty page 2 and did
+  // nothing visible. A batch smaller than a full page must hide the button
+  // immediately, without waiting for a second round trip.
+  it("hides Show more immediately when the first page is smaller than a full page", async () => {
+    stubFetch((url) => {
+      if (url.includes("/newest-rows/1/resolve"))
+        return jsonResponse([
+          { id: "r1", title: "Only Item", studio: "Vixen", date: "2026-01-01", image: "https://cdn.theporndb.net/scenes/one.jpg", source: "tpdb", rowType: "scene" },
+        ]);
+      if (url.includes("/newest-rows"))
+        return jsonResponse([
+          { id: 1, title: "Newest Scenes", rowType: "scene", sortOrder: 0, enabled: true, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z" },
+        ]);
+      const d = mainstreamDefaults(url);
+      if (d) return d;
+      throw new Error("unexpected fetch: " + url);
+    });
+
+    render(() => <Discover />);
+    fireEvent.click(await screen.findByText("Adult"));
+
+    expect(await screen.findByText("Only Item")).toBeInTheDocument();
+    expect(screen.queryByText("Show more")).not.toBeInTheDocument();
   });
 
   it("renders Studios/Performers as text tiles when they have no art", async () => {

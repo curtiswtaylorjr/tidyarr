@@ -568,6 +568,13 @@ export const TextPoster: Component<{ label: string }> = (props) => (
 // are supplied by the caller, so one pagination engine backs the Mainstream
 // TMDB rows, the Adult scene rows, the Studios/Performers browse rows, and the
 // drill-down scene grid alike (plan: reuse the pattern, don't reimplement it).
+// defaultStripPageSize matches every current PaginatedStrip caller's actual
+// backend page size (adultnewest.defaultResolvePerPage /
+// tpdbrest.defaultBrowsePerPage / stashbox.defaultBrowsePerPage — all 20).
+// Used only as the exhaustion heuristic's default (see perPage prop below);
+// not itself sent to the backend as a request param.
+const defaultStripPageSize = 20;
+
 export function PaginatedStrip<T>(props: {
   title: string;
   reloadToken: () => number;
@@ -582,6 +589,11 @@ export function PaginatedStrip<T>(props: {
   // independently-resorted page 2 after page 1, producing a visibly
   // non-monotonic rating order under a "Highest Rated" label).
   singlePage?: boolean;
+  // perPage is this row's backend page size, used ONLY to detect exhaustion
+  // a page early (see the load() doc comment below) — defaults to
+  // defaultStripPageSize, correct for every current caller. Override if a
+  // future caller's backend page size ever differs.
+  perPage?: number;
 }): JSX.Element {
   const [items, setItems] = createSignal<T[]>([]);
   const [page, setPage] = createSignal(0);
@@ -595,7 +607,17 @@ export function PaginatedStrip<T>(props: {
       const batch = await props.load(next);
       setItems((prev) => (reset ? batch : [...prev, ...batch]));
       setPage(next);
-      if (batch.length === 0) setExhausted(true);
+      // A batch smaller than a full page means this WAS the last page —
+      // checking only `=== 0` (the old behavior) missed this: a row with
+      // fewer than perPage total items returned everything on page 1
+      // (batch.length > 0), so "Show more" kept rendering even though
+      // nothing remained. Clicking it fetched an empty page 2, appended
+      // nothing, and only then hid the button — a silent round trip
+      // indistinguishable from the button doing nothing at all (found live,
+      // 2026-07-15).
+      if (batch.length < (props.perPage ?? defaultStripPageSize)) {
+        setExhausted(true);
+      }
     } catch (e) {
       props.onError(e);
     } finally {
