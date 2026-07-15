@@ -3,6 +3,8 @@ package api
 import (
 	"context"
 	"regexp"
+	"sync"
+	"time"
 
 	"github.com/curtiswtaylorjr/sakms/internal/identify"
 	"github.com/curtiswtaylorjr/sakms/internal/mode"
@@ -14,6 +16,38 @@ import (
 // tuned for exactly this "messy scene-name vs. known canonical title"
 // comparison, not a new number invented here.
 const titleSimilarityFloor = 0.2
+
+// AI-escalation bounds — found missing entirely in an earlier version of
+// this function, which caused a real production hang: a plain sequential
+// loop over EVERY raw release (no count cap, no concurrency, no phase
+// deadline beyond the shared httpClient's already-generous 15s per-call
+// timeout) meant a search returning 20-30 releases with a fast-path miss
+// could block the request for several minutes, and the frontend's fetch
+// wrapper has no client-side timeout either — a real "selecting titles
+// hangs checking availability" bug, not a hypothetical one. These three
+// bounds compose to cap the whole phase's worst case regardless of how
+// many releases came back or how slow any individual AI call is:
+// ceil(maxAIEscalationCandidates/aiEscalationConcurrency) batches, each
+// bounded by aiEscalationTimeout (which cancels in-flight HTTP requests
+// via context — every AIClient implementation already uses
+// http.NewRequestWithContext, so this isn't just a client-side abandon).
+const (
+	// maxAIEscalationCandidates bounds how many raw releases ever get an AI
+	// call — escalating every release in a large result set defeats "keep
+	// the common case fast." Only the first N (Prowlarr's own relevance
+	// ordering) are checked; this is a documented tradeoff, not a claim that
+	// AI-checking more would never help.
+	maxAIEscalationCandidates = 10
+	// aiEscalationConcurrency bounds how many AI calls run at once.
+	aiEscalationConcurrency = 4
+)
+
+// aiEscalationTimeout is a hard ceiling on the WHOLE escalation phase —
+// independent of the two bounds above, so even a pathological case (every
+// call slow) can't block the request past this. A var, not a const, purely
+// so a test can shrink it (save/restore) to prove the deadline is actually
+// enforced without a real ~20s test run.
+var aiEscalationTimeout = 20 * time.Second
 
 // languageTagPattern is a small, explicit, deterministic token list marking
 // a release title as carrying a non-English language tag — English is the
@@ -101,14 +135,49 @@ func FilterReleases(ctx context.Context, releases []prowlarr.Release, targetTitl
 // GuessTitle/ParseFilename's own "declined to guess" empty-title result)
 // just drops that one candidate — it never fails the whole filter, matching
 // the "no candidates" degrade-cleanly requirement.
+//
+// Bounded on three axes at once (see the consts' doc comment above) so this
+// phase's worst-case wall-clock time is predictable regardless of how many
+// releases Prowlarr returned: at most maxAIEscalationCandidates are ever
+// checked, at most aiEscalationConcurrency run at a time, and the whole
+// phase is cut off at aiEscalationTimeout even if individual calls are slow.
 func aiEscalateTitleMatch(ctx context.Context, releases []prowlarr.Release, targetTitle string, m mode.Mode, aiClient identify.AIClient) []prowlarr.Release {
-	out := make([]prowlarr.Release, 0)
-	for _, rel := range releases {
-		cleaned, err := cleanReleaseTitle(ctx, rel.Title, m, aiClient)
-		if err != nil || cleaned == "" {
-			continue
-		}
-		if identify.TitleSimilarity(targetTitle, cleaned) >= titleSimilarityFloor {
+	ctx, cancel := context.WithTimeout(ctx, aiEscalationTimeout)
+	defer cancel()
+
+	candidates := releases
+	if len(candidates) > maxAIEscalationCandidates {
+		candidates = candidates[:maxAIEscalationCandidates]
+	}
+
+	matched := make([]bool, len(candidates))
+	sem := make(chan struct{}, aiEscalationConcurrency)
+	var wg sync.WaitGroup
+	for i, rel := range candidates {
+		wg.Add(1)
+		go func(i int, rel prowlarr.Release) {
+			defer wg.Done()
+			select {
+			case sem <- struct{}{}:
+			case <-ctx.Done():
+				return
+			}
+			defer func() { <-sem }()
+
+			cleaned, err := cleanReleaseTitle(ctx, rel.Title, m, aiClient)
+			if err != nil || cleaned == "" {
+				return
+			}
+			if identify.TitleSimilarity(targetTitle, cleaned) >= titleSimilarityFloor {
+				matched[i] = true
+			}
+		}(i, rel)
+	}
+	wg.Wait()
+
+	out := make([]prowlarr.Release, 0, len(candidates))
+	for i, rel := range candidates {
+		if matched[i] {
 			out = append(out, rel)
 		}
 	}

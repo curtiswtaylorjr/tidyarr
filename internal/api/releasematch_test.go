@@ -3,7 +3,11 @@ package api
 import (
 	"context"
 	"fmt"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/curtiswtaylorjr/sakms/internal/mode"
 	"github.com/curtiswtaylorjr/sakms/internal/prowlarr"
@@ -12,14 +16,18 @@ import (
 // fakeReleaseMatchAI is a minimal identify.AIClient fake — counts calls and
 // delegates each response to fn, so tests can script exactly what the
 // (simulated) AI extracts per prompt without a real Ollama/OpenAI/etc. round
-// trip. Mirrors the shape of internal/rename's countingAI fake.
+// trip. Mirrors the shape of internal/rename's countingAI fake. calls is
+// atomic, not a plain int: aiEscalateTitleMatch now runs candidates
+// concurrently (see aiEscalationConcurrency), so more than one goroutine can
+// legitimately call ChatJSON on the same fake at once — a plain int here
+// raced under -race the moment a test used more than one release.
 type fakeReleaseMatchAI struct {
 	fn    func(prompt string) (map[string]any, error)
-	calls int
+	calls int32
 }
 
 func (f *fakeReleaseMatchAI) ChatJSON(ctx context.Context, prompt string) (map[string]any, error) {
-	f.calls++
+	atomic.AddInt32(&f.calls, 1)
 	if f.fn != nil {
 		return f.fn(prompt)
 	}
@@ -148,12 +156,14 @@ func TestFilterReleases_AIEscalation_AdultParseFilenameFindsMatch(t *testing.T) 
 // TestFilterReleases_AIEscalation_PerCandidateErrorSkipsOnlyThatCandidate
 // proves a single candidate's AI failure never fails the whole filter — it
 // just drops that one candidate, matching the "degrade cleanly" requirement
-// even for the multi-candidate escalation case.
+// even for the multi-candidate escalation case. Keyed on the release title
+// appearing in the prompt (GuessTitle embeds it via %q — see
+// mainstream_prompts.go), not on call order: escalation now runs
+// concurrently (see aiEscalationConcurrency), so which candidate's HTTP
+// call reaches the fake first is not guaranteed to match slice order.
 func TestFilterReleases_AIEscalation_PerCandidateErrorSkipsOnlyThatCandidate(t *testing.T) {
-	calls := 0
 	ai := &fakeReleaseMatchAI{fn: func(prompt string) (map[string]any, error) {
-		calls++
-		if calls == 1 {
+		if strings.Contains(prompt, "bad-release") {
 			return nil, fmt.Errorf("simulated AI failure")
 		}
 		return map[string]any{"title": "The Dark Knight"}, nil
@@ -192,5 +202,107 @@ func TestHasLanguageTag(t *testing.T) {
 		if got := hasLanguageTag(tc.title); got != tc.want {
 			t.Errorf("hasLanguageTag(%q) = %v, want %v", tc.title, got, tc.want)
 		}
+	}
+}
+
+// delayedFakeAI is a ctx-aware AIClient fake for proving the three
+// AI-escalation bounds actually hold: it sleeps `delay` per call (respecting
+// ctx cancellation the same way a real HTTP client bound to ctx would, via
+// http.NewRequestWithContext — see aiEscalationTimeout's doc comment), and
+// tracks total calls plus the highest number of calls observed in flight at
+// once.
+type delayedFakeAI struct {
+	delay         time.Duration
+	calls         int32
+	current       int32
+	maxConcurrent int32
+	mu            sync.Mutex
+}
+
+func (f *delayedFakeAI) ChatJSON(ctx context.Context, prompt string) (map[string]any, error) {
+	atomic.AddInt32(&f.calls, 1)
+	cur := atomic.AddInt32(&f.current, 1)
+	defer atomic.AddInt32(&f.current, -1)
+
+	f.mu.Lock()
+	if cur > f.maxConcurrent {
+		f.maxConcurrent = cur
+	}
+	f.mu.Unlock()
+
+	select {
+	case <-time.After(f.delay):
+		return map[string]any{"title": "irrelevant, never matches"}, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// TestFilterReleases_AIEscalation_CapsCandidateCount proves the count bound:
+// far more raw releases than maxAIEscalationCandidates must never translate
+// into that many AI calls — escalating every release in a large result set
+// is exactly the unbounded-loop bug this cap exists to prevent.
+func TestFilterReleases_AIEscalation_CapsCandidateCount(t *testing.T) {
+	ai := &delayedFakeAI{}
+	releases := make([]prowlarr.Release, maxAIEscalationCandidates+5)
+	for i := range releases {
+		releases[i] = prowlarr.Release{GUID: fmt.Sprintf("%d", i), Title: fmt.Sprintf("release-%d-XYZ", i)}
+	}
+	FilterReleases(context.Background(), releases, "Obscure Title Nobody Knows", mode.Movies, ai)
+	if got := atomic.LoadInt32(&ai.calls); got != maxAIEscalationCandidates {
+		t.Errorf("expected exactly %d AI calls (the cap), got %d for %d input releases", maxAIEscalationCandidates, got, len(releases))
+	}
+}
+
+// TestFilterReleases_AIEscalation_BoundsConcurrency proves the concurrency
+// bound: with an artificial per-call delay long enough that overlapping
+// calls are essentially guaranteed if unbounded, the observed max-in-flight
+// must never exceed aiEscalationConcurrency.
+func TestFilterReleases_AIEscalation_BoundsConcurrency(t *testing.T) {
+	ai := &delayedFakeAI{delay: 50 * time.Millisecond}
+	releases := make([]prowlarr.Release, maxAIEscalationCandidates)
+	for i := range releases {
+		releases[i] = prowlarr.Release{GUID: fmt.Sprintf("%d", i), Title: fmt.Sprintf("release-%d-XYZ", i)}
+	}
+	FilterReleases(context.Background(), releases, "Obscure Title Nobody Knows", mode.Movies, ai)
+	if ai.maxConcurrent > aiEscalationConcurrency {
+		t.Errorf("observed %d AI calls in flight at once, want <= %d", ai.maxConcurrent, aiEscalationConcurrency)
+	}
+	if ai.maxConcurrent < aiEscalationConcurrency {
+		t.Logf("observed max concurrency %d, expected exactly %d (not a failure, but weaker evidence the bound is exercised)", ai.maxConcurrent, aiEscalationConcurrency)
+	}
+}
+
+// TestFilterReleases_AIEscalation_RespectsOverallTimeout is the regression
+// test for the actual reported bug ("selecting titles hangs checking
+// availability"): every AI call sleeps far longer than a shrunk
+// aiEscalationTimeout, so if the phase deadline were NOT enforced (the old,
+// buggy behavior — a plain unbounded sequential loop with no phase timeout
+// at all), this test would take calls*delay to return. With the deadline
+// enforced, it must return close to the shrunk timeout instead, and with
+// zero matches (every call is cut off before producing a usable result).
+func TestFilterReleases_AIEscalation_RespectsOverallTimeout(t *testing.T) {
+	orig := aiEscalationTimeout
+	aiEscalationTimeout = 100 * time.Millisecond
+	defer func() { aiEscalationTimeout = orig }()
+
+	ai := &delayedFakeAI{delay: 5 * time.Second} // far longer than the shrunk timeout
+	releases := make([]prowlarr.Release, maxAIEscalationCandidates)
+	for i := range releases {
+		releases[i] = prowlarr.Release{GUID: fmt.Sprintf("%d", i), Title: fmt.Sprintf("release-%d-XYZ", i)}
+	}
+
+	start := time.Now()
+	got := FilterReleases(context.Background(), releases, "Obscure Title Nobody Knows", mode.Movies, ai)
+	elapsed := time.Since(start)
+
+	// Generous upper bound (not tied tightly to the 100ms deadline) so this
+	// stays robust under CI/scratch-instance scheduling jitter — the point is
+	// "did NOT wait anywhere close to 5s", not "waited exactly 100ms".
+	if elapsed > 2*time.Second {
+		t.Errorf("FilterReleases took %s with a 100ms phase deadline and 5s per-call delay — the deadline is not being enforced (this is the exact shape of the reported hang)", elapsed)
+	}
+	if len(got) != 0 {
+		t.Errorf("expected zero matches (every call cut off before returning a result), got %+v", got)
 	}
 }
