@@ -116,16 +116,30 @@ func (f *flexID) UnmarshalJSON(b []byte) error {
 }
 
 // rawScene mirrors the fields this client consumes from a TPDB v2 scene object.
-// Image is TPDB's top-level "image" field — the primary scene still/poster URL,
-// served from TPDB's own image CDN (cdn.theporndb.net, and legacy
-// cdn.metadataapi.net — both subdomains of the domains internal/imageproxy
-// already allowlists). The scene object also carries poster_image/poster and a
-// posters[] array, but the flat "image" field is the one universally present
-// and is what the Discover thumbnail uses. It can be empty for scenes with no
-// art, so consumers must degrade gracefully. Anchored to TPDB's documented v2
-// scene shape (Jellyfin/Plex TPDB agents, community Go clients); the field is
-// modeled from that documentation, not confirmed against a live authenticated
-// instance in-repo.
+// Image is built by toScene() from a preference chain, NOT the flat "image"
+// field alone — corrected 2026-07-15 after a live production bug: the flat
+// "image"/"poster_image"/"back_image" fields are a raw passthrough of
+// whatever URL the STUDIO itself submitted (real production samples:
+// images.nubiles-porn.com, c.bellesa.co, ods.manyvids.com — dozens of
+// distinct third-party hosts, not TPDB's own CDN), and those URLs are
+// frequently broken: some are short-lived signed CDN links (confirmed live,
+// HTTP 410 Gone on a URL whose own signature embedded an already-past
+// expiry timestamp), others are blocked by the studio's own hotlink/bot
+// protection when fetched server-side (confirmed live, HTTP 403 from a
+// datacenter IP with no Referer, several User-Agents, and a matching
+// Referer all tried). TPDB's OWN site does NOT use the flat "image" field
+// for its own scene pages — confirmed by loading a real scene page
+// (theporndb.net/scenes/{id}) and inspecting its actual <img> src, which
+// resolved to cdn.theporndb.net/scene/.../background/.../large/... — TPDB's
+// own re-hosted, reliable copy. toScene() now prefers Background.Large,
+// falling back to Poster (also cdn.theporndb.net per the live OpenAPI
+// schema's own documented example, thumb.theporndb.net), falling back to
+// the raw Image field only as a last resort (better than nothing on the
+// rare scene TPDB hasn't re-hosted art for). The previous doc comment here
+// claimed "image" was itself TPDB-CDN-hosted; that was a documented-but-
+// unconfirmed assumption (its own caveat said so) that turned out to be
+// wrong for real production data — this correction replaces it with what
+// was actually observed live, not another unverified guess.
 //
 // Duration ("duration", seconds) — investigated for the frontend-redesign
 // plan's auto-grab bitrate scorer, which needs a title's runtime before
@@ -159,12 +173,21 @@ func (f *flexID) UnmarshalJSON(b []byte) error {
 // collects just the pHash strings into Scene.Hashes — the merged-recent
 // dedup's TPDB-side hash set.
 type rawScene struct {
-	ID       flexID         `json:"_id"`
-	Title    string         `json:"title"`
-	Slug     string         `json:"slug"`
-	Date     string         `json:"date"`
-	Site     *rawSite       `json:"site"`
-	Image    string         `json:"image"`
+	ID     flexID   `json:"_id"`
+	Title  string   `json:"title"`
+	Slug   string   `json:"slug"`
+	Date   string   `json:"date"`
+	Site   *rawSite `json:"site"`
+	Image  string   `json:"image"`
+	Poster string   `json:"poster"`
+	// Background is TPDB's own re-hosted image set (cdn.theporndb.net),
+	// distinct from the studio-passthrough Image/Poster fields above — see
+	// this struct's doc comment for the live evidence. Only Large is
+	// consumed; Full/Medium/Small exist on the live schema but aren't needed
+	// for a Discover-grid-sized thumbnail.
+	Background struct {
+		Large string `json:"large"`
+	} `json:"background"`
 	Duration int            `json:"duration"`
 	Rating   float64        `json:"rating"`
 	Hashes   []rawSceneHash `json:"hashes"`
@@ -204,7 +227,11 @@ func (s rawScene) toScene() Scene {
 	for _, t := range s.Tags {
 		tags = append(tags, Tag{ID: t.ID, UUID: t.UUID, Name: t.Name})
 	}
-	return Scene{ID: string(s.ID), Title: s.Title, Slug: s.Slug, Date: s.Date, Site: site, Image: s.Image, Duration: s.Duration, Rating: s.Rating, Hashes: phashes, Tags: tags, Type: s.Type}
+	// Prefer TPDB's own re-hosted, reliable images over the studio-passthrough
+	// fields — see rawScene's doc comment for the live evidence behind this
+	// order.
+	image := firstNonEmpty(s.Background.Large, s.Poster, s.Image)
+	return Scene{ID: string(s.ID), Title: s.Title, Slug: s.Slug, Date: s.Date, Site: site, Image: image, Duration: s.Duration, Rating: s.Rating, Hashes: phashes, Tags: tags, Type: s.Type}
 }
 
 // firstNonEmpty returns the first non-empty string from vals, or "" if all are

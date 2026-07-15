@@ -653,3 +653,41 @@ func TestSearchSites_ParsesResponse(t *testing.T) {
 		t.Fatalf("got %+v", out)
 	}
 }
+
+// TestScene_ImagePrefersTPDBHostedFieldsOverStudioPassthrough is the
+// regression test for a real live bug: the flat "image" field is a raw
+// passthrough of whatever URL the studio itself submitted — confirmed live
+// in production to include short-lived signed CDN links (HTTP 410 once
+// expired) and studio-side hotlink/bot-blocked hosts (HTTP 403) — while
+// TPDB's own site uses its own re-hosted "background.large" for the exact
+// same scene. toScene() must prefer background.large, then poster, and
+// only fall back to the raw image field when TPDB has nothing better.
+func TestScene_ImagePrefersTPDBHostedFieldsOverStudioPassthrough(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[
+			{"_id":"s1","title":"Has Background","image":"https://studio-cdn.example/broken.jpg","poster":"https://thumb.theporndb.net/p.jpg","background":{"large":"https://cdn.theporndb.net/scene/x/large.jpg"}},
+			{"_id":"s2","title":"Poster Only","image":"https://studio-cdn.example/broken2.jpg","poster":"https://thumb.theporndb.net/p2.jpg"},
+			{"_id":"s3","title":"Image Only","image":"https://studio-cdn.example/broken3.jpg"}
+		]}`))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "testkey", &http.Client{Timeout: 5 * time.Second})
+	out, err := c.BrowseScenes(context.Background(), 1, 20, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(out) != 3 {
+		t.Fatalf("expected 3 scenes, got %d", len(out))
+	}
+	if out[0].Image != "https://cdn.theporndb.net/scene/x/large.jpg" {
+		t.Errorf("expected background.large to win when present, got %q", out[0].Image)
+	}
+	if out[1].Image != "https://thumb.theporndb.net/p2.jpg" {
+		t.Errorf("expected poster to win when background is absent, got %q", out[1].Image)
+	}
+	if out[2].Image != "https://studio-cdn.example/broken3.jpg" {
+		t.Errorf("expected the raw image field as last-resort fallback, got %q", out[2].Image)
+	}
+}
