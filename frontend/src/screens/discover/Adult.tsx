@@ -35,6 +35,11 @@ import {
   proxyImage,
 } from "../../api/discover";
 import { fetchConnections } from "../../api/settings";
+import {
+  type AdultNewestReleaseItem,
+  fetchAdultNewestRowItems,
+  fetchAdultNewestRows,
+} from "../../api/adultNewestRows";
 import { Button, ErrorText, Muted, yearOf } from "../../components/ui";
 import {
   type GrabTarget,
@@ -60,6 +65,22 @@ const sourceLabel = (source: string): string => {
       return "";
   }
 };
+
+// toAdultDiscoverItem adapts an AdultNewestReleaseItem (the admin newest-rows
+// pipeline's cached match) into the AdultDiscoverItem shape AdultCard/DetailPopup
+// already render — the two differ only in the three fields the newest-rows DTO
+// omits (durationSeconds/rating/slug). durationSeconds: 0 is the codebase's
+// "runtime unknown" convention (see tpdbrest.Scene.Duration), not a real
+// zero-length claim; rating: 0 renders no ★; slug: "" makes DetailPopup's TPDB
+// external link fall through to undefined rather than a guaranteed-broken URL.
+const toAdultDiscoverItem = (
+  item: AdultNewestReleaseItem,
+): AdultDiscoverItem => ({
+  ...item,
+  durationSeconds: 0,
+  rating: 0,
+  slug: "",
+});
 
 // AdultCard is one scene, from TPDB or (via the merged row / an optional
 // StashDB/FansDB row) a stash-box source. Both frequently return no art, so
@@ -296,6 +317,25 @@ export const AdultDiscover: Component = () => {
   const configuredServices = () =>
     new Set((connections() ?? []).map((c) => c.service));
 
+  // newestRows are the operator-defined "newest" rows (Prowlarr-backed, matched
+  // to TPDB/StashDB/FansDB entities by the background scan) — the confirmed
+  // downloadable-right-now value-add this feature exists for, so they lead the
+  // browse view. Fetched once on mount, already sortOrder-ascending from the
+  // backend (Store.List's ordering), filtered to enabled here. The fetcher
+  // swallows its own error (-> []) for the exact same reason connections above
+  // does: an unguarded read of an errored resource re-throws on every render
+  // and this app has no ErrorBoundary, which would crash the whole SPA instead
+  // of just hiding these optional rows.
+  const [newestRowsData] = createResource(async () => {
+    try {
+      return await fetchAdultNewestRows();
+    } catch {
+      return [];
+    }
+  });
+  const newestRows = () =>
+    (newestRowsData() ?? []).filter((r) => r.enabled);
+
   const [results] = createResource(
     () => (searching() ? submitted().trim() : null),
     async (q): Promise<AdultDiscoverItem[]> => {
@@ -369,6 +409,35 @@ export const AdultDiscover: Component = () => {
             when={drill()}
             fallback={
               <>
+                {/* Operator-defined "newest" rows — Prowlarr-backed matches
+                    cached by the background scan, shown first as the
+                    confirmed-downloadable value-add. movie/scene rows render
+                    grab-able AdultCards (via the toAdultDiscoverItem adapter);
+                    performer/studio rows render non-interactive EntityCards
+                    (no drill-down endpoint for THIS pipeline's matched
+                    entities — same reason STASH_BOX_ROWS omit onSelect). */}
+                <For each={newestRows()}>
+                  {(row) => (
+                    <PaginatedStrip<AdultNewestReleaseItem>
+                      title={row.title}
+                      reloadToken={reloadToken}
+                      load={(page) => fetchAdultNewestRowItems(row.id, page)}
+                      onError={setSetupError}
+                    >
+                      {(item) =>
+                        row.rowType === "movie" || row.rowType === "scene" ? (
+                          <AdultCard
+                            item={toAdultDiscoverItem(item)}
+                            onGrab={setGrabTarget}
+                            onDetail={setDetailTarget}
+                          />
+                        ) : (
+                          <EntityCard name={item.title} image={item.image} />
+                        )
+                      }
+                    </PaginatedStrip>
+                  )}
+                </For>
                 <For each={ADULT_SCENE_ROWS}>
                   {(row) => (
                     <PaginatedStrip

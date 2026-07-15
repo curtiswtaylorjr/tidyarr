@@ -3,6 +3,7 @@ package identify
 import (
 	"context"
 	"regexp"
+	"strings"
 
 	"github.com/curtiswtaylorjr/sakms/internal/stashbox"
 	"github.com/curtiswtaylorjr/sakms/internal/tpdbrest"
@@ -73,6 +74,7 @@ func (b *BoxSearcher) SearchStashBox(ctx context.Context, box, title, studio str
 			return &MatchResult{
 				Title: m.Title, Studio: m.StudioName, Date: m.ReleaseDate,
 				Type: "scene", Source: box + "_text", SceneID: m.ID, Box: box,
+				Image: m.ImageURL, Tags: strings.Join(m.Tags, ","),
 			}, nil
 		}
 		return nil, nil
@@ -94,9 +96,48 @@ func (b *BoxSearcher) SearchTPDB(ctx context.Context, title, studio string) (*Ma
 		}
 		for _, m := range candidates {
 			if TitleSimilarity(title, m.Title) >= 0.4 {
+				tagNames := make([]string, len(m.Tags))
+				for i, t := range m.Tags {
+					tagNames[i] = t.Name
+				}
 				return &MatchResult{
 					Title: m.Title, Studio: m.Site, Date: m.Date,
 					Type: "scene", Source: "tpdb_text", SceneID: m.ID, Box: "tpdb",
+					Image: m.Image, Tags: strings.Join(tagNames, ","),
+				}, nil
+			}
+		}
+		return nil, nil
+	})
+}
+
+// SearchTPDBMovies searches ThePornDB's movie catalog by title text — the
+// movie analogue of SearchTPDB, used by callers that need a movie identity
+// specifically (e.g. internal/adultnewest's Movie row), not a scene. Movies
+// share TPDB's Scene resource shape (see tpdbrest.Client.SearchMovies' doc
+// comment), so this mirrors SearchTPDB's exact matching logic (>= 0.4 title
+// similarity, first match wins) against c.tpdb.SearchMovies instead of
+// SearchByTitle, and stamps Type: "movie" on the result.
+func (b *BoxSearcher) SearchTPDBMovies(ctx context.Context, title string) (*MatchResult, error) {
+	if b.tpdb == nil {
+		return nil, nil
+	}
+	key := "tpdb_movie\x00" + title
+	return b.cache.getOrCompute(key, func() (*MatchResult, error) {
+		candidates, err := b.tpdb.SearchMovies(ctx, title)
+		if err != nil {
+			return nil, err
+		}
+		for _, m := range candidates {
+			if TitleSimilarity(title, m.Title) >= 0.4 {
+				tagNames := make([]string, len(m.Tags))
+				for i, t := range m.Tags {
+					tagNames[i] = t.Name
+				}
+				return &MatchResult{
+					Title: m.Title, Studio: m.Site, Date: m.Date,
+					Type: "movie", Source: "tpdb_text", SceneID: m.ID, Box: "tpdb",
+					Image: m.Image, Tags: strings.Join(tagNames, ","),
 				}, nil
 			}
 		}
@@ -120,5 +161,6 @@ func (b *BoxSearcher) SceneByID(ctx context.Context, box, sceneID string) (*Matc
 	return &MatchResult{
 		Title: sc.Title, Studio: sc.StudioName, Date: sc.ReleaseDate,
 		Type: "scene", Source: box + "_id", SceneID: sc.ID, Box: box,
+		Image: sc.ImageURL, Tags: strings.Join(sc.Tags, ","),
 	}, nil
 }

@@ -86,6 +86,11 @@ const stubFetch = (handler: Handler) => {
 // specifically testing that row.
 const mainstreamDefaults = (url: string): Response | null => {
   if (url.includes("/api/connections")) return jsonResponse([]);
+  // Adult's admin newest-rows list + any row's /resolve both default to empty
+  // (no operator rows) — matched before "/discover" since neither path
+  // contains that substring anyway, but kept explicit so a test that doesn't
+  // opt into newest rows never sees them.
+  if (url.includes("/newest-rows")) return jsonResponse([]);
   if (url.includes("/discover")) return jsonResponse([]);
   if (url.includes("/tracked")) return jsonResponse([]);
   if (url.includes("/poster")) return jsonResponse({ posterPath: "" });
@@ -732,6 +737,75 @@ describe("Discover — Adult optional StashDB/FansDB rows", () => {
       ".text-xs.text-muted",
     );
     expect(stashSubtitle?.textContent).toBe("Blacked · 2023 · StashDB");
+  });
+});
+
+describe("Discover — Adult admin newest rows", () => {
+  it("renders enabled newest rows first (scene→grab-able card, performer→plain tile), filters disabled", async () => {
+    stubFetch((url) => {
+      if (url.includes("/newest-rows/1/resolve"))
+        return jsonResponse([
+          {
+            id: "n1",
+            title: "Fresh Scene",
+            studio: "Vixen",
+            date: "2026-01-02",
+            image: "https://cdn.theporndb.net/scenes/fresh.jpg",
+            source: "tpdb",
+            rowType: "scene",
+          },
+        ]);
+      if (url.includes("/newest-rows/2/resolve"))
+        return jsonResponse([
+          {
+            id: "n2",
+            title: "Fresh Performer",
+            studio: "",
+            date: "",
+            image: "https://cdn.theporndb.net/performers/fresh.jpg",
+            source: "",
+            rowType: "performer",
+          },
+        ]);
+      if (url.includes("/newest-rows"))
+        return jsonResponse([
+          { id: 1, title: "Newest Scenes", rowType: "scene", sortOrder: 0, enabled: true, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z" },
+          { id: 2, title: "Newest Performers", rowType: "performer", sortOrder: 1, enabled: true, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z" },
+          { id: 3, title: "Hidden Studios", rowType: "studio", sortOrder: 2, enabled: false, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z" },
+        ]);
+      const d = mainstreamDefaults(url);
+      if (d) return d;
+      throw new Error("unexpected fetch: " + url);
+    });
+
+    render(() => <Discover />);
+    fireEvent.click(await screen.findByText("Adult"));
+
+    // Both enabled row headers render; the disabled one never does (filtered
+    // client-side, so its /resolve is never fetched either).
+    expect(await screen.findByText("Newest Scenes")).toBeInTheDocument();
+    expect(await screen.findByText("Newest Performers")).toBeInTheDocument();
+    expect(screen.queryByText("Hidden Studios")).not.toBeInTheDocument();
+
+    expect(await screen.findByText("Fresh Scene")).toBeInTheDocument();
+    expect(await screen.findByText("Fresh Performer")).toBeInTheDocument();
+
+    // A scene/movie row's card is grab-able (AdultCard); a performer/studio
+    // row's is a plain non-interactive tile (EntityCard — no Grab, no
+    // drill-down endpoint for this pipeline's matched entities).
+    const sceneCard = screen.getByText("Fresh Scene").closest(".w-\\[200px\\]") as HTMLElement;
+    expect(within(sceneCard).getByText("Grab")).toBeInTheDocument();
+    const perfCard = screen.getByText("Fresh Performer").closest(".w-\\[200px\\]") as HTMLElement;
+    expect(within(perfCard).queryByText("Grab")).not.toBeInTheDocument();
+
+    // Newest rows lead the browse view — "Newest Scenes" precedes the fixed
+    // "Recently Released" scene row in DOM order.
+    const newestHeader = screen.getByText("Newest Scenes");
+    const recentHeader = screen.getByText("Recently Released");
+    expect(
+      newestHeader.compareDocumentPosition(recentHeader) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
   });
 });
 

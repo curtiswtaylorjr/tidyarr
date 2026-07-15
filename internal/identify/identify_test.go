@@ -428,6 +428,114 @@ func TestIdentify_NothingMatchesAnywhere_BareWebSearchResult(t *testing.T) {
 	}
 }
 
+func TestIdentifyDetailed_SceneMatchAlsoReturnsCorrectedStudioAndPerformers(t *testing.T) {
+	e := newTestEnv(t)
+	// Dotted guesses prove IdentifyDetailed surfaces verifyStudio/
+	// verifyPerformers' post-correction output (separator-normalized), not the
+	// raw AI guess. With the existing mock, findStudio/searchPerformer fall
+	// through to no-match, so the normalized-fallback value is what's returned.
+	e.ollamaResponse = func(idx int, prompt string) string {
+		return `{"studio":"vixen.media","title":"Some Scene","performers":["riley.reid","jane.doe"]}`
+	}
+	e.stashdbSearchScene = func(term string) []stashbox.Scene {
+		return []stashbox.Scene{{ID: "7", Title: "Some Scene", StudioName: "Vixen Media", ReleaseDate: "2023-01-01"}}
+	}
+	id := e.identifier(false, false)
+
+	detail, err := id.IdentifyDetailed(context.Background(), "vixen.media.some.scene", "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if detail.Scene == nil || detail.Scene.Source != "stashdb_text" || detail.Scene.SceneID != "7" {
+		t.Fatalf("expected a stashdb scene match, got %+v", detail.Scene)
+	}
+	if detail.StudioName != "vixen media" {
+		t.Fatalf("expected normalized corrected studio, got %q", detail.StudioName)
+	}
+	if len(detail.Performers) != 2 || detail.Performers[0] != "riley reid" || detail.Performers[1] != "jane doe" {
+		t.Fatalf("expected normalized corrected performers, got %+v", detail.Performers)
+	}
+}
+
+func TestIdentifyDetailed_NoSceneMatchStillReturnsStudioAndPerformers(t *testing.T) {
+	// The new background job wants Studio/Performer rows even for releases that
+	// don't cleanly resolve to a specific scene, so a nil Scene must NOT suppress
+	// the corrected identities.
+	e := newTestEnv(t)
+	e.ollamaResponse = func(idx int, prompt string) string {
+		return `{"studio":"exposed.latinas","title":"A Scene","performers":["some.performer"]}`
+	}
+	e.stashdbSearchScene = func(term string) []stashbox.Scene { return nil }
+	e.tpdbSearch = func(q, site string) []tpdbrest.Scene { return nil }
+	id := e.identifier(false, false) // withBrave=false — pipeline stops after internal-DB miss
+
+	detail, err := id.IdentifyDetailed(context.Background(), "exposed.latinas.a.scene", "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if detail.Scene != nil {
+		t.Fatalf("expected no scene match, got %+v", detail.Scene)
+	}
+	if detail.StudioName != "exposed latinas" {
+		t.Fatalf("expected corrected studio even with no scene, got %q", detail.StudioName)
+	}
+	if len(detail.Performers) != 1 || detail.Performers[0] != "some performer" {
+		t.Fatalf("expected corrected performers even with no scene, got %+v", detail.Performers)
+	}
+}
+
+func TestIdentifyDetailed_UUIDPathHasSceneButNoDerivedIdentities(t *testing.T) {
+	// The direct-UUID branch never runs verifyStudio/verifyPerformers, so
+	// StudioName/Performers are empty by design — faithful to "exactly what the
+	// pipeline derived," never backfilled from the scene's own studio.
+	e := newTestEnv(t)
+	id := &Identifier{
+		Boxes: NewBoxSearcher(map[string]*stashbox.Client{
+			"stashdb": stashboxWithFindScene(t, "a29768db-b3cd-4a71-a75e-4294373207bb", stashbox.Scene{
+				ID: "a29768db-b3cd-4a71-a75e-4294373207bb", Title: "Direct Match", ReleaseDate: "2021-01-01", StudioName: "Hoby Buchanon",
+			}),
+		}, nil),
+		AI:       e.identifier(false, false).AI,
+		Brave:    nil,
+		Throttle: throttle.New(0),
+	}
+
+	detail, err := id.IdentifyDetailed(context.Background(), "some-file-a29768db-b3cd-4a71-a75e-4294373207bb", "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if detail.Scene == nil || detail.Scene.Title != "Direct Match" {
+		t.Fatalf("expected the UUID scene match, got %+v", detail.Scene)
+	}
+	if detail.StudioName != "" || len(detail.Performers) != 0 {
+		t.Fatalf("expected no derived identities on the UUID path, got studio=%q performers=%+v", detail.StudioName, detail.Performers)
+	}
+	if len(e.ollamaCalls) != 0 {
+		t.Fatal("Ollama should not be called when UUID lookup succeeds")
+	}
+}
+
+func TestIdentifyDetailed_RejectsReleaseGroupTagAsStudio(t *testing.T) {
+	// The studio false-positive guard (rejectNonStudioGuess/looksLikeReleaseGroupTag)
+	// is inherited automatically because IdentifyDetailed calls the same
+	// verifyStudio — a release-group-shaped tag yields an empty StudioName.
+	e := newTestEnv(t)
+	e.ollamaResponse = func(idx int, prompt string) string {
+		return `{"studio":"WRB","title":"A Scene","performers":null}`
+	}
+	e.stashdbSearchScene = func(term string) []stashbox.Scene { return nil }
+	e.tpdbSearch = func(q, site string) []tpdbrest.Scene { return nil }
+	id := e.identifier(false, false)
+
+	detail, err := id.IdentifyDetailed(context.Background(), "evilangel.25.11.11.rebel.rhyder.xxx.2160p.mp4-wrb", "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if detail.StudioName != "" {
+		t.Fatalf("expected release-group tag rejected to empty studio, got %q", detail.StudioName)
+	}
+}
+
 func TestIdentify_ParentFolderNameSkippedWhenGenericFolder(t *testing.T) {
 	e := newTestEnv(t)
 	var seenParent string

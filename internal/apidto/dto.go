@@ -956,6 +956,57 @@ type SliderReorderRequest struct {
 	IDs []int `json:"ids"`
 }
 
+// --- Adult Discover "newest" rows (internal/adultnewest) — Prowlarr-backed,
+// not TMDB-backed like Slider above. RowType is "movie" | "scene" |
+// "performer" | "studio"; GenreFilter is always optional (every row type can
+// be freely narrowed by genre or left unfiltered — unlike Slider's
+// FilterValue there is no required/forbidden pairing rule). See
+// adultnewest.Row and internal/api/adult_newest_rows.go.
+type AdultNewestRow struct {
+	ID          int    `json:"id"`
+	Title       string `json:"title"`
+	RowType     string `json:"rowType"`
+	GenreFilter string `json:"genreFilter,omitempty"`
+	SortOrder   int    `json:"sortOrder"`
+	Enabled     bool   `json:"enabled"`
+	CreatedAt   string `json:"createdAt"`
+	UpdatedAt   string `json:"updatedAt"`
+}
+
+// AdultNewestRowUpsertRequest is the body of POST /api/modes/adult/newest-rows
+// (create) and PUT /api/modes/adult/newest-rows/{id} (update) — mirrors
+// SliderUpsertRequest's convention: every editable field, no secrets, no
+// partial-update mode.
+type AdultNewestRowUpsertRequest struct {
+	Title       string `json:"title"`
+	RowType     string `json:"rowType"`
+	GenreFilter string `json:"genreFilter,omitempty"`
+	Enabled     bool   `json:"enabled"`
+}
+
+// AdultNewestRowReorderRequest is POST /api/modes/adult/newest-rows/reorder's
+// body — mirrors SliderReorderRequest exactly.
+type AdultNewestRowReorderRequest struct {
+	IDs []int `json:"ids"`
+}
+
+// AdultNewestReleaseItem is one entry in a resolved adult newest row — the
+// enriched result of matching a Prowlarr release to a TPDB/StashDB/FansDB
+// entity (internal/adultnewest's background scan job). Deliberately the same
+// shape as AdultDiscoverItem's display-relevant fields (Title/Studio/Date/
+// Image/Source) so AdultCard/EntityCard/DetailPopup need no changes to
+// render it — see this feature's plan, Stage 3.
+type AdultNewestReleaseItem struct {
+	ID      string   `json:"id"`
+	Title   string   `json:"title"`
+	Studio  string   `json:"studio"`
+	Date    string   `json:"date"`
+	Image   string   `json:"image"`
+	Source  string   `json:"source"`
+	RowType string   `json:"rowType"`
+	Genres  []string `json:"genres,omitempty"`
+}
+
 // --- Trakt (mainstream-discover-seerr): watchlist connection + OAuth device flow -
 //
 // Mirrors internal/api/trakt.go's local request/response structs field-for-

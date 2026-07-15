@@ -17,6 +17,18 @@ type MatchResult struct {
 	Source  string // e.g. "stashdb_id", "stashdb_text", "tpdb_text", "web_search", "web+stashdb_text"
 	SceneID string // stash-box scene id, "" if none (e.g. source == "web_search")
 	Box     string // "stashdb" | "fansdb" | "tpdb" | ""
+	// Image is the matched scene's poster/thumbnail URL, when the lookup path
+	// that produced this result had one in hand (SearchStashBox/SearchTPDB/
+	// SceneByID all populate it for free from data they already fetched — no
+	// extra round trip). "" for paths that never had display data (e.g.
+	// web_search alone, before a re-search against a real box).
+	Image string
+	// Tags is the matched scene's genre/tag names, comma-joined into a single
+	// string rather than a []string — this keeps MatchResult's "only string/
+	// float/int fields, safe to copy by value" invariant intact (see this
+	// struct's own doc comment) instead of introducing a shared-backing-array
+	// slice field. "" if none/unavailable.
+	Tags string
 }
 
 // WhisparrForeignID returns the normalized identifier Whisparr V3's

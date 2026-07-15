@@ -43,12 +43,19 @@ type Scene struct {
 	Title       string
 	ReleaseDate string
 	StudioName  string
-	// ImageURL, Duration, and PHashes are populated ONLY by the browse path
-	// (QueryScenes), whose GraphQL selection requests images/duration/
-	// fingerprints. The identification paths (SearchScene/FindScene/
-	// FindScenesByFingerprints) don't request those fields, so they leave these
-	// zero-valued — that's expected, not a bug.
+	// ImageURL and Tags are populated by both the browse path (QueryScenes,
+	// ImageURL only) and the title/id identification paths (SearchScene and
+	// FindScene, which request images/tags for display + matching). The
+	// fingerprint path (FindScenesByFingerprints) keeps a minimal hash-matching
+	// selection that omits them, so scenes it returns leave these zero-valued —
+	// that's expected, not a bug. (Tags is not requested by QueryScenes: the
+	// Discover browse rows it backs don't need tag names, only the
+	// identification/matching pipeline does.)
 	ImageURL string
+	Tags     []string
+	// Duration and PHashes are populated ONLY by the browse path (QueryScenes),
+	// whose GraphQL selection requests duration/fingerprints. The identification
+	// paths don't request those fields, so they leave these zero-valued.
 	Duration int
 	// PHashes are the scene's fingerprint hashes whose algorithm is PHASH
 	// (MD5/OSHASH fingerprints are filtered out) — used by the merged-recent
@@ -69,6 +76,12 @@ type rawScene struct {
 			Name string `json:"name"`
 		} `json:"parent"`
 	} `json:"studio"`
+	Images []struct {
+		URL string `json:"url"`
+	} `json:"images"`
+	Tags []struct {
+		Name string `json:"name"`
+	} `json:"tags"`
 }
 
 func (s rawScene) toScene() Scene {
@@ -79,7 +92,22 @@ func (s rawScene) toScene() Scene {
 			studioName = s.Studio.Parent.Name
 		}
 	}
-	return Scene{ID: s.ID, Title: s.Title, ReleaseDate: s.ReleaseDate, StudioName: studioName}
+	imageURL := ""
+	if len(s.Images) > 0 {
+		imageURL = s.Images[0].URL
+	}
+	var tags []string
+	for _, t := range s.Tags {
+		tags = append(tags, t.Name)
+	}
+	return Scene{
+		ID:          s.ID,
+		Title:       s.Title,
+		ReleaseDate: s.ReleaseDate,
+		StudioName:  studioName,
+		ImageURL:    imageURL,
+		Tags:        tags,
+	}
 }
 
 type gqlError struct {
@@ -279,7 +307,7 @@ func (c *Client) QueryScenes(ctx context.Context, sort SceneSort, page, perPage 
 }
 
 const searchSceneQuery = `query SearchScene($term: String!) {
-  searchScene(term: $term) { id title release_date studio { name parent { name } } }
+  searchScene(term: $term) { id title release_date studio { name parent { name } } tags { name } images { url } }
 }`
 
 // SearchScene returns raw title-search candidates. Similarity/studio-overlap
@@ -299,7 +327,7 @@ func (c *Client) SearchScene(ctx context.Context, term string) ([]Scene, error) 
 }
 
 const findSceneQuery = `query FindScene($id: ID!) {
-  findScene(id: $id) { id title release_date studio { name parent { name } } }
+  findScene(id: $id) { id title release_date studio { name parent { name } } tags { name } images { url } }
 }`
 
 // FindScene looks up a scene directly by its stash-box scene ID.
@@ -366,9 +394,9 @@ func (c *Client) SubmitSceneDraft(ctx context.Context, title, studio, date strin
 type Performer struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
-	// ImageURL is populated only by the browse path (QueryPerformers), whose
-	// selection requests images; the search path (SearchPerformer) leaves it
-	// empty.
+	// ImageURL is populated by both the browse path (QueryPerformers) and the
+	// search path (SearchPerformer) — both request images and collapse
+	// images[0].url via rawBrowsePerformer.
 	ImageURL string `json:"-"`
 }
 
@@ -424,7 +452,7 @@ func (c *Client) QueryPerformers(ctx context.Context, page, perPage int) ([]Perf
 }
 
 const searchPerformerQuery = `query SearchPerformer($term: String!, $limit: Int) {
-  searchPerformer(term: $term, limit: $limit) { id name }
+  searchPerformer(term: $term, limit: $limit) { id name images { url } }
 }`
 
 // SearchPerformer text-searches performers by name/alias. Similarity
@@ -432,19 +460,24 @@ const searchPerformerQuery = `query SearchPerformer($term: String!, $limit: Int)
 // not here — same convention as SearchScene.
 func (c *Client) SearchPerformer(ctx context.Context, term string, limit int) ([]Performer, error) {
 	var data struct {
-		SearchPerformer []Performer `json:"searchPerformer"`
+		SearchPerformer []rawBrowsePerformer `json:"searchPerformer"`
 	}
 	if err := c.do(ctx, searchPerformerQuery, map[string]any{"term": term, "limit": limit}, &data); err != nil {
 		return nil, err
 	}
-	return data.SearchPerformer, nil
+	out := make([]Performer, len(data.SearchPerformer))
+	for i, rp := range data.SearchPerformer {
+		out[i] = rp.toPerformer()
+	}
+	return out, nil
 }
 
 type Studio struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
-	// ImageURL is populated only by the browse path (QueryStudios), whose
-	// selection requests images; the lookup path (FindStudio) leaves it empty.
+	// ImageURL is populated by both the browse path (QueryStudios) and the
+	// lookup path (FindStudio) — both request images and collapse images[0].url
+	// via rawBrowseStudio.
 	ImageURL string `json:"-"`
 }
 
@@ -500,7 +533,7 @@ func (c *Client) QueryStudios(ctx context.Context, page, perPage int) ([]Studio,
 }
 
 const findStudioQuery = `query FindStudio($name: String) {
-  findStudio(name: $name) { id name }
+  findStudio(name: $name) { id name images { url } }
 }`
 
 // FindStudio looks up a studio by name. This is stash-box's own "find by
@@ -509,12 +542,16 @@ const findStudioQuery = `query FindStudio($name: String) {
 // nil result as "no exact match" rather than assuming fuzzy tolerance.
 func (c *Client) FindStudio(ctx context.Context, name string) (*Studio, error) {
 	var data struct {
-		FindStudio *Studio `json:"findStudio"`
+		FindStudio *rawBrowseStudio `json:"findStudio"`
 	}
 	if err := c.do(ctx, findStudioQuery, map[string]any{"name": name}, &data); err != nil {
 		return nil, err
 	}
-	return data.FindStudio, nil
+	if data.FindStudio == nil {
+		return nil, nil
+	}
+	st := data.FindStudio.toStudio()
+	return &st, nil
 }
 
 const meQuery = `{ me { id name } }`

@@ -67,6 +67,53 @@ func TestScene_StudioFallsBackToParent(t *testing.T) {
 	}
 }
 
+func TestSearchScene_PopulatesTagsAndImage(t *testing.T) {
+	c, closeSrv := newTestClient(t, Config{APIKey: "k"}, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"searchScene":[{"id":"1","title":"T","release_date":"2024-01-01",` +
+			`"studio":{"name":"Vixen","parent":null},"tags":[{"name":"Blonde"},{"name":"Outdoor"}],` +
+			`"images":[{"url":"http://cdn/scene1.jpg"},{"url":"http://cdn/scene1-alt.jpg"}]}]}}`))
+	})
+	defer closeSrv()
+
+	out, err := c.SearchScene(context.Background(), "T")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(out) != 1 {
+		t.Fatalf("expected 1 scene, got %d", len(out))
+	}
+	if out[0].ImageURL != "http://cdn/scene1.jpg" {
+		t.Errorf("ImageURL = %q, want first image url", out[0].ImageURL)
+	}
+	if len(out[0].Tags) != 2 || out[0].Tags[0] != "Blonde" || out[0].Tags[1] != "Outdoor" {
+		t.Errorf("Tags = %v, want [Blonde Outdoor]", out[0].Tags)
+	}
+}
+
+func TestFindScene_PopulatesTagsAndImage(t *testing.T) {
+	c, closeSrv := newTestClient(t, Config{APIKey: "k"}, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"findScene":{"id":"1","title":"T","release_date":"2020-01-01",` +
+			`"studio":{"name":"Tushy","parent":null},"tags":[{"name":"Anal"}],"images":[{"url":"http://cdn/f.jpg"}]}}}`))
+	})
+	defer closeSrv()
+
+	sc, err := c.FindScene(context.Background(), "1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if sc == nil {
+		t.Fatal("expected a scene, got nil")
+	}
+	if sc.ImageURL != "http://cdn/f.jpg" {
+		t.Errorf("ImageURL = %q, want http://cdn/f.jpg", sc.ImageURL)
+	}
+	if len(sc.Tags) != 1 || sc.Tags[0] != "Anal" {
+		t.Errorf("Tags = %v, want [Anal]", sc.Tags)
+	}
+}
+
 func TestFindScene_NotFound(t *testing.T) {
 	c, closeSrv := newTestClient(t, Config{APIKey: "k"}, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -294,6 +341,49 @@ func TestFindStudio_Found(t *testing.T) {
 	}
 	if studio == nil || studio.Name != "Tushy" || studio.ID != "s1" {
 		t.Fatalf("unexpected result: %+v", studio)
+	}
+}
+
+func TestFindStudio_PopulatesImage(t *testing.T) {
+	c, closeSrv := newTestClient(t, Config{APIKey: "k"}, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"findStudio":{"id":"s1","name":"Tushy","images":[{"url":"http://cdn/studio.png"}]}}}`))
+	})
+	defer closeSrv()
+
+	studio, err := c.FindStudio(context.Background(), "Tushy")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if studio == nil || studio.Name != "Tushy" || studio.ID != "s1" {
+		t.Fatalf("unexpected result: %+v", studio)
+	}
+	if studio.ImageURL != "http://cdn/studio.png" {
+		t.Errorf("ImageURL = %q, want http://cdn/studio.png", studio.ImageURL)
+	}
+}
+
+func TestSearchPerformer_PopulatesImage(t *testing.T) {
+	c, closeSrv := newTestClient(t, Config{APIKey: "k"}, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"searchPerformer":[` +
+			`{"id":"p1","name":"Riley Reid","images":[{"url":"http://cdn/perf.jpg"}]},` +
+			`{"id":"p2","name":"Artless","images":[]}]}}`))
+	})
+	defer closeSrv()
+
+	out, err := c.SearchPerformer(context.Background(), "riley reid", 5)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(out) != 2 {
+		t.Fatalf("expected 2 performers, got %d", len(out))
+	}
+	if out[0].Name != "Riley Reid" || out[0].ID != "p1" || out[0].ImageURL != "http://cdn/perf.jpg" {
+		t.Errorf("out[0] = %+v, want image populated", out[0])
+	}
+	if out[1].ImageURL != "" {
+		t.Errorf("out[1].ImageURL = %q, want empty for no images", out[1].ImageURL)
 	}
 }
 

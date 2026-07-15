@@ -227,3 +227,84 @@ func (id *Identifier) verifyOnePerformer(ctx context.Context, guess, stem, studi
 
 	return cleaned
 }
+
+// StudioImage looks up an already-corrected studio name's poster art across
+// configured boxes (StashDB/FansDB first, then TPDB) — a display-only
+// follow-up for callers (e.g. internal/adultnewest's Studio row) that already
+// have a name from verifyStudio, which discards the image after using it
+// purely for name correction. Returns the image URL and which box it came
+// from ("stashdb" | "fansdb" | "tpdb") — the source matters to callers that
+// build an external link from it (a wrong source label would build a link to
+// the wrong site), so this deliberately doesn't collapse box identity away
+// the way a bare image-URL-only return would. Best-effort: returns ("", "")
+// if nothing found, no box is configured, or the throttle wait is cancelled
+// — never an error, since a missing poster shouldn't fail the caller's whole
+// match.
+func (id *Identifier) StudioImage(ctx context.Context, name string) (image, source string) {
+	if name == "" {
+		return "", ""
+	}
+	for _, box := range []string{"stashdb", "fansdb"} {
+		client := id.Boxes.stashBoxes[box]
+		if client == nil {
+			continue
+		}
+		if err := id.Throttle.Wait(ctx, box); err != nil {
+			return "", ""
+		}
+		studio, err := client.FindStudio(ctx, name)
+		if err == nil && studio != nil && studio.ImageURL != "" {
+			return studio.ImageURL, box
+		}
+	}
+	if id.Boxes.tpdb != nil {
+		if err := id.Throttle.Wait(ctx, "tpdb"); err != nil {
+			return "", ""
+		}
+		if candidates, err := id.Boxes.tpdb.SearchSites(ctx, name); err == nil {
+			for _, s := range candidates {
+				if s.Name == name && s.Image != "" {
+					return s.Image, "tpdb"
+				}
+			}
+		}
+	}
+	return "", ""
+}
+
+// PerformerImage is StudioImage's performer analogue.
+func (id *Identifier) PerformerImage(ctx context.Context, name string) (image, source string) {
+	if name == "" {
+		return "", ""
+	}
+	for _, box := range []string{"stashdb", "fansdb"} {
+		client := id.Boxes.stashBoxes[box]
+		if client == nil {
+			continue
+		}
+		if err := id.Throttle.Wait(ctx, box); err != nil {
+			return "", ""
+		}
+		candidates, err := client.SearchPerformer(ctx, name, 5)
+		if err == nil {
+			for _, p := range candidates {
+				if p.Name == name && p.ImageURL != "" {
+					return p.ImageURL, box
+				}
+			}
+		}
+	}
+	if id.Boxes.tpdb != nil {
+		if err := id.Throttle.Wait(ctx, "tpdb"); err != nil {
+			return "", ""
+		}
+		if candidates, err := id.Boxes.tpdb.SearchPerformers(ctx, name); err == nil {
+			for _, p := range candidates {
+				if p.Name == name && p.Image != "" {
+					return p.Image, "tpdb"
+				}
+			}
+		}
+	}
+	return "", ""
+}

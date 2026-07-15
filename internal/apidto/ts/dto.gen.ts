@@ -897,6 +897,61 @@ export interface SliderReorderRequest {
   ids: number /* int */[];
 }
 /**
+ * --- Adult Discover "newest" rows (internal/adultnewest) — Prowlarr-backed,
+ * not TMDB-backed like Slider above. RowType is "movie" | "scene" |
+ * "performer" | "studio"; GenreFilter is always optional (every row type can
+ * be freely narrowed by genre or left unfiltered — unlike Slider's
+ * FilterValue there is no required/forbidden pairing rule). See
+ * adultnewest.Row and internal/api/adult_newest_rows.go.
+ */
+export interface AdultNewestRow {
+  id: number /* int */;
+  title: string;
+  rowType: string;
+  genreFilter?: string;
+  sortOrder: number /* int */;
+  enabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+/**
+ * AdultNewestRowUpsertRequest is the body of POST /api/modes/adult/newest-rows
+ * (create) and PUT /api/modes/adult/newest-rows/{id} (update) — mirrors
+ * SliderUpsertRequest's convention: every editable field, no secrets, no
+ * partial-update mode.
+ */
+export interface AdultNewestRowUpsertRequest {
+  title: string;
+  rowType: string;
+  genreFilter?: string;
+  enabled: boolean;
+}
+/**
+ * AdultNewestRowReorderRequest is POST /api/modes/adult/newest-rows/reorder's
+ * body — mirrors SliderReorderRequest exactly.
+ */
+export interface AdultNewestRowReorderRequest {
+  ids: number /* int */[];
+}
+/**
+ * AdultNewestReleaseItem is one entry in a resolved adult newest row — the
+ * enriched result of matching a Prowlarr release to a TPDB/StashDB/FansDB
+ * entity (internal/adultnewest's background scan job). Deliberately the same
+ * shape as AdultDiscoverItem's display-relevant fields (Title/Studio/Date/
+ * Image/Source) so AdultCard/EntityCard/DetailPopup need no changes to
+ * render it — see this feature's plan, Stage 3.
+ */
+export interface AdultNewestReleaseItem {
+  id: string;
+  title: string;
+  studio: string;
+  date: string;
+  image: string;
+  source: string;
+  rowType: string;
+  genres?: string[];
+}
+/**
  * TraktStatusResponse is GET /api/trakt/status's response — the general
  * "is Trakt usable right now" summary, consumed by both Settings (to render
  * configured/linked state and pre-fill the client_id field via ClientID)

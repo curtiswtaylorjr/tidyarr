@@ -28,7 +28,9 @@ import { Card, MODE_LABELS, SaveStatus, useSaveStatus } from "./shared";
 // match-confidence-threshold, recheck-interval). It mirrors the backend's range
 // client-side (min/max) before submitting; the backend re-validates. save
 // disabled while out of range so the operator sees the bound, never a 400.
-const NumberSetting: Component<{
+// Exported so AdultRowAdmin can reuse the exact same control for its own global
+// scan-interval field (same 0 = off convention).
+export const NumberSetting: Component<{
   label: string;
   help: string;
   value: () => number | undefined;

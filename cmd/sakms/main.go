@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/curtiswtaylorjr/sakms/internal/adultnewest"
 	"github.com/curtiswtaylorjr/sakms/internal/allowlist"
 	"github.com/curtiswtaylorjr/sakms/internal/api"
 	"github.com/curtiswtaylorjr/sakms/internal/auth"
@@ -87,6 +88,13 @@ func run() error {
 	// its own table, shared with nothing else. Constructed here only so the one
 	// start-call below can be handed it; nothing else in the program reads it.
 	watchStore := recheck.NewWatchStore(sqlDB)
+	// adultNewestRowStore/adultNewestReleaseStore back the opt-in Adult
+	// "newest" Discover rows (internal/adultnewest) — a background Prowlarr
+	// scan job (gated off by default, same convention as recheck above) that
+	// caches matched releases for Discover to read; see the scan.Run
+	// start-call below.
+	adultNewestRowStore := adultnewest.New(sqlDB)
+	adultNewestReleaseStore := adultnewest.NewReleaseStore(sqlDB)
 	// secretStore doubles as authStore's OIDC-client-secret decryptor, and
 	// the outbound HTTP client is the same outboundTimeout-bounded one every
 	// other external client in this program uses — it bounds OIDC discovery,
@@ -130,7 +138,7 @@ func run() error {
 	// internal/api.NewAuthMux's doc comment) — NewMux stays unaware auth
 	// exists either way, so its own large test suite never had to change
 	// for auth specifically.
-	apiMux := api.NewMux(&http.Client{Timeout: outboundTimeout}, connStore, propStore, allowStore, prober, hasher, videoHasher, settingsStore, grabsStore, libStore, slidersStore, traktStore)
+	apiMux := api.NewMux(&http.Client{Timeout: outboundTimeout}, connStore, propStore, allowStore, prober, hasher, videoHasher, settingsStore, grabsStore, libStore, slidersStore, traktStore, adultNewestRowStore, adultNewestReleaseStore)
 	protectedAPI := auth.Middleware(secretStore, authStore, apiMux)
 
 	// API-key management (status + regenerate) is session-protected like
@@ -199,6 +207,16 @@ func run() error {
 	// cancels it too. To remove the feature entirely: delete internal/recheck,
 	// this line, and watchStore's construction above.
 	go recheck.Run(ctx, recheck.LoadInterval(ctx, settingsStore), connStore, settingsStore, watchStore)
+
+	// Same deliberate, opt-in exception as recheck above (see
+	// internal/adultnewest's package doc + CLAUDE.md's "Discover never
+	// queries Prowlarr" note for why this is a safe exception, not a
+	// reversal, of that rule): a background job that scans Prowlarr's
+	// newest Adult releases and caches matched TPDB/StashDB/FansDB entities
+	// for Adult Discover's newest-releases rows to read. Gated OFF by
+	// default (interval 0). To remove entirely: delete internal/adultnewest,
+	// this line, its NewMux params, and the two stores' construction above.
+	go adultnewest.Run(ctx, adultnewest.LoadInterval(ctx, settingsStore), connStore, settingsStore, adultNewestReleaseStore)
 
 	select {
 	case err := <-errCh:

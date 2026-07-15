@@ -39,25 +39,59 @@ func cleanParentName(name string) string {
 	return name
 }
 
+// DetailedMatch is IdentifyDetailed's richer result: the scene match Identify
+// would return, plus the corrected Studio and Performer identities the pipeline
+// derives internally (via verifyStudio/verifyPerformers) — Identify() computes
+// these too but discards them after using them to refine the scene search term.
+// Callers that need Studio/Performer as first-class results (not just a scene
+// search refinement) should use IdentifyDetailed instead of re-deriving them
+// separately.
+type DetailedMatch struct {
+	Scene      *MatchResult // nil if no scene matched (same "no match" semantics as Identify)
+	StudioName string       // the corrected studio name from verifyStudio, "" if none
+	Performers []string     // the corrected performer names from verifyPerformers, empty if none
+}
+
 // Identify runs the full AI-assisted identification pipeline for a file whose
 // filename stem is `stem`, found in a folder named `parentName`. Returns nil
 // (no error) if nothing identifies the file with enough confidence to place
 // it — the caller should route the file to unmatched in that case.
 func (id *Identifier) Identify(ctx context.Context, stem, parentName string) (*MatchResult, error) {
+	detail, err := id.IdentifyDetailed(ctx, stem, parentName)
+	if err != nil {
+		return nil, err
+	}
+	return detail.Scene, nil
+}
+
+// IdentifyDetailed runs the exact same pipeline as Identify but also returns
+// the corrected Studio and Performer identities the pipeline derives internally
+// (post-verifyStudio/verifyPerformers correction, not the raw AI guess). Identify
+// is a thin wrapper over this method that keeps only the scene match, so the two
+// can never diverge. The StudioName/Performers rejection and canonical-name
+// correction come entirely from verifyStudio/verifyPerformers (including the
+// release-group/content-rating tag guard in entityverify.go) — this method adds
+// no second guard of its own.
+//
+// In the direct-UUID branch, verifyStudio/verifyPerformers never run, so
+// StudioName is "" and Performers is empty even though Scene is populated — this
+// is faithful to "exactly what the pipeline derived," not a value backfilled
+// from the scene.
+func (id *Identifier) IdentifyDetailed(ctx context.Context, stem, parentName string) (*DetailedMatch, error) {
 	parentName = cleanParentName(parentName)
 
 	if result, err := id.tryUUIDLookup(ctx, stem, parentName); err != nil {
 		return nil, err
 	} else if result != nil {
-		return result, nil
+		return &DetailedMatch{Scene: result}, nil
 	}
 
 	parsed, err := ParseFilename(ctx, id.AI, stem, parentName)
 	if err != nil {
-		return nil, nil //nolint:nilerr // a parse failure is a soft "no match", not a hard error
+		return &DetailedMatch{}, nil //nolint:nilerr // a parse failure is a soft "no match", not a hard error
 	}
 	if parsed.Title == "" {
-		return nil, nil
+		return &DetailedMatch{}, nil
 	}
 
 	// Correct the AI's raw studio/performer guess against real StashDB/
@@ -69,17 +103,20 @@ func (id *Identifier) Identify(ctx context.Context, stem, parentName string) (*M
 	parsed.Studio = id.verifyStudio(ctx, studioGuess, stem)
 	parsed.Performers = id.verifyPerformers(ctx, parsed.Performers, stem, studioGuess)
 
+	detail := &DetailedMatch{StudioName: parsed.Studio, Performers: parsed.Performers}
+
 	if result, err := id.searchInternalDBs(ctx, parsed.Title, parsed.Studio, stem); err != nil {
 		return nil, err
 	} else if result != nil {
 		if result.Date == "" {
 			result.Date = parsed.Year
 		}
-		return result, nil
+		detail.Scene = result
+		return detail, nil
 	}
 
 	if id.Brave == nil {
-		return nil, nil
+		return detail, nil
 	}
 
 	grounded, err := id.webSearchAndGround(ctx, stem, parentName, parsed)
@@ -87,10 +124,15 @@ func (id *Identifier) Identify(ctx context.Context, stem, parentName string) (*M
 		return nil, err
 	}
 	if grounded.Title == "" || grounded.Studio == "" {
-		return nil, nil
+		return detail, nil
 	}
 
-	return id.reSearchAfterGrounding(ctx, grounded)
+	scene, err := id.reSearchAfterGrounding(ctx, grounded)
+	if err != nil {
+		return nil, err
+	}
+	detail.Scene = scene
+	return detail, nil
 }
 
 func (id *Identifier) tryUUIDLookup(ctx context.Context, stem, parentName string) (*MatchResult, error) {

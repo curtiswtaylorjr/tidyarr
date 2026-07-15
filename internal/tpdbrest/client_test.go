@@ -449,6 +449,148 @@ func TestGet_ParsesHashes(t *testing.T) {
 	}
 }
 
+// TestGet_ParsesTags proves a scene's "tags" array (TagResource objects)
+// decodes into Scene.Tags with each entry's flat id/uuid/name populated — and
+// that the recursive `parents` array carried by a TagResource is ignored, not
+// a decode error.
+func TestGet_ParsesTags(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"_id":"1","title":"Tagged Scene","date":"2024-01-01","site":{"name":"Some Site"},"tags":[{"id":7,"uuid":"u-7","name":"Anal","parents":[{"id":1,"uuid":"u-1","name":"Category"}]},{"id":9,"uuid":"u-9","name":"Blonde"}]}]}`))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "testkey", &http.Client{Timeout: 5 * time.Second})
+	out, err := c.SearchByHash(context.Background(), "x")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(out) != 1 {
+		t.Fatalf("expected 1 scene, got %d", len(out))
+	}
+	tags := out[0].Tags
+	if len(tags) != 2 {
+		t.Fatalf("expected 2 tags, got %+v", tags)
+	}
+	if tags[0].ID != 7 || tags[0].UUID != "u-7" || tags[0].Name != "Anal" {
+		t.Errorf("unexpected first tag: %+v", tags[0])
+	}
+	if tags[1].ID != 9 || tags[1].UUID != "u-9" || tags[1].Name != "Blonde" {
+		t.Errorf("unexpected second tag: %+v", tags[1])
+	}
+}
+
+// TestSearchMovies_UsesMoviesEndpoint proves SearchMovies hits GET /movies with
+// q + per_page=5 (mirroring SearchByTitle's shape) and decodes the shared
+// SceneResource envelope, including the "type":"Movie" discriminator, into
+// []Scene.
+func TestSearchMovies_UsesMoviesEndpoint(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/movies" {
+			t.Errorf("expected path /movies, got %q", r.URL.Path)
+		}
+		q := r.URL.Query()
+		if q.Get("q") != "Some Movie" {
+			t.Errorf("expected q=Some Movie, got %q", q.Get("q"))
+		}
+		if q.Get("per_page") != "5" {
+			t.Errorf("expected per_page=5, got %q", q.Get("per_page"))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"_id":"m1","title":"Some Movie","date":"2024-01-01","site":{"name":"MovieStudio"},"type":"Movie"}]}`))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "testkey", &http.Client{Timeout: 5 * time.Second})
+	out, err := c.SearchMovies(context.Background(), "Some Movie")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(out) != 1 || out[0].Title != "Some Movie" || out[0].ID != "m1" || out[0].Type != "Movie" {
+		t.Fatalf("got %+v", out)
+	}
+}
+
+// TestBrowseMovies_PaginatesWithoutSearchTerm proves BrowseMovies hits
+// GET /movies with page/per_page only — no q, no orderBy — and decodes
+// Type:"Movie" correctly.
+func TestBrowseMovies_PaginatesWithoutSearchTerm(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/movies" {
+			t.Errorf("expected path /movies, got %q", r.URL.Path)
+		}
+		q := r.URL.Query()
+		if q.Get("per_page") != "10" || q.Get("page") != "2" {
+			t.Errorf("expected per_page=10 page=2, got %v", q)
+		}
+		if _, hasQ := q["q"]; hasQ {
+			t.Errorf("expected no search term on a browse, got %v", q)
+		}
+		if _, hasOrder := q["orderBy"]; hasOrder {
+			t.Errorf("expected no orderBy param on BrowseMovies, got %v", q)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"_id":"m9","title":"Browsed Movie","date":"2024-02-02","site":{"name":"MovieStudio"},"type":"Movie"}]}`))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "testkey", &http.Client{Timeout: 5 * time.Second})
+	out, err := c.BrowseMovies(context.Background(), 2, 10)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(out) != 1 || out[0].Title != "Browsed Movie" || out[0].Type != "Movie" {
+		t.Fatalf("got %+v", out)
+	}
+}
+
+// TestBrowseMovies_ClampsBadPagination proves BrowseMovies defaults a
+// non-positive page/perPage to page=1/per_page=defaultBrowsePerPage, same as
+// BrowseScenes.
+func TestBrowseMovies_ClampsBadPagination(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		if q.Get("per_page") != "20" || q.Get("page") != "1" {
+			t.Errorf("expected defaulted per_page=20 page=1, got %v", q)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[]}`))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "testkey", &http.Client{Timeout: 5 * time.Second})
+	if _, err := c.BrowseMovies(context.Background(), 0, -5); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// TestMoviesBySite_UsesDedicatedEndpoint proves MoviesBySite hits the dedicated
+// GET /sites/{id}/movies endpoint with a path-escaped id and page/per_page.
+func TestMoviesBySite_UsesDedicatedEndpoint(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/sites/s%201/movies" && r.URL.Path != "/sites/s 1/movies" {
+			t.Errorf("expected path /sites/{id}/movies with escaped id, got %q", r.URL.Path)
+		}
+		q := r.URL.Query()
+		if q.Get("per_page") != "5" || q.Get("page") != "2" {
+			t.Errorf("expected per_page=5 page=2, got %v", q)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"_id":"m2","title":"Site Movie","date":"2024-01-01","site":{"name":"MovieStudio"},"type":"Movie"}]}`))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "testkey", &http.Client{Timeout: 5 * time.Second})
+	// "s 1" (with a space) proves the id is path-escaped, not parsed as an int.
+	out, err := c.MoviesBySite(context.Background(), "s 1", 2, 5)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(out) != 1 || out[0].Title != "Site Movie" || out[0].Type != "Movie" {
+		t.Fatalf("got %+v", out)
+	}
+}
+
 func TestGet_EmptySiteFallback(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

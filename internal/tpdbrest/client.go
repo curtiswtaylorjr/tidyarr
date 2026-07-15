@@ -64,6 +64,28 @@ type Scene struct {
 	// May be empty for an older/edge-case scene; treat that as "no confirmed
 	// external link," not a broken guessed URL.
 	Slug string
+	// Tags is TPDB's per-scene "tags" array (TagResource objects) — confirmed
+	// present on SceneResource in TPDB's live OpenAPI schema (fetched from
+	// https://api.theporndb.net/openapi.json) this session, 2026-07-15. Only the
+	// flat id/uuid/name of each tag is modeled (see Tag); TagResource's recursive
+	// `parents` array is deliberately not decoded. May be empty (a scene with no
+	// tags on file).
+	Tags []Tag
+	// Type is TPDB's own discriminator on the shared Scene/Movie resource schema
+	// — "Scene" or "Movie" per the live OpenAPI spec's SceneResource.type field,
+	// example value "Scene"; not independently confirmed for the Movie case,
+	// verify against a live /movies response the first time this is exercised for
+	// real.
+	Type string
+}
+
+// Tag mirrors one entry of TPDB's per-scene "tags" array (a TagResource) — only
+// the flat id/uuid/name are modeled; TagResource's recursive `parents` array is
+// deliberately not decoded (this client only needs a scene's own flat tag list).
+type Tag struct {
+	ID   int
+	UUID string
+	Name string
 }
 
 type rawSite struct {
@@ -146,6 +168,18 @@ type rawScene struct {
 	Duration int            `json:"duration"`
 	Rating   float64        `json:"rating"`
 	Hashes   []rawSceneHash `json:"hashes"`
+	Type     string         `json:"type"`
+	Tags     []rawTag       `json:"tags"`
+}
+
+// rawTag mirrors one entry of a TPDB scene's "tags" array — a TagResource,
+// confirmed present on SceneResource in TPDB's live OpenAPI schema
+// (https://api.theporndb.net/openapi.json). Only id/uuid/name are consumed; the
+// recursive `parents` array is deliberately not decoded.
+type rawTag struct {
+	ID   int    `json:"id"`
+	UUID string `json:"uuid"`
+	Name string `json:"name"`
 }
 
 // rawSceneHash mirrors one entry of a TPDB scene's "hashes" array — only the
@@ -166,7 +200,11 @@ func (s rawScene) toScene() Scene {
 			phashes = append(phashes, h.Hash)
 		}
 	}
-	return Scene{ID: string(s.ID), Title: s.Title, Slug: s.Slug, Date: s.Date, Site: site, Image: s.Image, Duration: s.Duration, Rating: s.Rating, Hashes: phashes}
+	var tags []Tag
+	for _, t := range s.Tags {
+		tags = append(tags, Tag{ID: t.ID, UUID: t.UUID, Name: t.Name})
+	}
+	return Scene{ID: string(s.ID), Title: s.Title, Slug: s.Slug, Date: s.Date, Site: site, Image: s.Image, Duration: s.Duration, Rating: s.Rating, Hashes: phashes, Tags: tags, Type: s.Type}
 }
 
 // firstNonEmpty returns the first non-empty string from vals, or "" if all are
@@ -476,4 +514,55 @@ func (c *Client) ScenesBySite(ctx context.Context, siteID string, page, perPage 
 		"page":     {strconv.Itoa(page)},
 	}
 	return c.getScenes(ctx, "/sites/"+url.PathEscape(siteID)+"/scenes", params)
+}
+
+// Movies share TPDB's Scene resource shape (confirmed via the live OpenAPI
+// spec, https://api.theporndb.net/openapi.json) — these methods return []Scene
+// with Type=="Movie", not a separate Movie type. Check .Type to distinguish
+// when mixing scene and movie results. They reuse the same getScenes decode
+// machinery the /scenes endpoints do, since the response envelope
+// ({"data":[...SceneResource...]}) is identical.
+
+// SearchMovies text-searches movies by title — the GET /movies analogue of
+// SearchByTitle, same q + per_page=5 shape. Similarity filtering of results is
+// business logic that belongs in internal/identify, not here.
+func (c *Client) SearchMovies(ctx context.Context, title string) ([]Scene, error) {
+	return c.getScenes(ctx, "/movies", url.Values{"q": {title}, "per_page": {"5"}})
+}
+
+// BrowseMovies returns one page of TPDB's movie catalog with NO search term —
+// the GET /movies analogue of BrowseScenes' plain paginated browse. page/perPage
+// are clamped the same way (page >= 1; perPage defaults to defaultBrowsePerPage
+// when non-positive). Unlike BrowseScenes, no orderBy param is sent — movies
+// need no server-side sort here.
+func (c *Client) BrowseMovies(ctx context.Context, page, perPage int) ([]Scene, error) {
+	if perPage <= 0 {
+		perPage = defaultBrowsePerPage
+	}
+	if page <= 0 {
+		page = 1
+	}
+	return c.getScenes(ctx, "/movies", url.Values{
+		"per_page": {strconv.Itoa(perPage)},
+		"page":     {strconv.Itoa(page)},
+	})
+}
+
+// MoviesBySite returns one page of a single site's movies via TPDB's dedicated
+// GET /sites/{identifier}/movies endpoint — the movies analogue of
+// ScenesBySite. siteID is the opaque id string this client already returns from
+// Site.ID (the flexID-decoded _id); it's URL-path escaped and used directly,
+// never parsed as an int. page/perPage are clamped like the browse methods.
+func (c *Client) MoviesBySite(ctx context.Context, siteID string, page, perPage int) ([]Scene, error) {
+	if perPage <= 0 {
+		perPage = defaultBrowsePerPage
+	}
+	if page <= 0 {
+		page = 1
+	}
+	params := url.Values{
+		"per_page": {strconv.Itoa(perPage)},
+		"page":     {strconv.Itoa(page)},
+	}
+	return c.getScenes(ctx, "/sites/"+url.PathEscape(siteID)+"/movies", params)
 }

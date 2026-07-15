@@ -397,3 +397,22 @@ export function putRecheckInterval(intervalSeconds: number): Promise<void> {
     body: JSON.stringify(body),
   });
 }
+
+// Global background Adult "newest" scan cadence in whole seconds (>= 0,
+// backend-validated; 0 = off, opt-in). Same shape/semantics as recheck-interval
+// above, but this endpoint has no generated DTO (the Go handler uses local
+// request/response structs), so the wire shape is inlined here.
+export function fetchAdultNewestScanInterval(): Promise<number> {
+  return api<{ intervalSeconds: number }>(
+    "/api/settings/adult-newest-scan-interval",
+  ).then((r) => r.intervalSeconds);
+}
+
+export function putAdultNewestScanInterval(
+  intervalSeconds: number,
+): Promise<void> {
+  return api<void>("/api/settings/adult-newest-scan-interval", {
+    method: "PUT",
+    body: JSON.stringify({ intervalSeconds }),
+  });
+}

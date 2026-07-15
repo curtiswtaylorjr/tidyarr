@@ -1,0 +1,319 @@
+package adultnewest
+
+import (
+	"context"
+	"errors"
+	"log"
+	"net/http"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/curtiswtaylorjr/sakms/internal/connections"
+	"github.com/curtiswtaylorjr/sakms/internal/identify"
+	"github.com/curtiswtaylorjr/sakms/internal/mode"
+	"github.com/curtiswtaylorjr/sakms/internal/prowlarr"
+	"github.com/curtiswtaylorjr/sakms/internal/settings"
+)
+
+// IntervalSettingKey is the settings key holding the scan cadence, in whole
+// seconds. internal/api mirrors this string in its own GET/PUT
+// /api/settings/adult-newest-scan-interval handler rather than importing
+// this package, same import-avoidance rationale as recheck.IntervalSettingKey.
+//
+// Unlike recheck (off by default, opt-in), this job defaults ON at
+// defaultIntervalHours when the key has never been set — an explicit
+// operator directive (2026-07-15), a deliberate deviation from this
+// project's usual "manual by default" convention for this one feature.
+// Setting the key to 0 explicitly still means off; only the genuinely-unset
+// case (a fresh install, or an install from before this default existed)
+// gets the new default (see LoadInterval).
+const IntervalSettingKey = "adult_newest_scan_interval_seconds"
+
+// defaultIntervalHours is the scan cadence used when IntervalSettingKey has
+// never been set — 24 hours per operator directive (2026-07-15).
+const defaultIntervalHours = 24
+
+// staleAfterMonths is how long a matched entity or seen-release record can
+// sit before the periodic purge (see purgeStale) removes it — 6 months per
+// the same operator directive. A purged entity isn't gone forever: if a
+// future release still resolves to it, it's simply re-matched and re-cached
+// (a soft refresh, since re-matching re-fetches current image/tags rather
+// than reusing months-old data). A purged "seen" release guid is likewise
+// just eligible to be reprocessed if it somehow still appears in Prowlarr's
+// feed — extremely unlikely for a 6-month-old release, but harmless if it
+// does.
+const staleAfterMonths = 6
+
+// outboundTimeout bounds every call this cycle makes — its own copy of
+// cmd/sakms/main.go's outboundTimeout, matching internal/recheck's
+// self-contained convention.
+const outboundTimeout = 15 * time.Second
+
+// adultCategory is the Newznab/Torznab XXX category code — mirrors
+// internal/api/autograb.go's adultAutoGrabCategory (kept as an independent
+// copy rather than an import, since internal/api doesn't export it and this
+// package shouldn't depend on internal/api anyway).
+const adultCategory = 6000
+
+// maxNewPerCycle bounds how many newly-seen releases get run through the
+// per-release identify pipeline (an AI call plus several StashDB/FansDB/TPDB
+// lookups) in a single cycle. internal/recheck has no equivalent cap because
+// its per-item probe is one cheap HTTP call; this job's per-item cost is far
+// higher, so an unbounded "process everything new" loop could turn a single
+// tick — e.g. after the feature is first enabled, when every current release
+// is "new" — into dozens of AI calls back to back. Processing is also
+// strictly sequential (see runCycle below), never concurrent: that, plus this
+// cap, is what keeps this job on the safe side of the failure shape CLAUDE.md's
+// "Discover never queries Prowlarr" rule exists to prevent (see this
+// package's doc comment).
+const maxNewPerCycle = 25
+
+// LoadInterval reads IntervalSettingKey and returns it as a Duration.
+// Genuinely unset (never saved — a fresh install, or an existing install
+// from before this default existed) returns defaultIntervalHours, not off —
+// see IntervalSettingKey's doc comment for why this deliberately differs
+// from recheck.LoadInterval's off-by-default convention. A key that WAS
+// explicitly saved as "0" (an operator turning the feature off via Settings)
+// still means off — that distinction is exactly what separates the
+// settings.ErrNotFound branch below from the "stored but non-positive"
+// branch. A blank/non-integer stored value degrades to off, not the
+// default, since that shape only happens via direct DB tampering, not
+// through the Settings UI (which only ever sends an integer) — treating it
+// as "explicitly disabled" is the safer read of a value that shouldn't
+// exist.
+func LoadInterval(ctx context.Context, settingsStore *settings.Store) time.Duration {
+	v, err := settingsStore.Get(ctx, IntervalSettingKey)
+	if errors.Is(err, settings.ErrNotFound) {
+		return defaultIntervalHours * time.Hour
+	}
+	if err != nil {
+		return 0 // a real store error degrades to off, not a guessed default
+	}
+	secs, err := strconv.Atoi(strings.TrimSpace(v))
+	if err != nil || secs <= 0 {
+		return 0
+	}
+	return time.Duration(secs) * time.Second
+}
+
+// Run drives the background scan loop until ctx is cancelled — mirrors
+// recheck.Run's shape (ticker, live-retune via settings, context-cancellation
+// shutdown), with one deliberate difference: interval <= 0 stops/skips the
+// loop the same way it does for recheck, but here that only happens when an
+// operator has explicitly saved "0" via Settings — a fresh install's
+// interval defaults to defaultIntervalHours, not off (see
+// IntervalSettingKey's doc comment), so this job runs out of the box unlike
+// every other background job in this codebase.
+func Run(ctx context.Context, interval time.Duration, connStore *connections.Store, settingsStore *settings.Store, releaseStore *ReleaseStore) {
+	if interval <= 0 {
+		return // opt-in gate: off by default, honoring "manual first"
+	}
+
+	httpClient := &http.Client{Timeout: outboundTimeout}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	log.Printf("adultnewest: background newest-releases scan enabled (every %s) — a deliberate opt-in exception to manual-by-default", interval)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			cur := LoadInterval(ctx, settingsStore)
+			if cur <= 0 {
+				log.Printf("adultnewest: interval set to 0 — stopping background scan (restart to re-enable)")
+				return
+			}
+			if cur != interval {
+				interval = cur
+				ticker.Reset(cur)
+			}
+			runCycle(ctx, httpClient, connStore, settingsStore, releaseStore)
+		}
+	}
+}
+
+// runCycle performs exactly one scan pass and returns — extracted from Run's
+// ticker loop so tests exercise it directly rather than waiting on a wall
+// clock, same convention as recheck.runCycle. Fault isolation matches the
+// rest of the codebase: a missing Prowlarr/Identify config skips the whole
+// pass (nothing to scan with/against), and a single release's processing
+// failure is logged and skipped without aborting the others.
+func runCycle(ctx context.Context, httpClient *http.Client, connStore *connections.Store, settingsStore *settings.Store, releaseStore *ReleaseStore) {
+	// Purged independent of whether Prowlarr/Identify are configured right
+	// now — cleaning up months-old cache entries shouldn't depend on the
+	// feature being actively scannable at this exact moment (e.g. a
+	// connection was temporarily removed), and it's cheap regardless.
+	if n, err := releaseStore.PurgeStale(ctx, time.Now().AddDate(0, -staleAfterMonths, 0)); err != nil {
+		log.Printf("adultnewest: purging stale entries: %v", err)
+	} else if n > 0 {
+		log.Printf("adultnewest: purged %d stale matched entities (older than %d months)", n, staleAfterMonths)
+	}
+
+	sess, err := mode.Build(ctx, connStore, settingsStore, httpClient, mode.Adult)
+	if err != nil {
+		log.Printf("adultnewest: building adult session: %v", err)
+		return
+	}
+	if sess.Prowlarr == nil {
+		return // prowlarr not configured — nothing to scan
+	}
+	if sess.Identify == nil {
+		return // AI identify pipeline not configured (needs an AI provider + at least one of StashDB/FansDB/TPDB) — nothing to match against
+	}
+
+	// Bare category browse, no query term — Prowlarr/Torznab's native
+	// "recent releases in this category" behavior (verified live against a
+	// real Prowlarr instance this session: 271 results, sorted by recency,
+	// via categories=6000 with no query param).
+	releases, err := sess.Prowlarr.Search(ctx, "", []int{adultCategory})
+	if err != nil {
+		log.Printf("adultnewest: searching prowlarr for newest releases: %v", err)
+		return
+	}
+	if len(releases) == 0 {
+		return
+	}
+
+	guids := make([]string, len(releases))
+	for i, r := range releases {
+		guids[i] = r.GUID
+	}
+	seen, err := releaseStore.SeenGUIDs(ctx, guids)
+	if err != nil {
+		log.Printf("adultnewest: checking seen release guids: %v", err)
+		return
+	}
+
+	processed := 0
+	for _, r := range releases {
+		if processed >= maxNewPerCycle {
+			break
+		}
+		if seen[r.GUID] || r.GUID == "" {
+			continue
+		}
+		processed++
+		if err := processRelease(ctx, sess.Identify, releaseStore, r); err != nil {
+			log.Printf("adultnewest: processing release %q: %v", r.Title, err)
+		}
+		// Marked seen regardless of match outcome (including a processing
+		// error) — an unmatched or failed release must not be retried every
+		// cycle just because it produced no cache row; see MarkSeen's doc.
+		if err := releaseStore.MarkSeen(ctx, r.GUID); err != nil {
+			log.Printf("adultnewest: marking release %q seen: %v", r.Title, err)
+		}
+	}
+}
+
+// processRelease identifies one Prowlarr release and writes every entity it
+// resolved to (a scene or movie, plus its studio and any performers) to
+// releaseStore. A release that resolves to nothing is simply not written —
+// it never appears on Discover, only through the existing manual Search
+// screen (see this package's doc comment and the operator's explicit
+// instruction this feature was scoped against).
+func processRelease(ctx context.Context, id *identify.Identifier, releaseStore *ReleaseStore, r prowlarr.Release) error {
+	matches, err := matchRelease(ctx, id, r)
+	if err != nil {
+		return err
+	}
+	for _, m := range matches {
+		if err := releaseStore.Insert(ctx, m); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// matchRelease tries a scene match first (the existing, most-verified
+// pipeline: AI parse + studio/performer correction + StashDB/FansDB/TPDB
+// scene lookup), then a TPDB movie-catalog match if no scene matched. Studio
+// and Performer identities the scene pipeline already derived (but discarded
+// after using them to build the scene search term) are captured too — see
+// identify.Identifier.IdentifyDetailed's doc comment — each getting its own
+// Studio/Performer cache entry (with its own poster art, fetched via
+// id.StudioImage/PerformerImage) independent of whether the scene match
+// itself succeeded, since a release's studio/performer identity can be
+// confidently derived even when the specific scene isn't in any configured
+// database yet.
+func matchRelease(ctx context.Context, id *identify.Identifier, r prowlarr.Release) ([]MatchedRelease, error) {
+	detail, err := id.IdentifyDetailed(ctx, r.Title, "")
+	if err != nil {
+		return nil, err
+	}
+
+	var out []MatchedRelease
+
+	switch {
+	case detail.Scene != nil:
+		rowType := RowScene
+		if detail.Scene.Type == "movie" {
+			rowType = RowMovie
+		}
+		out = append(out, toMatchedRelease(rowType, *detail.Scene))
+	default:
+		// No scene match — try TPDB's movie catalog directly before giving
+		// up on a title/movie identity entirely. This is a lighter-weight
+		// match than the scene path (fuzzy title search only, no AI parse/
+		// studio correction) — see SearchTPDBMovies' doc comment for why
+		// that's an acceptable, honestly-scoped difference from the scene
+		// path's full pipeline.
+		if movie, err := id.Boxes.SearchTPDBMovies(ctx, r.Title); err == nil && movie != nil {
+			out = append(out, toMatchedRelease(RowMovie, *movie))
+		}
+	}
+
+	if detail.StudioName != "" {
+		image, source := id.StudioImage(ctx, detail.StudioName)
+		out = append(out, MatchedRelease{
+			RowType: RowStudio,
+			// TPDB/StashDB/FansDB catalog ids aren't available from
+			// verifyStudio's corrected-name-only result, so the corrected
+			// name itself is used as the entity id — stable enough for
+			// display/dedup purposes even though it isn't a real opaque
+			// catalog id (see StudioImage's doc comment for the same
+			// name-only lookup convention).
+			EntityID:     detail.StudioName,
+			EntitySource: source,
+			EntityTitle:  detail.StudioName,
+			EntityImage:  image,
+		})
+	}
+	for _, performer := range detail.Performers {
+		if performer == "" {
+			continue
+		}
+		image, source := id.PerformerImage(ctx, performer)
+		out = append(out, MatchedRelease{
+			RowType:      RowPerformer,
+			EntityID:     performer,
+			EntitySource: source,
+			EntityTitle:  performer,
+			EntityImage:  image,
+		})
+	}
+
+	return out, nil
+}
+
+// toMatchedRelease maps a MatchResult onto the cache row shape, splitting
+// MatchResult's comma-joined Tags string back into a slice (see
+// identify.MatchResult's doc comment for why it's stored as a single string
+// there — this is the one place that string gets parsed back apart).
+func toMatchedRelease(rowType RowType, m identify.MatchResult) MatchedRelease {
+	var genres []string
+	if m.Tags != "" {
+		genres = strings.Split(m.Tags, ",")
+	}
+	return MatchedRelease{
+		RowType:      rowType,
+		EntityID:     m.SceneID,
+		EntitySource: m.Box,
+		EntityTitle:  m.Title,
+		EntityStudio: m.Studio,
+		EntityImage:  m.Image,
+		EntityDate:   m.Date,
+		Genres:       genres,
+	}
+}

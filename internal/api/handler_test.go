@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/curtiswtaylorjr/sakms/internal/adultnewest"
 	"github.com/curtiswtaylorjr/sakms/internal/allowlist"
 	"github.com/curtiswtaylorjr/sakms/internal/connections"
 	"github.com/curtiswtaylorjr/sakms/internal/db"
@@ -69,10 +70,11 @@ func testVideoHasher(t *testing.T) constantVideoHasher {
 
 // testStores builds real connections.Store, proposals.Store,
 // allowlist.Store, settings.Store, grabs.Store, library.Store,
-// discoversliders.Store, and trakt.Store instances against one freshly
-// migrated temp-file database, the same way each package's own tests do —
-// handler tests exercise the real stack, not a mock.
-func testStores(t *testing.T) (*connections.Store, *proposals.Store, *allowlist.Store, *settings.Store, *grabs.Store, *library.Store, *discoversliders.Store, *trakt.Store) {
+// discoversliders.Store, trakt.Store, adultnewest.Store, and
+// adultnewest.ReleaseStore instances against one freshly migrated temp-file
+// database, the same way each package's own tests do — handler tests
+// exercise the real stack, not a mock.
+func testStores(t *testing.T) (*connections.Store, *proposals.Store, *allowlist.Store, *settings.Store, *grabs.Store, *library.Store, *discoversliders.Store, *trakt.Store, *adultnewest.Store, *adultnewest.ReleaseStore) {
 	t.Helper()
 	sqlDB, err := db.Open(filepath.Join(t.TempDir(), "sakms.db"))
 	if err != nil {
@@ -83,7 +85,7 @@ func testStores(t *testing.T) (*connections.Store, *proposals.Store, *allowlist.
 	if err != nil {
 		t.Fatalf("building secret store: %v", err)
 	}
-	return connections.New(sqlDB, secretStore), proposals.New(sqlDB), allowlist.New(sqlDB), settings.New(sqlDB), grabs.New(sqlDB), library.New(sqlDB), discoversliders.New(sqlDB), trakt.NewStore(sqlDB, secretStore)
+	return connections.New(sqlDB, secretStore), proposals.New(sqlDB), allowlist.New(sqlDB), settings.New(sqlDB), grabs.New(sqlDB), library.New(sqlDB), discoversliders.New(sqlDB), trakt.NewStore(sqlDB, secretStore), adultnewest.New(sqlDB), adultnewest.NewReleaseStore(sqlDB)
 }
 
 // TestConnectionsTestHandler_EndToEnd exercises the real path a Settings
@@ -100,8 +102,8 @@ func TestConnectionsTestHandler_EndToEnd(t *testing.T) {
 	}))
 	defer fakeJellyfin.Close()
 
-	connStore, propStore, allowStore, settingsStore, grabsStore, libStore, slidersStore, traktStore := testStores(t)
-	sakSrv := httptest.NewServer(NewMux(testHTTPClient(), connStore, propStore, allowStore, testProber(t), testPHasher(t), testVideoHasher(t), settingsStore, grabsStore, libStore, slidersStore, traktStore))
+	connStore, propStore, allowStore, settingsStore, grabsStore, libStore, slidersStore, traktStore, adultNewestRowStore, adultNewestReleaseStore := testStores(t)
+	sakSrv := httptest.NewServer(NewMux(testHTTPClient(), connStore, propStore, allowStore, testProber(t), testPHasher(t), testVideoHasher(t), settingsStore, grabsStore, libStore, slidersStore, traktStore, adultNewestRowStore, adultNewestReleaseStore))
 	defer sakSrv.Close()
 
 	reqBody, _ := json.Marshal(ConnectionTestRequest{
@@ -126,8 +128,8 @@ func TestConnectionsTestHandler_EndToEnd(t *testing.T) {
 }
 
 func TestConnectionsTestHandler_MalformedBody(t *testing.T) {
-	connStore, propStore, allowStore, settingsStore, grabsStore, libStore, slidersStore, traktStore := testStores(t)
-	srv := httptest.NewServer(NewMux(testHTTPClient(), connStore, propStore, allowStore, testProber(t), testPHasher(t), testVideoHasher(t), settingsStore, grabsStore, libStore, slidersStore, traktStore))
+	connStore, propStore, allowStore, settingsStore, grabsStore, libStore, slidersStore, traktStore, adultNewestRowStore, adultNewestReleaseStore := testStores(t)
+	srv := httptest.NewServer(NewMux(testHTTPClient(), connStore, propStore, allowStore, testProber(t), testPHasher(t), testVideoHasher(t), settingsStore, grabsStore, libStore, slidersStore, traktStore, adultNewestRowStore, adultNewestReleaseStore))
 	defer srv.Close()
 
 	resp, err := http.Post(srv.URL+"/api/connections/test", "application/json", bytes.NewReader([]byte("not json")))
@@ -146,8 +148,8 @@ func TestConnectionsTestHandler_MalformedBody(t *testing.T) {
 // a real migrated SQLite file — not just the connections package in
 // isolation.
 func TestConnectionsCRUD_EndToEnd(t *testing.T) {
-	connStore, propStore, allowStore, settingsStore, grabsStore, libStore, slidersStore, traktStore := testStores(t)
-	srv := httptest.NewServer(NewMux(testHTTPClient(), connStore, propStore, allowStore, testProber(t), testPHasher(t), testVideoHasher(t), settingsStore, grabsStore, libStore, slidersStore, traktStore))
+	connStore, propStore, allowStore, settingsStore, grabsStore, libStore, slidersStore, traktStore, adultNewestRowStore, adultNewestReleaseStore := testStores(t)
+	srv := httptest.NewServer(NewMux(testHTTPClient(), connStore, propStore, allowStore, testProber(t), testPHasher(t), testVideoHasher(t), settingsStore, grabsStore, libStore, slidersStore, traktStore, adultNewestRowStore, adultNewestReleaseStore))
 	defer srv.Close()
 
 	// Save a connection.
@@ -201,8 +203,8 @@ func TestConnectionsCRUD_EndToEnd(t *testing.T) {
 }
 
 func TestUpsertConnectionHandler_RequiresURL(t *testing.T) {
-	connStore, propStore, allowStore, settingsStore, grabsStore, libStore, slidersStore, traktStore := testStores(t)
-	srv := httptest.NewServer(NewMux(testHTTPClient(), connStore, propStore, allowStore, testProber(t), testPHasher(t), testVideoHasher(t), settingsStore, grabsStore, libStore, slidersStore, traktStore))
+	connStore, propStore, allowStore, settingsStore, grabsStore, libStore, slidersStore, traktStore, adultNewestRowStore, adultNewestReleaseStore := testStores(t)
+	srv := httptest.NewServer(NewMux(testHTTPClient(), connStore, propStore, allowStore, testProber(t), testPHasher(t), testVideoHasher(t), settingsStore, grabsStore, libStore, slidersStore, traktStore, adultNewestRowStore, adultNewestReleaseStore))
 	defer srv.Close()
 
 	noURLKey := "key-with-no-url"
@@ -223,8 +225,8 @@ func TestUpsertConnectionHandler_RequiresURL(t *testing.T) {
 // when the operator edits only the URL, leaving the blank "unchanged (••••)"
 // key field untouched) must preserve the stored secret, not wipe it.
 func TestUpsertConnectionHandler_OmittedAPIKeyPreservesSecret(t *testing.T) {
-	connStore, propStore, allowStore, settingsStore, grabsStore, libStore, slidersStore, traktStore := testStores(t)
-	srv := httptest.NewServer(NewMux(testHTTPClient(), connStore, propStore, allowStore, testProber(t), testPHasher(t), testVideoHasher(t), settingsStore, grabsStore, libStore, slidersStore, traktStore))
+	connStore, propStore, allowStore, settingsStore, grabsStore, libStore, slidersStore, traktStore, adultNewestRowStore, adultNewestReleaseStore := testStores(t)
+	srv := httptest.NewServer(NewMux(testHTTPClient(), connStore, propStore, allowStore, testProber(t), testPHasher(t), testVideoHasher(t), settingsStore, grabsStore, libStore, slidersStore, traktStore, adultNewestRowStore, adultNewestReleaseStore))
 	defer srv.Close()
 
 	if err := connStore.Upsert(context.Background(), "radarr", "http://old:7878", "my-secret-key"); err != nil {
@@ -259,8 +261,8 @@ func TestUpsertConnectionHandler_OmittedAPIKeyPreservesSecret(t *testing.T) {
 // today's existing behavior: apiKey present as "" still clears the stored
 // secret (e.g. switching a service to one that needs no key).
 func TestUpsertConnectionHandler_ExplicitEmptyAPIKeyClearsSecret(t *testing.T) {
-	connStore, propStore, allowStore, settingsStore, grabsStore, libStore, slidersStore, traktStore := testStores(t)
-	srv := httptest.NewServer(NewMux(testHTTPClient(), connStore, propStore, allowStore, testProber(t), testPHasher(t), testVideoHasher(t), settingsStore, grabsStore, libStore, slidersStore, traktStore))
+	connStore, propStore, allowStore, settingsStore, grabsStore, libStore, slidersStore, traktStore, adultNewestRowStore, adultNewestReleaseStore := testStores(t)
+	srv := httptest.NewServer(NewMux(testHTTPClient(), connStore, propStore, allowStore, testProber(t), testPHasher(t), testVideoHasher(t), settingsStore, grabsStore, libStore, slidersStore, traktStore, adultNewestRowStore, adultNewestReleaseStore))
 	defer srv.Close()
 
 	if err := connStore.Upsert(context.Background(), "radarr", "http://radarr:7878", "my-secret-key"); err != nil {

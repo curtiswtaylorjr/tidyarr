@@ -42,6 +42,7 @@ import {
 } from "./Library";
 import { AdvancedSection } from "./Advanced";
 import { SliderAdminSection } from "../SliderAdmin";
+import { AdultRowAdminSection } from "../AdultRowAdmin";
 
 // SECTION_TABS is the section-level tab set (distinct from the Movies/Series/
 // Adult mode selector). Connections is first so it is the default tab — that
@@ -54,6 +55,7 @@ const SECTION_TABS: TabDef[] = [
   { id: "library", label: "Library" },
   { id: "advanced", label: "Advanced" },
   { id: "sliders", label: "Sliders" },
+  { id: "adult-rows", label: "Adult Rows" },
 ];
 
 // ModeSelector is the inline Movies/Series/Adult tab bar shared by the Library
@@ -120,6 +122,10 @@ export const Settings: Component<{ onReboot: () => void }> = (props) => {
 
       <Show when={section() === "sliders"}>
         <SliderAdminSection />
+      </Show>
+
+      <Show when={section() === "adult-rows"}>
+        <AdultRowAdminSection />
       </Show>
     </div>
   );

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 
+	"github.com/curtiswtaylorjr/sakms/internal/adultnewest"
 	"github.com/curtiswtaylorjr/sakms/internal/allowlist"
 	"github.com/curtiswtaylorjr/sakms/internal/connections"
 	"github.com/curtiswtaylorjr/sakms/internal/dedup"
@@ -46,7 +47,7 @@ import (
 // (settings-save, connection-summary, OAuth device flow, watchlist row —
 // see trakt.go, a self-contained file task #9 wrote independently of this
 // one; NewMux just registers its handlers).
-func NewMux(httpClient *http.Client, connStore *connections.Store, propStore *proposals.Store, allowStore *allowlist.Store, prober dedup.Prober, hasher dedup.PHasher, videoHasher rename.PHasher, settingsStore *settings.Store, grabsStore *grabs.Store, libStore *library.Store, slidersStore *discoversliders.Store, traktStore *trakt.Store) *http.ServeMux {
+func NewMux(httpClient *http.Client, connStore *connections.Store, propStore *proposals.Store, allowStore *allowlist.Store, prober dedup.Prober, hasher dedup.PHasher, videoHasher rename.PHasher, settingsStore *settings.Store, grabsStore *grabs.Store, libStore *library.Store, slidersStore *discoversliders.Store, traktStore *trakt.Store, adultNewestRowStore *adultnewest.Store, adultNewestReleaseStore *adultnewest.ReleaseStore) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/connections/test", connectionsTestHandler(httpClient))
 	mux.HandleFunc("GET /api/connections", listConnectionsHandler(connStore))
@@ -170,6 +171,18 @@ func NewMux(httpClient *http.Client, connStore *connections.Store, propStore *pr
 	mux.HandleFunc("GET /api/modes/adult/studios/{id}/scenes", adultStudioScenesHandler(httpClient, connStore))
 	mux.HandleFunc("GET /api/modes/adult/performers", adultPerformersHandler(httpClient, connStore))
 	mux.HandleFunc("GET /api/modes/adult/performers/{id}/scenes", adultPerformerScenesHandler(httpClient, connStore))
+	// Adult "newest" rows (internal/adultnewest) — admin-defined rows backed
+	// by a Prowlarr "newest releases" background scan matched to TPDB/
+	// StashDB/FansDB entities, cached and read-only at request time (see
+	// adult_newest_rows.go's package doc — this is NOT a live Prowlarr call
+	// per resolve, unlike the TMDB-backed sliders above).
+	mux.HandleFunc("GET /api/modes/adult/newest-rows", listAdultNewestRowsHandler(adultNewestRowStore))
+	mux.HandleFunc("POST /api/modes/adult/newest-rows", createAdultNewestRowHandler(adultNewestRowStore))
+	mux.HandleFunc("PUT /api/modes/adult/newest-rows/{id}", updateAdultNewestRowHandler(adultNewestRowStore))
+	mux.HandleFunc("DELETE /api/modes/adult/newest-rows/{id}", deleteAdultNewestRowHandler(adultNewestRowStore))
+	mux.HandleFunc("POST /api/modes/adult/newest-rows/reorder", reorderAdultNewestRowsHandler(adultNewestRowStore))
+	mux.HandleFunc("GET /api/modes/adult/newest-rows/{id}/resolve", resolveAdultNewestRowHandler(adultNewestRowStore, adultNewestReleaseStore))
+	mux.HandleFunc("GET /api/modes/adult/newest-rows/genres", adultNewestGenresHandler(adultNewestReleaseStore))
 	// Image proxy: server-side-fetch + cache poster/thumbnail art from the
 	// allowlisted TMDB/TPDB image hosts so the browser never hot-links them
 	// (see images.go / internal/imageproxy). Read-only, auth-gated like every
@@ -218,6 +231,8 @@ func NewMux(httpClient *http.Client, connStore *connections.Store, propStore *pr
 	// job itself lives in its own package, started once from main.
 	mux.HandleFunc("GET /api/settings/recheck-interval", getRecheckIntervalHandler(settingsStore))
 	mux.HandleFunc("PUT /api/settings/recheck-interval", putRecheckIntervalHandler(settingsStore))
+	mux.HandleFunc("GET /api/settings/adult-newest-scan-interval", getAdultNewestScanIntervalHandler(settingsStore))
+	mux.HandleFunc("PUT /api/settings/adult-newest-scan-interval", putAdultNewestScanIntervalHandler(settingsStore))
 
 	mux.HandleFunc("POST /api/proposals/{id}/apply", applyProposalHandler(httpClient, connStore, settingsStore, propStore, libStore))
 	mux.HandleFunc("POST /api/proposals/{id}/submit-draft", submitDraftHandler(httpClient, connStore, settingsStore, propStore))
