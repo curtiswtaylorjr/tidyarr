@@ -271,6 +271,64 @@ func TestAutoGrabHandler_Movies_LowSeedersTorrentFallsBack(t *testing.T) {
 	}
 }
 
+// TestAutoGrabHandler_Adult_LowerSeederFloorQualifies is the regression test
+// for a real report: a genuine, otherwise-qualifying Adult torrent release
+// permanently sitting at 3 seeders was rejected outright under the shared
+// Movies/Series floor of 5. Adult now grades against its own lower floor
+// (adultMinSeeders = 3, see minSeedersFor) — the SAME release that would
+// still fail Movies' floor (see TestAutoGrabHandler_Movies_LowSeedersTorrentFallsBack,
+// which uses 2 seeders < 5) now qualifies and auto-grabs for Adult at 3.
+func TestAutoGrabHandler_Adult_LowerSeederFloorQualifies(t *testing.T) {
+	var qbAdds int32
+	fakeQB := fakeQBittorrent(t, func(r *http.Request) { atomic.AddInt32(&qbAdds, 1) })
+	// Same healthy 8 GB / x265 / 1080p release shape as the Movies tests —
+	// its bitrate clears every Low-tier floor — but only 3 seeders. Below
+	// Movies/Series' shared floor of 5, but AT Adult's own floor of 3
+	// (Seeders < minSeeders is the check, so 3 < 3 is false — qualifies).
+	prowlarr := fakeProwlarr(t, `[{"guid":"1","title":"Some.Scene.2023.1080p.WEB-DL.x265-GROUP","indexer":"I","protocol":"torrent","size":8000000000,"seeders":3,"downloadUrl":"magnet:?xt=urn:btih:ABCDEF1234567890abcdef1234567890abcdef12"}]`)
+
+	connStore, propStore, allowStore, settingsStore, grabsStore, libStore, slidersStore, traktStore := testStores(t)
+	ctx := context.Background()
+	// Deliberately NOT configuring "tmdb" — Adult never requires it.
+	if err := connStore.Upsert(ctx, "prowlarr", prowlarr.URL, "key"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if err := connStore.UpsertWithUsername(ctx, "qbittorrent", fakeQB.URL, "wade", "hunter2"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if err := settingsStore.Set(ctx, qualityTierKey(mode.Adult), string(quality.Low)); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if err := settingsStore.Set(ctx, adultLibraryRootFolderKey, "/adult"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	srv := httptest.NewServer(NewMux(testHTTPClient(), connStore, propStore, allowStore, testProber(t), testPHasher(t), testVideoHasher(t), settingsStore, grabsStore, libStore, slidersStore, traktStore))
+	defer srv.Close()
+
+	// 6000s (100 min) via DurationSeconds — Adult's runtime source, matching
+	// the Movies tests' TMDB-sourced 100 min for the identical bitrate math.
+	body, _ := json.Marshal(apidto.AutoGrabRequest{Title: "Some Scene", Studio: "Some Studio", DurationSeconds: 6000})
+	resp, err := http.Post(srv.URL+"/api/modes/adult/autograb", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST failed: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	var out apidto.AutoGrabResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatalf("decoding response: %v", err)
+	}
+	if out.Fallback || !out.Grabbed || out.Grab == nil {
+		t.Fatalf("expected a real auto-grab at Adult's lower seeder floor, got %+v", out)
+	}
+	if got := atomic.LoadInt32(&qbAdds); got != 1 {
+		t.Errorf("expected exactly one download-client add, got %d", got)
+	}
+}
+
 // fakeTMDBSeriesRuntime serves the two TMDB endpoints the Series autograb path
 // needs: /tv/{id}/external_ids (tvdb_id for the id-scoped Prowlarr search) and
 // /tv/{id}/season/{n} (the whole-season episode list carrying per-episode
@@ -430,8 +488,6 @@ func TestAutoGrabHandler_Series_SeasonPackGrabFallsBack(t *testing.T) {
 	}
 }
 
-// TestIsSeasonPackTitle covers the pack/single-episode classifier that guards
-// a single-episode grab from over-grabbing a season pack.
 // TestNormalizeAdultQuery is the regression test for a real "Adult downloads
 // never resolve" report: Prowlarr returned 0 raw releases for nearly every
 // scene tried, because the raw studio+title query (colons, commas,
@@ -460,6 +516,29 @@ func TestNormalizeAdultQuery(t *testing.T) {
 	}
 }
 
+// TestMinSeedersFor covers the pure mode-scoping function directly: Adult
+// gets its own lower floor, Movies/Series keep the shared default.
+func TestMinSeedersFor(t *testing.T) {
+	cases := []struct {
+		mode mode.Mode
+		want int
+	}{
+		{mode.Movies, autograb.DefaultMinSeeders},
+		{mode.Series, autograb.DefaultMinSeeders},
+		{mode.Adult, adultMinSeeders},
+	}
+	for _, tc := range cases {
+		if got := minSeedersFor(tc.mode); got != tc.want {
+			t.Errorf("minSeedersFor(%s) = %d, want %d", tc.mode, got, tc.want)
+		}
+	}
+	if adultMinSeeders >= autograb.DefaultMinSeeders {
+		t.Errorf("adultMinSeeders (%d) should be lower than the shared default (%d)", adultMinSeeders, autograb.DefaultMinSeeders)
+	}
+}
+
+// TestIsSeasonPackTitle covers the pack/single-episode classifier that guards
+// a single-episode grab from over-grabbing a season pack.
 func TestIsSeasonPackTitle(t *testing.T) {
 	cases := []struct {
 		title string

@@ -56,6 +56,28 @@ func normalizeAdultQuery(s string) string {
 	return strings.Join(strings.Fields(s), " ")
 }
 
+// adultMinSeeders is Adult's own minimum-seeder auto-grab floor — lower than
+// Movies/Series' shared autograb.DefaultMinSeeders (5). Found via a real
+// report: a genuine, otherwise-qualifying Adult torrent release (correct
+// resolution, comfortably above its bitrate floor) was rejected outright
+// because it permanently sits at 1 seeder — niche/older Adult content
+// routinely doesn't attract the seeder counts mainstream Movies/TV do.
+// Explicitly Adult-only: Movies/Series keep the shared default, since
+// lowering it there would be a real reliability regression for content that
+// generally IS well-seeded, not a fix for anything reported.
+const adultMinSeeders = 3
+
+// minSeedersFor returns the minimum-seeder auto-grab floor for m — shared by
+// both the popup's discoverAvailabilityHandler and the real one-click
+// autoGrabHandler, so a release that shows as grabbable in the popup grades
+// the same way when actually grabbed.
+func minSeedersFor(m mode.Mode) int {
+	if m == mode.Adult {
+		return adultMinSeeders
+	}
+	return autograb.DefaultMinSeeders
+}
+
 // autoGrabHandler is Discover's one-click unattended auto-grab (Stage 2). It
 // searches Prowlarr for the requested title/scene, grades every release with
 // internal/autograb's bitrate-quality-floor scorer, and either
@@ -109,7 +131,7 @@ func autoGrabHandler(httpClient *http.Client, connStore *connections.Store, sett
 		// neutralize those so they can't over-qualify (see buildAutoGrabCandidates).
 		neutralizeSeasonPacks := m == mode.Series && runtimeSeconds > 0
 		candidates := buildAutoGrabCandidates(releases, runtimeSeconds, neutralizeSeasonPacks)
-		sel := autograb.Select(candidates, autoGrabTier(ctx, settingsStore, m), autograb.DefaultMinSeeders)
+		sel := autograb.Select(candidates, autoGrabTier(ctx, settingsStore, m), minSeedersFor(m))
 
 		// Fallback: nothing cleared the floor → hand back the ranked pick list
 		// (best bitrate score first, the same score that rejected them all).

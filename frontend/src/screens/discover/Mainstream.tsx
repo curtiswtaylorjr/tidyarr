@@ -179,7 +179,7 @@ const PosterCard: Component<{
 }> = (props) => {
   const src = () => tmdbPoster(props.item.posterPath);
   return (
-    <div class="w-36 shrink-0">
+    <div class="w-[180px] shrink-0">
       <div
         class="group cursor-pointer"
         onClick={() => props.onDetail({ mode: props.mode, item: props.item })}
@@ -309,7 +309,7 @@ const LibraryCard: Component<{
     mediaType: props.mode === "series" ? "tv" : "movie",
   });
   return (
-    <div class="w-36 shrink-0" title={props.item.title}>
+    <div class="w-[180px] shrink-0" title={props.item.title}>
       <div class="aspect-[2/3] overflow-hidden rounded-lg border border-border bg-surface">
         <Show when={src()} fallback={<TextPoster label={props.item.title} />}>
           <img

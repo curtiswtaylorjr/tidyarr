@@ -244,14 +244,14 @@ describe("Discover — custom slider rows", () => {
     // already rely on elsewhere in this file.
     const movieCard = screen
       .getByText("Mixed Movie Item")
-      .closest("div.w-36") as HTMLElement;
+      .closest("div.w-\\[180px\\]") as HTMLElement;
     fireEvent.click(within(movieCard).getByText("Grab"));
     expect(await screen.findByText(/Grab — Mixed Movie Item/)).toBeInTheDocument();
     fireEvent.click(screen.getByText("Close"));
 
     const showCard = screen
       .getByText("Mixed Show Item")
-      .closest("div.w-36") as HTMLElement;
+      .closest("div.w-\\[180px\\]") as HTMLElement;
     fireEvent.click(within(showCard).getByText("Grab"));
     expect(within(showCard).getByLabelText("Season")).toBeInTheDocument();
   });
@@ -709,13 +709,13 @@ describe("Discover — Adult optional StashDB/FansDB rows", () => {
 
     // The TPDB scene's subtitle has no source label. getByText("Plain TPDB
     // Scene") returns the title <div> itself (Element.closest matches self),
-    // so climb to the card's outer wrapper (the "w-40" card root, a sibling
+    // so climb to the card's outer wrapper (the "w-[200px]" card root, a sibling
     // container of the subtitle <div>) before scoping the query. Scoped to
     // the dedicated subtitle line (.text-xs.text-muted), not the whole card —
     // the card's CSS-only hover overlay (DetailPopup wiring) also renders the
     // same "Tushy · 2023" text for its truncated preview, which a bare
     // within(card).getByText match would ambiguously match twice.
-    const tpdbCard = screen.getByText("Plain TPDB Scene").closest(".w-40");
+    const tpdbCard = screen.getByText("Plain TPDB Scene").closest(".w-\\[200px\\]");
     const tpdbSubtitle = (tpdbCard as HTMLElement).querySelector(
       ".text-xs.text-muted",
     );
@@ -727,7 +727,7 @@ describe("Discover — Adult optional StashDB/FansDB rows", () => {
     // rather than a text match, since the title itself ("Merged StashDB
     // Scene") also contains the substring "StashDB" and the subtitle also
     // carries a year segment (studio · year · source).
-    const stashCard = screen.getByText("Merged StashDB Scene").closest(".w-40");
+    const stashCard = screen.getByText("Merged StashDB Scene").closest(".w-\\[200px\\]");
     const stashSubtitle = (stashCard as HTMLElement).querySelector(
       ".text-xs.text-muted",
     );
@@ -885,7 +885,7 @@ describe("Discover — DetailPopup wiring (hover overlay + click-to-open, Poster
     render(() => <Discover />);
     await screen.findByText("Hover Movie");
 
-    const card = screen.getByText("Hover Movie").closest("div.w-36") as HTMLElement;
+    const card = screen.getByText("Hover Movie").closest("div.w-\\[180px\\]") as HTMLElement;
     // The old title=overview tooltip is gone from the card's outer wrapper.
     expect(card.getAttribute("title")).toBeNull();
 
@@ -915,7 +915,7 @@ describe("Discover — DetailPopup wiring (hover overlay + click-to-open, Poster
 
     render(() => <Discover />);
     await screen.findByText("Click Movie");
-    const card = screen.getByText("Click Movie").closest("div.w-36") as HTMLElement;
+    const card = screen.getByText("Click Movie").closest("div.w-\\[180px\\]") as HTMLElement;
 
     fireEvent.click(within(card).getByText("Click Movie"));
 
@@ -951,7 +951,7 @@ describe("Discover — DetailPopup wiring (hover overlay + click-to-open, Poster
     fireEvent.click(await screen.findByText("Adult"));
     await screen.findByText("Hover Scene");
 
-    const card = screen.getByText("Hover Scene").closest(".w-40") as HTMLElement;
+    const card = screen.getByText("Hover Scene").closest(".w-\\[200px\\]") as HTMLElement;
     expect(card.getAttribute("title")).toBeNull();
 
     const overlay = within(card).getByText("Tushy · 2023", { selector: "p" });
@@ -979,7 +979,7 @@ describe("Discover — DetailPopup wiring (hover overlay + click-to-open, Poster
     render(() => <Discover />);
     fireEvent.click(await screen.findByText("Adult"));
     await screen.findByText("Click Scene");
-    const card = screen.getByText("Click Scene").closest(".w-40") as HTMLElement;
+    const card = screen.getByText("Click Scene").closest(".w-\\[200px\\]") as HTMLElement;
 
     fireEvent.click(within(card).getByText("Click Scene"));
     expect(await screen.findByText("480p")).toBeInTheDocument();

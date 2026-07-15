@@ -157,7 +157,7 @@ func discoverAvailabilityHandler(httpClient *http.Client, connStore *connections
 				m, title, len(candidates), unrecognizedResolution, unknownBitrate)
 		}
 
-		preview := buildAvailabilityPreview(candidates, filtered)
+		preview := buildAvailabilityPreview(candidates, filtered, minSeedersFor(m))
 		log.Printf("discover availability: mode=%s title=%q — final grid has %d/32 populated cells", m, title, countPopulatedCells(preview))
 
 		w.Header().Set("Content-Type", "application/json")
@@ -241,26 +241,28 @@ func queryInt(q url.Values, key string, def int) int {
 // resolution) and grades every (resolution, tier, protocol) combination —
 // the plan's literal 32-Select-calls grid. candidates and releases MUST be
 // the same length and index-paired (see buildAutoGrabCandidates's existing
-// convention, which this function's caller already produces).
-func buildAvailabilityPreview(candidates []autograb.Candidate, releases []prowlarr.Release) apidto.AvailabilityPreview {
+// convention, which this function's caller already produces). minSeeders is
+// the per-mode floor (see minSeedersFor, autograb.go) — threaded all the way
+// down to selectAvailabilityCandidate's autograb.Select call.
+func buildAvailabilityPreview(candidates []autograb.Candidate, releases []prowlarr.Release, minSeeders int) apidto.AvailabilityPreview {
 	return apidto.AvailabilityPreview{
-		Res2160: buildResolutionAvailability(candidates, releases, 2160),
-		Res1080: buildResolutionAvailability(candidates, releases, 1080),
-		Res720:  buildResolutionAvailability(candidates, releases, 720),
-		Res480:  buildResolutionAvailability(candidates, releases, 480),
+		Res2160: buildResolutionAvailability(candidates, releases, 2160, minSeeders),
+		Res1080: buildResolutionAvailability(candidates, releases, 1080, minSeeders),
+		Res720:  buildResolutionAvailability(candidates, releases, 720, minSeeders),
+		Res480:  buildResolutionAvailability(candidates, releases, 480, minSeeders),
 	}
 }
 
 // buildResolutionAvailability filters candidates/releases (index-paired,
 // see buildAvailabilityPreview) down to exactly resolution, then grades that
 // subset against every tier.
-func buildResolutionAvailability(candidates []autograb.Candidate, releases []prowlarr.Release, resolution int) apidto.ResolutionAvailability {
+func buildResolutionAvailability(candidates []autograb.Candidate, releases []prowlarr.Release, resolution, minSeeders int) apidto.ResolutionAvailability {
 	resCandidates, resReleases := partitionByResolution(candidates, releases, resolution)
 	return apidto.ResolutionAvailability{
-		Low:      buildTierAvailability(resCandidates, resReleases, quality.Low),
-		Medium:   buildTierAvailability(resCandidates, resReleases, quality.Medium),
-		High:     buildTierAvailability(resCandidates, resReleases, quality.High),
-		Lossless: buildTierAvailability(resCandidates, resReleases, quality.Lossless),
+		Low:      buildTierAvailability(resCandidates, resReleases, quality.Low, minSeeders),
+		Medium:   buildTierAvailability(resCandidates, resReleases, quality.Medium, minSeeders),
+		High:     buildTierAvailability(resCandidates, resReleases, quality.High, minSeeders),
+		Lossless: buildTierAvailability(resCandidates, resReleases, quality.Lossless, minSeeders),
 	}
 }
 
@@ -278,10 +280,10 @@ func partitionByResolution(candidates []autograb.Candidate, releases []prowlarr.
 
 // buildTierAvailability grades one resolution bucket's candidates (already
 // index-paired with releases) against tier, once per protocol.
-func buildTierAvailability(candidates []autograb.Candidate, releases []prowlarr.Release, tier quality.Tier) apidto.TierAvailability {
+func buildTierAvailability(candidates []autograb.Candidate, releases []prowlarr.Release, tier quality.Tier, minSeeders int) apidto.TierAvailability {
 	return apidto.TierAvailability{
-		Usenet:  selectAvailabilityCandidate(candidates, releases, tier, string(prowlarr.Usenet)),
-		Torrent: selectAvailabilityCandidate(candidates, releases, tier, string(prowlarr.Torrent)),
+		Usenet:  selectAvailabilityCandidate(candidates, releases, tier, string(prowlarr.Usenet), minSeeders),
+		Torrent: selectAvailabilityCandidate(candidates, releases, tier, string(prowlarr.Torrent), minSeeders),
 	}
 }
 
@@ -294,7 +296,7 @@ func buildTierAvailability(candidates []autograb.Candidate, releases []prowlarr.
 // index (mirrors internal/api/autograb.go's existing
 // buildAutoGrabCandidates/rankedAutoGrabCandidates index-pairing pattern,
 // applied per-bucket here instead of once globally).
-func selectAvailabilityCandidate(candidates []autograb.Candidate, releases []prowlarr.Release, tier quality.Tier, protocol string) *apidto.AvailabilityCandidate {
+func selectAvailabilityCandidate(candidates []autograb.Candidate, releases []prowlarr.Release, tier quality.Tier, protocol string, minSeeders int) *apidto.AvailabilityCandidate {
 	var subCandidates []autograb.Candidate
 	var subReleases []prowlarr.Release
 	for i, c := range candidates {
@@ -307,7 +309,7 @@ func selectAvailabilityCandidate(candidates []autograb.Candidate, releases []pro
 		return nil
 	}
 
-	sel := autograb.Select(subCandidates, tier, autograb.DefaultMinSeeders)
+	sel := autograb.Select(subCandidates, tier, minSeeders)
 	if sel.Fallback {
 		logAvailabilityRejections(tier, protocol, subReleases, sel.Grades)
 		return nil

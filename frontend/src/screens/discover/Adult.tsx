@@ -97,7 +97,7 @@ const AdultCard: Component<{
       },
     });
   return (
-    <div class="w-40 shrink-0">
+    <div class="w-[200px] shrink-0">
       <div
         class="group cursor-pointer"
         onClick={() => props.onDetail({ mode: "adult", item: props.item })}
@@ -168,7 +168,7 @@ const EntityCard: Component<{
     <Show
       when={props.onSelect}
       fallback={
-        <div class="w-40 shrink-0 text-left" title={props.name}>
+        <div class="w-[200px] shrink-0 text-left" title={props.name}>
           {artwork()}
         </div>
       }
@@ -176,7 +176,7 @@ const EntityCard: Component<{
       {(onSelect) => (
         <button
           type="button"
-          class="w-40 shrink-0 text-left"
+          class="w-[200px] shrink-0 text-left"
           title={props.name}
           onClick={() => onSelect()()}
         >
