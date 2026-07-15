@@ -188,7 +188,10 @@ func TestHasLanguageTag(t *testing.T) {
 		{"Some.Movie.2020.1080p.BluRay.x264-GROUP", false},
 		{"Some.Movie.2020.FRENCH.1080p.BluRay.x264-GROUP", true},
 		{"Some.Movie.2020.GERMAN.1080p-GROUP", true},
-		{"Some.Movie.2020.MULTI.1080p-GROUP", true},
+		// MULTI means "multiple audio tracks bundled" (usually including
+		// English for English-original content), not "no English track" —
+		// must NOT be rejected. See languageTagPattern's doc comment.
+		{"Some.Movie.2020.MULTI.1080p-GROUP", false},
 		{"Some.Movie.2020.VOSTFR.1080p-GROUP", true},
 		{"FrenchConnection.2020.1080p-GROUP", false}, // "French" is not a whole word here
 		{"Some.Movie.2020.JAPANESE.1080p-GROUP", true},

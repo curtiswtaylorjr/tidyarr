@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 
 	"github.com/curtiswtaylorjr/sakms/internal/apidto"
@@ -194,6 +195,80 @@ func TestDiscoverAvailabilityHandler_Adult_StudioTitleDuration_NoTMDBCall(t *tes
 // urlQueryEscape is a tiny local alias so the test bodies above read cleanly
 // without repeating the net/url import qualifier inline.
 func urlQueryEscape(s string) string { return url.QueryEscape(s) }
+
+// fakeTMDBSeriesSeasonRuntime is fakeTMDBSeriesRuntime's whole-season sibling
+// — returns multiple episodes (not one) from /tv/{id}/season/{n}, for
+// proving seriesSeasonTotalRuntimeSeconds sums every episode's runtime
+// rather than resolving just one.
+func fakeTMDBSeriesSeasonRuntime(t *testing.T, episodeRuntimeMinutes []int) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/tv/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.HasSuffix(r.URL.Path, "/external_ids") {
+			w.Write([]byte(`{"tvdb_id":789}`))
+			return
+		}
+		episodes := make([]map[string]any, len(episodeRuntimeMinutes))
+		for i, rt := range episodeRuntimeMinutes {
+			episodes[i] = map[string]any{"episode_number": i + 1, "name": "Ep", "air_date": "2022-01-01", "runtime": rt}
+		}
+		json.NewEncoder(w).Encode(map[string]any{"episodes": episodes})
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// TestDiscoverAvailabilityHandler_Series_WholeSeasonUsesSeasonTotalRuntime is
+// the regression test for a real "nothing is being found to grab" report:
+// autoGrabSearch/seriesEpisodeRuntimeSeconds deliberately returns 0 runtime
+// for a whole-season request (episode=0, correct for auto-grab's safety
+// posture), but this endpoint must substitute the season's TOTAL runtime
+// instead — otherwise every candidate grades as unknown-bitrate and the grid
+// is always empty for any whole-season check. 4 episodes x 30 min = 7200s
+// total; a 1.7GB x265 1080p pack clears the Low floor (score ~3.02) but not
+// Medium (~5) against that total — if the old bug were still present
+// (runtime=0), EVERY cell would be nil instead.
+func TestDiscoverAvailabilityHandler_Series_WholeSeasonUsesSeasonTotalRuntime(t *testing.T) {
+	tmdbSrv := fakeTMDBSeriesSeasonRuntime(t, []int{30, 30, 30, 30}) // 7200s total
+	prowlarr := fakeProwlarr(t, `[{"guid":"pack1","title":"Some.Show.S03.COMPLETE.1080p.WEB-DL.x265-GROUP","indexer":"I","protocol":"torrent","size":1700000000,"seeders":50,"downloadUrl":"magnet:?xt=urn:btih:DDDDDD1234567890abcdef1234567890abcdef12"}]`)
+
+	connStore, propStore, allowStore, settingsStore, grabsStore, libStore, slidersStore, traktStore := testStores(t)
+	ctx := context.Background()
+	if err := connStore.Upsert(ctx, "tmdb", tmdbSrv.URL, "key"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if err := connStore.Upsert(ctx, "prowlarr", prowlarr.URL, "key"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	srv := httptest.NewServer(NewMux(testHTTPClient(), connStore, propStore, allowStore, testProber(t), testPHasher(t), testVideoHasher(t), settingsStore, grabsStore, libStore, slidersStore, traktStore))
+	defer srv.Close()
+
+	// episode=0 (or omitted) is the whole-season case — the one that always
+	// returned an empty grid before this fix.
+	reqURL := srv.URL + "/api/modes/series/discover/availability?tmdbId=100&season=3&title=" + urlQueryEscape("Some Show")
+	resp, err := http.Get(reqURL)
+	if err != nil {
+		t.Fatalf("GET failed: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	var out apidto.AvailabilityPreview
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatalf("decoding response: %v", err)
+	}
+	if out.Res1080.Low.Torrent == nil || out.Res1080.Low.Torrent.GUID != "pack1" {
+		t.Fatalf("expected the season pack to populate res1080/low/torrent using the season's TOTAL runtime, got %+v (this is exactly the bug shape: an always-empty grid for whole-season checks)", out.Res1080)
+	}
+	if out.Res1080.Medium.Torrent != nil {
+		t.Errorf("expected the pack to clear ONLY the Low floor against the season total, got Medium=%+v", out.Res1080.Medium)
+	}
+}
 
 // TestDiscoverAvailabilityHandler_ResolutionAndTierAxesDistinguished is the
 // plan's explicit two-axis proof: a high-bitrate 2160p AV1 release must

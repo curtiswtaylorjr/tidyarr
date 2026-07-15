@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/url"
@@ -105,12 +106,37 @@ func discoverAvailabilityHandler(httpClient *http.Client, connStore *connections
 			return
 		}
 
+		// autoGrabSearch/seriesEpisodeRuntimeSeconds deliberately returns 0
+		// runtime for a Series whole-season request (EpisodeNumber == 0) —
+		// correct for auto-grab's safety posture (a single episode's runtime
+		// can't validly grade a pack's total size, so "unknown" is the safe
+		// call there). But for THIS endpoint, 0 runtime means every candidate
+		// grades as unknown-bitrate and can never qualify at any tier — a
+		// whole-season availability check would always show an empty grid,
+		// a real bug (found via a "nothing is being found to grab" report).
+		// Substituted here with the season's TOTAL runtime instead — a
+		// legitimate, different computation for a genuinely different
+		// purpose: a season pack's total file size genuinely does correspond
+		// to the SUM of every episode's runtime, unlike one episode's
+		// runtime alone. Deliberately does NOT touch autoGrabSearch/
+		// seriesEpisodeRuntimeSeconds itself — auto-grab's existing
+		// season-pack safety behavior is untouched.
+		if m == mode.Series && req.EpisodeNumber == 0 {
+			runtimeSeconds = seriesSeasonTotalRuntimeSeconds(ctx, sess, req.TMDBID, req.SeasonNumber)
+		}
+
 		filtered := FilterReleases(ctx, releases, title, m, sess.MainstreamAI)
 
 		// A real per-episode runtime (Series single-episode grab) mustn't be
 		// applied to season packs the indexer returned for the episode
-		// query — same neutralization guard autoGrabHandler applies.
-		neutralizeSeasonPacks := m == mode.Series && runtimeSeconds > 0
+		// query — same neutralization guard autoGrabHandler applies. Gated on
+		// req.EpisodeNumber > 0 specifically (not just runtimeSeconds > 0):
+		// the whole-season substitution above also produces a nonzero
+		// runtimeSeconds, but for THAT case every candidate is meant to use
+		// the season-total runtime uniformly, not get zeroed out for looking
+		// like a pack — a whole-season query overwhelmingly returns packs,
+		// that's the expected, useful result, not something to neutralize.
+		neutralizeSeasonPacks := m == mode.Series && req.EpisodeNumber > 0 && runtimeSeconds > 0
 		candidates := buildAutoGrabCandidates(filtered, runtimeSeconds, neutralizeSeasonPacks)
 
 		preview := buildAvailabilityPreview(candidates, filtered)
@@ -118,6 +144,29 @@ func discoverAvailabilityHandler(httpClient *http.Client, connStore *connections
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(preview)
 	}
+}
+
+// seriesSeasonTotalRuntimeSeconds sums every episode's runtime for a whole
+// season, for this endpoint's own whole-season runtime substitution (see the
+// handler's doc comment above the call site) — never used by autoGrabSearch/
+// seriesEpisodeRuntimeSeconds (autograb.go), which intentionally returns 0
+// for a season-pack request instead, for a different reason (that function
+// grades ONE release against ONE episode's runtime; this one is meant to
+// grade a release against a WHOLE SEASON's runtime, a different and equally
+// valid computation). A SeasonDetails failure or an empty season degrades to
+// 0, same as seriesEpisodeRuntimeSeconds's own failure handling — the
+// resulting candidates just grade as unknown-bitrate rather than erroring
+// the whole request.
+func seriesSeasonTotalRuntimeSeconds(ctx context.Context, sess *mode.Session, tmdbID, seasonNumber int) float64 {
+	episodes, err := sess.TMDB.SeasonDetails(ctx, tmdbID, seasonNumber)
+	if err != nil {
+		return 0
+	}
+	var total float64
+	for _, e := range episodes {
+		total += float64(e.Runtime) * 60
+	}
+	return total
 }
 
 // queryInt parses q's named parameter as an int, returning def when absent

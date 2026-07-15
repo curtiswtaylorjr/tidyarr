@@ -58,7 +58,16 @@ var aiEscalationTimeout = 20 * time.Second
 // ahead of proven need") — easy to make configurable later if it's ever
 // wrong for someone. Word-boundary matched, case-insensitive, mirroring
 // internal/release.Parse's own regexp convention for title-token matching.
-var languageTagPattern = regexp.MustCompile(`(?i)\b(french|german|spanish|italian|vostfr|russian|hindi|korean|japanese|multi)\b`)
+//
+// Deliberately does NOT include "multi": an earlier version of this list
+// did, which was a real bug (found via a "nothing is being found to grab"
+// report) — MULTI in scene-release naming means "multiple audio tracks
+// bundled," not "no English track." For the English-original content this
+// app targets (TMDB movies/shows), a MULTI release routinely still includes
+// English as one of the bundled tracks, unlike FRENCH/GERMAN/etc., which
+// really do mean "this release's only audio is that other language."
+// Treating MULTI the same as those was silently excluding good releases.
+var languageTagPattern = regexp.MustCompile(`(?i)\b(french|german|spanish|italian|vostfr|russian|hindi|korean|japanese)\b`)
 
 // hasLanguageTag reports whether title carries one of languageTagPattern's
 // non-English tags.
