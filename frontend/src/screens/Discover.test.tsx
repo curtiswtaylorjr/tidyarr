@@ -381,6 +381,78 @@ describe("Discover — Mainstream search (replaces rows, then restores)", () => 
   });
 });
 
+describe("Discover — row-order Edit mode", () => {
+  it("Edit reveals RowEditor over the merged built-in + RSS row list; moving a row up PUTs the new key order", async () => {
+    type Call = { url: string; method: string; body: unknown };
+    const calls: Call[] = [];
+    const fn = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = (init?.method ?? "GET").toUpperCase();
+      calls.push({
+        url,
+        method,
+        body: init?.body ? JSON.parse(init.body as string) : undefined,
+      });
+
+      if (url === "/api/discover/rss-feeds") {
+        return jsonResponse([
+          {
+            id: 7,
+            title: "NZBGeek Movies",
+            feedUrl: "https://example.com/rss",
+            target: "movie",
+            protocol: "usenet",
+            sortOrder: 0,
+            enabled: true,
+            createdAt: "2026-01-01T00:00:00Z",
+            updatedAt: "2026-01-01T00:00:00Z",
+          },
+        ]);
+      }
+      if (url.includes("/api/discover/rss-feeds/7/resolve")) return jsonResponse([]);
+      if (url === "/api/discover/row-order/mainstream" && method === "GET") {
+        return jsonResponse({ keys: [] });
+      }
+      if (url === "/api/discover/row-order/mainstream" && method === "PUT") {
+        return new Response(null, { status: 204 });
+      }
+      if (url.includes("/api/modes/movies/discover") && url.includes("trending"))
+        return jsonResponse([movie({ id: 1, title: "Trend Movie" })]);
+      const d = mainstreamDefaults(url);
+      if (d) return d;
+      throw new Error("unexpected fetch: " + url);
+    });
+    vi.stubGlobal("fetch", fn);
+
+    render(() => <Discover />);
+    expect(await screen.findByText("Trend Movie")).toBeInTheDocument();
+    // The RSS feed row already renders as its own carousel in the default
+    // (no stored order) position — after every fixed MAINSTREAM_ROWS entry.
+    expect(await screen.findByText("NZBGeek Movies")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByText("Edit"));
+    expect(await screen.findByText("Reorder rows")).toBeInTheDocument();
+
+    // Scope to the editor panel — "NZBGeek Movies" also still appears as the
+    // live carousel's own <h2> title below it.
+    const editorCard = screen.getByText("Reorder rows").closest("fieldset") as HTMLElement;
+    const feedRow = within(editorCard)
+      .getByText("NZBGeek Movies")
+      .closest("li") as HTMLElement;
+    fireEvent.click(within(feedRow).getByLabelText("Move NZBGeek Movies up"));
+
+    const putCall = calls.find(
+      (c) => c.url === "/api/discover/row-order/mainstream" && c.method === "PUT",
+    );
+    expect(putCall).toBeTruthy();
+    const keys = (putCall!.body as { keys: string[] }).keys;
+    expect(keys).toContain("rssfeed:7");
+    // Default order: trakt-watchlist, 6 MAINSTREAM_ROWS keys, rssfeed:7,
+    // library — index 7. Moving up swaps it with "upcoming-shows" (index 6).
+    expect(keys.indexOf("rssfeed:7")).toBe(6);
+  });
+});
+
 describe("Discover — Adult tab (row-based browse)", () => {
   it("renders the Studios row and the Performers row with proxied art", async () => {
     const { container } = (() => {

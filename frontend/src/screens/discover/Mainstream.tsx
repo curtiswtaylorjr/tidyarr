@@ -55,12 +55,12 @@ import {
   fetchRssFeeds,
   updateRssFeed,
 } from "../../api/rssFeeds";
-import { fetchRowOrder, mergeRowOrder, saveRowOrder } from "../../api/rowOrder";
 import { TraktWatchlistRow } from "../../components/TraktWatchlistRow";
 import { type DetailTarget, DetailPopup } from "./DetailPopup";
 import { RssFeedRow } from "./RssFeedRows";
 import { RowEditor, type RowDescriptor } from "./RowEditor";
 import { AddRssFeedModal } from "./AddRssFeedModal";
+import { useRowOrder } from "./useRowOrder";
 
 // ModedTitle is the mode a merged card belongs to — the per-item mode a
 // combined (movies+series) row/grid MUST carry so each card grabs via its own
@@ -569,34 +569,14 @@ export const MainstreamDiscover: Component<{ editMode?: () => boolean }> = (
     "library",
   ];
 
-  const [storedKeys, setStoredKeys] = createSignal<string[] | null>(null);
-  createEffect(() => {
-    if (storedKeys() === null) {
-      fetchRowOrder("mainstream")
-        .then(setStoredKeys)
-        .catch(() => setStoredKeys([]));
-    }
-  });
-
-  const orderedKeys = () => mergeRowOrder(storedKeys() ?? [], knownKeys());
-
-  const [rowOrderError, setRowOrderError] = createSignal("");
-  const persistOrder = (keys: string[]) => {
-    setStoredKeys(keys);
-    void saveRowOrder("mainstream", keys).catch((e) =>
-      setRowOrderError((e as Error).message),
-    );
-  };
-
-  const moveRow = (key: string, direction: -1 | 1) => {
-    const keys = orderedKeys();
-    const idx = keys.indexOf(key);
-    const swapWith = idx + direction;
-    if (idx < 0 || swapWith < 0 || swapWith >= keys.length) return;
-    const next = [...keys];
-    [next[idx], next[swapWith]] = [next[swapWith]!, next[idx]!];
-    persistOrder(next);
-  };
+  const { orderedKeys, moveRow, persistOrder, error: rowOrderError } =
+    useRowOrder("mainstream", knownKeys);
+  // rowActionError covers a toggle/delete's own mutation failure (updateSlider/
+  // deleteRssFeed/etc.) — a distinct failure mode from useRowOrder's error
+  // (a saveRowOrder persist failure) but shown in the same spot; editError
+  // combines them so RowEditor's error line doesn't need two <Show> blocks.
+  const [rowActionError, setRowActionError] = createSignal("");
+  const editError = () => rowOrderError() || rowActionError();
 
   const descriptorFor = (key: string): RowDescriptor | undefined => {
     const builtinRow = MAINSTREAM_ROWS.find((r) => r.key === key);
@@ -647,7 +627,7 @@ export const MainstreamDiscover: Component<{ editMode?: () => boolean }> = (
       }
       setReloadToken((n) => n + 1);
     } catch (e) {
-      setRowOrderError((e as Error).message);
+      setRowActionError((e as Error).message);
     }
   };
 
@@ -662,7 +642,7 @@ export const MainstreamDiscover: Component<{ editMode?: () => boolean }> = (
       persistOrder(orderedKeys().filter((k) => k !== row.key));
       setReloadToken((n) => n + 1);
     } catch (e) {
-      setRowOrderError((e as Error).message);
+      setRowActionError((e as Error).message);
     }
   };
 
@@ -766,8 +746,8 @@ export const MainstreamDiscover: Component<{ editMode?: () => boolean }> = (
                 onToggleEnabled={(r) => void toggleRowEnabled(r)}
                 onDelete={(r) => void deleteRow(r)}
               />
-              <Show when={rowOrderError()}>
-                <ErrorText>{rowOrderError()}</ErrorText>
+              <Show when={editError()}>
+                <ErrorText>{editError()}</ErrorText>
               </Show>
             </Show>
             <For each={visibleKeys()}>{(key) => renderRow(key)}</For>

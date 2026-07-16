@@ -24,7 +24,6 @@
 import {
   type Component,
   type JSX,
-  createEffect,
   createResource,
   createSignal,
   For,
@@ -67,10 +66,10 @@ import {
   fetchRssFeeds,
   updateRssFeed,
 } from "../../api/rssFeeds";
-import { fetchRowOrder, mergeRowOrder, saveRowOrder } from "../../api/rowOrder";
 import { RssFeedRow } from "./RssFeedRows";
 import { RowEditor, type RowDescriptor } from "./RowEditor";
 import { AddRssFeedModal } from "./AddRssFeedModal";
+import { useRowOrder } from "./useRowOrder";
 
 // sourceLabel maps a non-TPDB AdultDiscoverItem.source to its display label —
 // "" (no label) for "tpdb" (the default, unlabeled source) or an unrecognized/
@@ -453,34 +452,15 @@ export const AdultDiscover: Component<{ editMode?: () => boolean }> = (
     ...adultFeeds().map((f) => `rssfeed:${f.id}`),
   ];
 
-  const [storedKeys, setStoredKeys] = createSignal<string[] | null>(null);
-  createEffect(() => {
-    if (storedKeys() === null) {
-      fetchRowOrder("adult")
-        .then(setStoredKeys)
-        .catch(() => setStoredKeys([]));
-    }
-  });
-
-  const orderedKeys = () => mergeRowOrder(storedKeys() ?? [], knownKeys());
-
-  const [rowOrderError, setRowOrderError] = createSignal("");
-  const persistOrder = (keys: string[]) => {
-    setStoredKeys(keys);
-    void saveRowOrder("adult", keys).catch((e) =>
-      setRowOrderError((e as Error).message),
-    );
-  };
-
-  const moveRow = (key: string, direction: -1 | 1) => {
-    const keys = orderedKeys();
-    const idx = keys.indexOf(key);
-    const swapWith = idx + direction;
-    if (idx < 0 || swapWith < 0 || swapWith >= keys.length) return;
-    const next = [...keys];
-    [next[idx], next[swapWith]] = [next[swapWith]!, next[idx]!];
-    persistOrder(next);
-  };
+  const { orderedKeys, moveRow, persistOrder, error: rowOrderError } =
+    useRowOrder("adult", knownKeys);
+  // rowActionError covers a toggle/delete's own mutation failure
+  // (updateRssFeed/deleteRssFeed) — a distinct failure mode from
+  // useRowOrder's error (a saveRowOrder persist failure) but shown in the
+  // same spot; editError combines them so RowEditor's error line doesn't
+  // need two <Show> blocks.
+  const [rowActionError, setRowActionError] = createSignal("");
+  const editError = () => rowOrderError() || rowActionError();
 
   const descriptorFor = (key: string): RowDescriptor | undefined => {
     if (key === "studios") return { key, label: "Studios", removable: false };
@@ -521,7 +501,7 @@ export const AdultDiscover: Component<{ editMode?: () => boolean }> = (
       });
       setReloadToken((n) => n + 1);
     } catch (e) {
-      setRowOrderError((e as Error).message);
+      setRowActionError((e as Error).message);
     }
   };
 
@@ -533,7 +513,7 @@ export const AdultDiscover: Component<{ editMode?: () => boolean }> = (
       persistOrder(orderedKeys().filter((k) => k !== row.key));
       setReloadToken((n) => n + 1);
     } catch (e) {
-      setRowOrderError((e as Error).message);
+      setRowActionError((e as Error).message);
     }
   };
 
@@ -713,8 +693,8 @@ export const AdultDiscover: Component<{ editMode?: () => boolean }> = (
                     onToggleEnabled={(r) => void toggleRowEnabled(r)}
                     onDelete={(r) => void deleteRow(r)}
                   />
-                  <Show when={rowOrderError()}>
-                    <ErrorText>{rowOrderError()}</ErrorText>
+                  <Show when={editError()}>
+                    <ErrorText>{editError()}</ErrorText>
                   </Show>
                 </Show>
                 <For each={visibleKeys()}>{(key) => renderRow(key)}</For>
