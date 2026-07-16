@@ -2029,3 +2029,393 @@ empty-guess/fansite-gate/TPDB-fallback paths). Full repo `go build`/
 pre-existing unrelated files as every other entry this session. Committed
 locally only — not pushed/deployed, pending the live-verification
 question above.
+
+## 2026-07-16 — Settings page consolidation: fixed public-API URLs, batched per-section save, connection auto-test + red-tint, Library root-folder test, UI/Discover nav restructuring
+
+Why: Settings had grown a per-row Save-button sprawl, required a
+user-typed URL for four fixed public APIs (TMDB/StashDB/FansDB/TPDB) that
+never actually vary, offered no way to verify a saved connection short of
+manually re-testing it one row at a time, and had "Sliders"/"Adult Rows"
+sitting as two disconnected, oddly-named flat top-level tabs.
+
+**Fixed public-API URLs**: TMDB/StashDB/FansDB/TPDB no longer take a URL
+anywhere — the UI hides the field and the backend's client-construction
+code stops reading `Connection.URL` for these four services. The column
+and DB storage are untouched (a future need to make one configurable again
+doesn't require a schema change), only the read path was removed.
+
+**Batched save per section**: `frontend/src/screens/settings/shared.tsx`
+gained `SectionSave`/`useSectionSaveItem` — a registry a section's child
+fields register `{id, label, dirty, save}` with; the section renders
+exactly one Save button, enabled while any child is dirty, that fires
+every dirty child's own `save()` concurrently via `Promise.allSettled` (one
+PUT per dirty row, never a merged payload) and reports which (if any)
+failed. Each child still owns its own local signals and request-body
+construction — critically, `ConnectionRow`'s three-state secret gate
+(nil=preserve stored secret/""=clear/value=set, this project's #1 incident
+class) is untouched by the batching; an untouched API key is still
+omitted from the PUT entirely, never sent as `""`.
+
+**Connection auto-test + red-tint**: the existing `POST
+/api/connections/test` endpoint is stateless and can't be reused to verify
+an already-configured row — the frontend never holds the real stored key,
+so it would 401 every configured connection. New `POST
+/api/connections/{service}/test-stored` (`connectionsTestStoredHandler`)
+loads the connection server-side via `Store.Get` (the same decrypted read
+path `mode.Build` uses) and tests it, returning strictly `{ok, error}` —
+failure is always the fixed string `"connection test failed"`, by design,
+to avoid ever leaking the real key/URL in a response. The Connections
+table fires this concurrently for every configured service on mount and
+after every batched Save; a failing row's URL/API-key inputs get a
+red/danger tint (`border-danger bg-danger/10`) so a broken connection is
+visible without opening a test panel.
+
+**Library root-folder test button**: new `POST
+/api/modes/{mode}/library/root-folder/test` (`testLibraryRootFolderHandler`)
+does a real writability probe — create-then-delete a temp file, not just a
+`stat` — deliberately NOT confined to `browse.go`'s `browsableRoots`
+allowlist, since the root-folder setting is free-typed by design in this
+app's single-operator trust model. Wired to a new "Test" button next to
+Library's Root Folder field (Kids Root Path intentionally left without
+one — this button is Root Folder-only).
+
+**UI/Discover nav restructuring**: new top-level "UI" tab hosts a Discover
+subsection with Mainstream/Adult sub-tabs, rendering the existing
+`SliderAdmin`/`AdultRowAdmin` content unchanged — just relocated out of
+two disconnected flat tabs. The inner sub-tab split uses a plain
+`ScreenTabBar`, NOT `ScreenTabs`/`useScreenTabs` — the app shell has a
+single registered tab-bar slot, and a second `ScreenTabs` call inside an
+already-shell-registered screen silently steals/replaces the outer
+Settings section-tab bar. This gotcha applies to any future nested-tab UI
+anywhere in this app.
+
+Independently validated (architect/security-reviewer/code-reviewer, fresh
+context per house policy, all three run before merge): APPROVE, no
+blocking issues. Accepted non-blocking notes, left as-is: auto-test
+re-pings every configured connection after every batched Save (bounded,
+operator-triggered, not the forbidden Discover-style automatic probe
+pattern); AI's provider/Brave connection rows don't get auto-test/red-tint
+(matches the plan's literal Connections-tab scoping, not a gap);
+`NumberSetting`'s batched-save registration id was, at this point, still
+derived from its display label string (`number:${label}`) — flagged as a
+latent id-collision risk if two fields ever shared a label, fixed properly
+in a later entry below once it actually mattered.
+
+Verified via `go build ./...`/`go vet ./...`/full `go test ./...` (clean)
+and frontend `pnpm build`/`pnpm test` (clean) both before and after
+validation fixes. Merged to `main`, pushed, auto-deployed to server1,
+health check passed.
+
+## 2026-07-16 — Real fix for "Custom Discover sliders" card title overlapping its rounded border (two competing Card components)
+
+Follow-up to the entry above, same day. Wade found a real visual bug via
+screenshot: the "Custom Discover sliders" card title (Settings → UI →
+Discover → Mainstream) rendered with its text overlapping the card's
+rounded top border.
+
+**First attempt failed**: adding `overflow-hidden` to the Card in
+`screens/settings/shared.tsx` did nothing — confirmed by Wade after a hard
+refresh, ruling out caching, and confirmed present on the Adult sub-tab
+too (same symptom, not content-specific). His own hint — "you fixed it on
+the other tabs before... check the changelog" — pointed at the actual
+cause: a *pattern* of this bug class having already been fixed once, not a
+brand-new one.
+
+**Root cause**: this codebase had TWO separate `Card` components with the
+same name. `screens/settings/shared.tsx`'s (correct — a plain `<div><h3>`)
+was already fixed and used by every Settings file. But
+`components/ui.tsx` had its OWN separate `Card` — a literal
+`<fieldset><legend>` pair. Browsers render `<legend>` straddling the
+fieldset's own top border by design (half above, half below) — a
+deterministic native HTML behavior, not a CSS layout bug, which is exactly
+why `overflow-hidden` couldn't touch it. `SliderAdmin.tsx` and
+`AdultRowAdmin.tsx` (both just relocated as-is under the new UI tab,
+untouched otherwise) import the never-fixed `components/ui.tsx` copy. A
+third, not-yet-reported instance: `discover/RowEditor.tsx` imports the
+same broken copy.
+
+**Fix**: corrected `components/ui.tsx`'s `Card` to the same div+h3
+implementation; `screens/settings/shared.tsx` no longer defines its own
+copy, it re-exports `Card` from `components/ui.tsx` — one implementation
+going forward, eliminating the "fixed in one copy, not the other"
+recurrence class. Reverted the now-understood-unnecessary
+`overflow-hidden`. Updated one test (`Discover.test.tsx`,
+`.closest("fieldset")` → `.closest("div")`) for the DOM change.
+
+**Lesson recorded for future sessions**: when a shared-looking component's
+bug is isolated to specific screens, check whether there are actually TWO
+implementations with the same name before assuming a CSS/layout cause —
+`grep` every import site's exact `from "..."` path, don't assume a single
+canonical export.
+
+Verified via `pnpm build`/`pnpm test` (clean, one pre-existing test
+updated for the DOM change) — this fix also resolves the `RowEditor.tsx`
+instance nobody had reported yet. Merged, pushed, auto-deployed, health
+check passed.
+
+## 2026-07-16 — Settings tab reorder: fold AI into Connections as a sub-tab
+
+Wade asked for Settings' top-level tabs reordered to Connections,
+Library, UI, Auth, Advanced, with AI moved into Connections as a
+subsection rather than staying a standalone tab.
+
+New `frontend/src/screens/settings/ConnectionsTab.tsx` wraps the
+existing, unchanged `ConnectionsSection` and `AISection` in a plain
+inline `ScreenTabBar` (not `ScreenTabs` — same shell-registration-hijack
+reason as the UI tab's Discover split above). AI keeps its own separate
+Save button/state — folding it in was a pure navigation regroup, not a
+save-behavior merge. `settings/index.tsx`'s `SECTION_TABS` reordered and
+the AI entry removed; renders `ConnectionsTabSection` instead of
+`ConnectionsSection` directly.
+
+Two tests in `Settings.test.tsx` needed rescoping: the new inner
+Connections/AI sub-tab bar also has a "Connections" button, colliding
+with the outer shell-slot's "Connections" section tab in unscoped
+queries. One rescoped to the shell-slot harness container, the other
+switched to checking the "Settings" heading instead. Every existing
+`goToSection("AI")` call site kept working unmodified, since Connections
+is still the default outer tab so its inner sub-tab bar (and thus the
+"AI" button) is already mounted at every fresh render.
+
+Verified via `pnpm build`/`pnpm test` (254 tests) clean. Fast-forward
+merged, pushed, auto-deployed to server1, health check passed.
+
+## 2026-07-16 — Entity Database moved to Advanced/Adult; new shared background sync interval; Days/Hours/Minutes interval picker replaces raw-seconds number boxes
+
+Wade asked for the Entity Database sync panel (Settings → Connections →
+AI) moved to Settings → Advanced → Adult with a scheduled refresh
+interval, and every interval-style number text box app-wide converted to
+a slider with a manual input. Scoped via three rounds of clarification:
+move the panel entirely (don't duplicate it in both places); one shared
+interval covering all four entity sources (Stash/TPDB/StashDB/FansDB)
+rather than four independent ones; and the slider design itself — a
+Days/Hours/Minutes unit-selector plus a slider bounded to that unit's max
+(30 days / 23 hours / 59 minutes), confirmed over a composite D:H:M
+alternative via a side-by-side ASCII-mockup comparison.
+
+**New background job**: `internal/parseentity/schedule.go`
+(`IntervalSettingKey`/`LoadInterval`/`Run`/`runCycle`), kept in the same
+package as the existing `sync.go` — matches `internal/recheck`'s and
+`internal/adultnewest`'s precedent of keeping store+scheduler together
+rather than a new sibling package. One shared interval, 0/unset = off (the
+default) — deliberately mirrors `recheck`'s off-by-default contract
+rather than `adultnewest`'s default-active-24h one, since entity sync was
+purely manual before this job existed and an unset key must not silently
+start a background job for an existing install. Wired into
+`cmd/sakms/main.go` alongside the other two background jobs; additive to
+the existing manual per-source "Sync now" buttons, not a replacement.
+
+**New endpoints**: `GET/PUT /api/settings/entity-sync-interval`
+(`internal/api/entity_sync.go`), same tolerant-parse/0-off/
+negative-rejected contract as the pre-existing `recheck-interval` and
+`adult-newest-scan-interval` endpoints.
+
+**Frontend**: Entity Database card relocated from `AI.tsx` to a new
+`EntityDatabaseSection` in `Advanced.tsx`, gated to Adult mode only. New
+exported `DurationSetting` component (Days/Hours/Minutes unit buttons +
+bounded slider + manual number input, converts to/from whole seconds)
+applied to the app's three genuine time-interval settings — the new
+entity-sync interval, the existing "Background recheck interval," and the
+existing Adult newest rows scan interval (`AdultRowAdmin.tsx`) — all three
+previously used the plain seconds `NumberSetting`. `NumberSetting` itself
+is unchanged, still used for the two dimensionless-score fields (phash
+threshold, match-confidence).
+
+**Bug found and fixed during this feature's own independent review**
+(architect, security-reviewer, and code-reviewer, run in parallel,
+independently flagged the same issue): the new picker's fallback
+conversion for a legacy seconds value that doesn't divide evenly into any
+unit (a value from before this picker existed — the old `NumberSetting`
+accepted any raw seconds, no multiple-of-60 requirement) originally
+rounded straight to a days figure, producing 0 — which would display AND
+silently re-save as "0 = off," disabling an operator's existing background
+job the moment they opened the card without touching anything. Fixed: the
+fallback now escalates minutes → hours → days, each floored at 1, so a
+positive stored value never collapses to "off." Covered by new direct unit
+tests on the exported `secondsToUnitAmount` (0/exact-fits/legacy-odd-
+values/escalation/`Number.MAX_SAFE_INTEGER`-clamped, no NaN).
+
+Verified via `go build`/`go vet`/`go test ./...` and frontend `pnpm
+build`/`pnpm test` (259 tests, up from 254) all clean. Independently
+reviewed by architect/security-reviewer/code-reviewer in parallel — all
+three PASS/APPROVE, the one shared finding above fixed before merge.
+Merged, pushed, auto-deployed to server1, health + auth-boot checks
+passed.
+
+## 2026-07-16 — Fix: DurationSetting's selected unit button used a nonexistent theme color, rendering invisible
+
+Follow-up, same day. Wade reported "the time measurement disappears when
+selected" (the Days/Hours/Minutes unit-selector buttons in the picker
+introduced above).
+
+Root cause: the selected-state classes
+(`border-primary`/`bg-primary`/`text-white` on the button,
+`accent-primary` on the range slider) don't correspond to anything in this
+app's theme — `frontend/src/index.css`'s Tailwind v4 `@theme` block only
+declares `--color-accent`/`--color-accent-fg` (plus bg/surface/border/fg/
+muted/danger/ok/warn/chrome) — there is no `--color-primary` token
+anywhere. Tailwind v4 silently drops utilities for undeclared theme
+colors rather than erroring, so the selected button rendered with no
+background — combined with the white `text-white`, effectively invisible
+text on the light card.
+
+Fixed to `border-accent bg-accent text-accent-fg` / `accent-accent` — the
+same color pair `Button`'s primary variant already uses. Confirmed via the
+built CSS that all four utilities now compile to real rules
+(`.accent-accent`, `.border-accent`, `.bg-accent`, `.text-accent-fg`) and
+that no `*-primary` classes remain anywhere in the bundle.
+
+**Lesson recorded**: this app has NO `primary` color token — always check
+`frontend/src/index.css`'s `@theme` block for the real names (`accent`/
+`accent-fg`/`danger`/`ok`/`warn`/`chrome`/`chrome-fg`) before styling a new
+component; don't assume generic Tailwind color names like
+`primary`/`blue`/`indigo` exist just because they're common elsewhere.
+
+Verified via `pnpm build`/`pnpm test` (259 tests) clean. Merged, pushed,
+auto-deployed, health check passed.
+
+## 2026-07-16 — Dedupe the three near-identical interval-endpoint handlers; DurationSetting's number box stays blank mid-edit
+
+Two non-blocking findings from the Entity Database feature's review
+(entry above), addressed as follow-up "quick wins" at Wade's request.
+
+**Handler dedup**: `internal/api/interval.go` (new) extracts
+`loadIntervalSeconds`/`storeIntervalSeconds` — the tolerant-parse/
+degrade-to-off/negative-rejected logic that `recheck-interval`,
+`adult-newest-scan-interval`, and `entity-sync-interval`'s handlers were
+each independently duplicating, now at three copies, past this project's
+"parallel sibling functions until a second real caller proves the
+abstraction is worth it" threshold. Each endpoint keeps its own named
+request/response struct types — `recheckIntervalResponse`/`Request` in
+particular stay drift-tested against `internal/apidto`'s generated DTOs
+(`dto_drift_test.go`), so they can't be collapsed into one shared type
+without breaking that check — only the logic underneath is shared.
+
+**Blank-field UX**: `DurationSetting`'s number input no longer snaps back
+to a visible "0" the instant the operator clears it to retype — it stays
+blank while editing (the `amount` signal still tracks 0 underneath, so
+Save behaves correctly even without a blur) and only re-syncs the visible
+text to the committed value on blur.
+
+Verified via `go build`/`go vet`/`go test ./...` (all handler behavior
+unchanged — same tests still pass verbatim) and frontend `pnpm build`/
+`pnpm test` (261 tests, up from 259 — two new tests cover the blank-then-
+blur behavior) clean. Merged, pushed, auto-deployed, health check passed.
+
+## 2026-07-16 — "Background recheck interval" renamed to "Monitored title refresh"; manual on-demand trigger added
+
+Wade asked to rename this setting to "Library scan" — flagged before
+renaming anything (via clarifying question): this setting re-checks
+Prowlarr availability for explicitly-watched titles (the
+`availability_watch` table), it does NOT scan the filesystem library at
+all (a separate, existing Rename workflow). Confirmed via free text: keep
+the same feature, just relabel. Landed on "Monitored title refresh
+interval — global" (initially shipped as "...scan..." per the first
+proposed wording, corrected to "refresh" one commit later at Wade's
+follow-up ask — the settings key `recheck_interval_seconds` and the
+`/api/settings/recheck-interval` endpoint are unchanged either way, only
+user-facing text and doc comments changed).
+
+Also added a manual "Refresh now" button per Wade's request:
+
+- `internal/recheck/recheck.go`: `runCycle` now takes a `since time.Time`
+  cutoff directly instead of an `interval time.Duration`, so both the
+  periodic tick (`Run` passes `now - interval`) and a new exported
+  `TriggerOnce` (passes `now`, making every entry "due" regardless of
+  interval/last-checked time) share one code path.
+- `internal/api/recheck_trigger.go` (new): `NewRecheckTriggerMux(connStore,
+  watchStore)` for `POST /api/admin/recheck/trigger` — a small,
+  separately-dependent mux mirroring `NewAPIKeyMux`/`NewAuthModeMux`/
+  `NewOIDCMux`'s precedent rather than adding `watchStore` to `NewMux`'s
+  ~190-call-site parameter list. Wired into `main.go` exactly like those
+  three: its own `auth.Middleware`-wrapped mux, exact-match route beating
+  the `/api/` subtree fallback. Returns 202 Accepted immediately
+  (background goroutine) — same async contract as the entity-sync manual
+  trigger.
+- Frontend: `triggerRecheck()` API helper + a `RecheckTriggerButton`
+  (idle/triggering/started/error states) beside the interval picker, not
+  gated by the tab's batched Save — same convention as Entity Database's
+  "Sync now" buttons.
+
+New test `TestRecheckTrigger_AsyncAndActuallyRuns` uses a fake Prowlarr
+that blocks on a channel until released, proving two things against the
+real HTTP mux at once: the handler returns 202 before the recheck cycle
+can possibly have finished (genuine proof of the async contract, not just
+a fast no-op that happens to look async), and that releasing the channel
+lets the background goroutine actually flip the watched entry's
+`last_available` flag (proving the wiring, not just the status code, is
+correct).
+
+Verified via `go build`/`go vet`/full `go test ./...` and frontend `pnpm
+build`/`pnpm test` (263 tests, up from 261) all clean. Merged, pushed,
+auto-deployed across both commits (the rename, then the scan→refresh word
+correction), health + auth-boot checks passed each time.
+
+## 2026-07-16 — DurationSetting/NumberSetting: stable per-field ids fix a real save-collision bug, select-on-focus actually works, Save button disables while out of range
+
+Two more follow-up fixes, both surfaced by re-reading the components with
+fresh eyes rather than new user reports, then confirmed as real (not
+theoretical) via targeted tests before fixing.
+
+**Stable ids, not label-derived**: `NumberSetting`/`DurationSetting` now
+take a required `id` prop instead of deriving their `SectionSave`
+registration key from the display label — flagged in the entry above as a
+"latent risk," this was a REAL bug once actually traced:
+`SectionSave`'s registry (`shared.tsx`) does `[...prev.filter(i => i.id
+!== item.id), item]` on register, so two fields sharing a label (and
+therefore the same derived id) would silently EVICT one another — only
+the last-registered field's Save would ever fire, the other's edits
+vanishing on click with no error shown. All five call sites updated with
+explicit ids (`recheck-interval`, `entity-sync-interval`,
+`adult-newest-scan-interval`, `phash-threshold`,
+`match-confidence-threshold`). Regression-tested directly: two
+`DurationSetting`/`NumberSetting` instances sharing an identical label now
+save independently.
+
+**Select-on-focus needed a real fix, not the one shipped earlier**: a
+prior "quick win" pass added `e.currentTarget.select()` on focus, intended
+to fix a real UX bug (typing a replacement value into a field near its
+unit's max appended to the stale digits first, e.g. "12" + typed "8"
+briefly reading as "128", clamping to 23 and swallowing the "8"). A test
+asserting real DOM selection semantics caught that this never actually
+worked: the HTML living standard restricts `selectionStart`/
+`selectionEnd`/`select()` to `text`/`search`/`url`/`tel`/`password` inputs
+— calling them on a real `type="number"` input is a no-op (or throws) in
+every major browser, not a jsdom quirk. Fixed by switching the number
+input to `type="text" inputmode="numeric"` (the standard workaround —
+keeps the numeric mobile keyboard without the native number type), plus a
+`Number.isNaN` guard in the input handler since a text input has no
+built-in filter against non-digit characters the way a number input does.
+
+**Save button actually disables out of range**: `NumberSetting`'s doc
+comment claimed "save disabled while out of range so the operator sees
+the bound, never a 400" — but the button was never actually disabled,
+only `save()` rejected client-side on click, showing an error after the
+fact. Wade chose fixing the real behavior over just correcting the
+comment. `SectionSaveItem` (`shared.tsx`) gained an optional `valid?:
+Accessor<boolean>` field (defaults to always-valid when a registered item
+omits it, so `ConnectionRow`/toggles/the AI form/`DurationSetting` are all
+unaffected); `SectionSave`'s shared button now disables when
+`!dirty() || anyInvalid()`. `NumberSetting` registers `valid: () =>
+!outOfRange()`. Real consequence, not cosmetic: since the Save button is
+shared across a whole tab, one out-of-range field now blocks the ENTIRE
+batch — previously `Promise.allSettled` would still PUT every other valid
+dirty field while only reporting the invalid one as "failed," a partial
+silent-success gap. `save()`'s own out-of-range throw stays as
+defense-in-depth for a direct call bypassing the now-disabled button.
+
+Also corrected two stale comments found in the same pass: `shared.tsx`'s
+"e.g. AdultRowAdmin's NumberSetting, which is deliberately NOT batched"
+was inaccurate (`AdultRowAdmin` switched to `DurationSetting` earlier the
+same day) — both references now correctly cite `DurationSetting`.
+
+All three fixes covered by new tests: same-label id-collision (both
+component types), select-on-focus against real DOM selection state, a
+stray non-numeric keystroke ignored rather than corrupting state with
+NaN, and — the one with real behavioral teeth — a separate valid field's
+save blocked while a sibling field is out of range, both going through
+once fixed.
+
+Verified via `go build`/`go vet`/full `go test ./...` and frontend `pnpm
+build`/`pnpm test` (268 tests, up from 263) all clean across both commits.
+Merged, pushed, auto-deployed each time, health checks passed.
