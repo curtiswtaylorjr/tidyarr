@@ -40,11 +40,11 @@ naming scheme, adopted as SAK's own default preset), SAK adopts the
 ## Scope: opportunistic in general, settled for the *arr apps
 
 Radarr is eliminated for Movies (done); Sonarr is eliminated for Series,
-including Series Dedup (done); **Whisparr will eventually be eliminated
-for Adult too** (decided 2026-07-10, not yet started) — same pattern,
-Adult gets its own library-owned Rename/Purge/Dedup/Tag path instead of
-depending on Whisparr. Beyond the three `*arr` apps, there is still **no
-committed target list**: whether Bazarr, Tdarr, or anything else ever
+including Series Dedup (done); **Whisparr is eliminated for Adult too**
+(decided 2026-07-10, shipped 2026-07-12 — see Current State below) — same
+pattern, Adult owns its own library-owned Rename/Purge/Dedup/Tag path
+instead of depending on Whisparr. Beyond the three `*arr` apps, there is
+still **no committed target list**: whether Bazarr, Tdarr, or anything else ever
 gets absorbed is an open question, decided app-by-app as the pain of
 running it separately becomes concrete. Jellyfin and Stash specifically
 are **not** being absorbed as services (SAK does not become a media
