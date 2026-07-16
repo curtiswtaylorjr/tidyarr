@@ -1215,6 +1215,61 @@ describe("DurationSetting / NumberSetting registration — id, not label", () =>
       expect(saveB).toHaveBeenCalledWith(20);
     });
   });
+
+  it("one NumberSetting out of range disables the WHOLE section's Save button, blocking a separate valid field too", async () => {
+    // The section's Save button is shared, not per-field — so an invalid
+    // field doesn't just block its own save, it blocks everything currently
+    // dirty in the same SectionSave until it's fixed.
+    const saveValid = vi.fn().mockResolvedValue(undefined);
+    const saveInvalid = vi.fn().mockResolvedValue(undefined);
+    render(() => (
+      <SectionSave>
+        <NumberSetting
+          id="valid-field"
+          label="Valid field"
+          help="help"
+          value={() => 5}
+          min={0}
+          max={10}
+          onSave={saveValid}
+        />
+        <NumberSetting
+          id="bounded-field"
+          label="Bounded field"
+          help="help"
+          value={() => 5}
+          min={0}
+          max={10}
+          onSave={saveInvalid}
+        />
+      </SectionSave>
+    ));
+    const validInput = (await screen.findByLabelText(
+      "Valid field",
+    )) as HTMLInputElement;
+    const boundedInput = (await screen.findByLabelText(
+      "Bounded field",
+    )) as HTMLInputElement;
+    const saveButton = screen.getByRole("button", {
+      name: "Save",
+    }) as HTMLButtonElement;
+
+    fireEvent.input(validInput, { target: { value: "7" } }); // still valid
+    fireEvent.input(boundedInput, { target: { value: "99" } }); // out of range
+    await waitFor(() => expect(saveButton.disabled).toBe(true));
+    fireEvent.click(saveButton);
+    expect(saveValid).not.toHaveBeenCalled();
+    expect(saveInvalid).not.toHaveBeenCalled();
+
+    // Fixing the bounded field re-enables the button and BOTH dirty fields save.
+    fireEvent.input(boundedInput, { target: { value: "3" } });
+    await waitFor(() => expect(saveButton.disabled).toBe(false));
+    fireEvent.click(saveButton);
+    await waitFor(() => {
+      expect(saveValid).toHaveBeenCalledWith(7);
+      expect(saveInvalid).toHaveBeenCalledWith(3);
+    });
+  });
 });
 
 // --- DurationSetting's number input select-on-focus ------------------------
@@ -1411,21 +1466,37 @@ describe("Advanced Settings", () => {
     ).toBeInTheDocument();
   });
 
-  it("phash-threshold rejects a value above 64 client-side (no PUT)", async () => {
+  it("phash-threshold above 64 disables the section Save button (blocked before clicking, not after)", async () => {
     const calls = stubFetch();
     renderSettings();
     goToSection("Advanced");
     const input = (await screen.findByLabelText(
       "Dedup phash similarity threshold (0–64)",
     )) as HTMLInputElement;
+    const saveButton = screen.getByRole("button", {
+      name: "Save",
+    }) as HTMLButtonElement;
     fireEvent.input(input, { target: { value: "99" } });
-    clickSectionSave();
-    await screen.findByText(/must be between 0 and 64/i);
+    await waitFor(() => expect(saveButton.disabled).toBe(true));
+    // A disabled button ignores clicks at the DOM level — confirms this
+    // isn't just visually greyed out, nothing fires even if clicked.
+    fireEvent.click(saveButton);
     expect(
       calls.some(
         (c) => c.method === "PUT" && c.url.includes("/phash-threshold"),
       ),
     ).toBe(false);
+    // Fixing the value re-enables the button and the save goes through.
+    fireEvent.input(input, { target: { value: "12" } });
+    await waitFor(() => expect(saveButton.disabled).toBe(false));
+    fireEvent.click(saveButton);
+    await waitFor(() =>
+      expect(
+        calls.some(
+          (c) => c.method === "PUT" && c.url.includes("/phash-threshold"),
+        ),
+      ).toBe(true),
+    );
   });
 
   it("phash-threshold saves a valid value to /api/modes/movies/phash-threshold", async () => {

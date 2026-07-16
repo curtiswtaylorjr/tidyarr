@@ -77,6 +77,16 @@ export interface SectionSaveItem {
   id: string;
   label: string;
   dirty: Accessor<boolean>;
+  // valid is optional — most registered items (ConnectionRow, toggles, the
+  // AI form) have nothing to client-side validate, so omitting it defaults
+  // to "always valid". Fields with a client-checkable range (NumberSetting)
+  // supply it so the section's one Save button disables itself the moment
+  // ANY registered item is out of range, instead of letting the operator
+  // click Save and find out via an error afterward. save()'s own
+  // out-of-range guard stays as defense-in-depth (e.g. a direct call
+  // bypassing the disabled button in a test), but in normal use it becomes
+  // unreachable once this is wired up, since the button can't be clicked.
+  valid?: Accessor<boolean>;
   // save runs the child's own existing save logic (its own body-building, its own
   // inline status). It MUST reject on failure — including client-side validation
   // early-outs — so the section summary never falsely reports "saved".
@@ -94,8 +104,9 @@ const SectionSaveContext = createContext<SectionSaveRegistry>();
 // for the child's lifetime. Returns an accessor that is true when a section
 // context was found — the child then hides its own inline Save button and lets
 // the section's one button drive it — and false when standalone, in which case
-// the child keeps its own Save button (e.g. AdultRowAdmin's NumberSetting, which
-// is deliberately NOT batched). Mirrors useScreenTabs' register/cleanup shape.
+// the child keeps its own Save button (e.g. AdultRowAdmin's DurationSetting
+// cards, which are deliberately NOT batched). Mirrors useScreenTabs' register/
+// cleanup shape.
 export function useSectionSaveItem(item: SectionSaveItem): () => boolean {
   const reg = useContext(SectionSaveContext);
   if (!reg) return () => false;
@@ -106,8 +117,12 @@ export function useSectionSaveItem(item: SectionSaveItem): () => boolean {
 
 // SectionSave provides the registry to its descendants and renders them followed
 // by the one section-level Save button + status. Disabled until some child is
-// dirty; a click runs every dirty child's own save() via allSettled so one
-// failure never skips the rest, then reports which (if any) failed.
+// dirty, AND disabled again the moment any registered item reports itself
+// invalid (see SectionSaveItem.valid) — one out-of-range field blocks the
+// whole batch from saving, not just its own row, so the operator sees the
+// block before clicking rather than an error after. A click runs every dirty
+// child's own save() via allSettled so one failure never skips the rest,
+// then reports which (if any) failed.
 export const SectionSave: Component<{
   label?: string;
   children: JSX.Element;
@@ -119,6 +134,7 @@ export const SectionSave: Component<{
     unregister: (id) => setItems((prev) => prev.filter((i) => i.id !== id)),
   };
   const dirty = () => items().some((i) => i.dirty());
+  const anyInvalid = () => items().some((i) => i.valid && !i.valid());
   const status = useSaveStatus();
   const saveAll = async () => {
     const pending = items().filter((i) => i.dirty());
@@ -140,7 +156,7 @@ export const SectionSave: Component<{
       <div class="mt-2 flex items-center gap-2">
         <Button
           variant="primary"
-          disabled={!dirty()}
+          disabled={!dirty() || anyInvalid()}
           onClick={() => void saveAll()}
         >
           {props.label ?? "Save"}

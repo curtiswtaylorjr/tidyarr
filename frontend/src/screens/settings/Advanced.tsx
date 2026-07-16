@@ -300,8 +300,11 @@ export const DurationSetting: Component<{
 
 // NumberSetting is one bounded integer field (phash-threshold,
 // match-confidence-threshold). It mirrors the backend's range client-side
-// (min/max) before submitting; the backend re-validates. save disabled while
-// out of range so the operator sees the bound, never a 400. Exported so
+// (min/max) before submitting; the backend re-validates. The Save button
+// (this component's own standalone one, and — via the registered `valid`
+// predicate — the enclosing SectionSave's shared one) disables itself while
+// out of range, so the operator sees the block before clicking rather than
+// an error after; a 400 was never reachable either way. Exported so
 // AdultRowAdmin can reuse the exact same control for its own fields.
 export const NumberSetting: Component<{
   // id is a required, stable registration key — see DurationSetting's id
@@ -327,9 +330,12 @@ export const NumberSetting: Component<{
   const status = useSaveStatus();
   const outOfRange = () =>
     val() < props.min || (props.max !== undefined && val() > props.max);
-  // save rethrows on failure — including the client-side out-of-range guard — so
-  // a batched section Save reports this field as failed rather than a false
-  // "saved" (no PUT is fired for an out-of-range value in either mode).
+  // save's own out-of-range guard is defense-in-depth now that both Save
+  // buttons disable themselves while out of range (see the component doc
+  // comment) — normal UI use can no longer reach it, but it still rejects
+  // rather than silently PUTing if something ever calls save() directly
+  // (e.g. a test) while out of range, so the section summary never falsely
+  // reports "saved".
   const save = async () => {
     if (outOfRange()) {
       const err = new Error(
@@ -350,11 +356,13 @@ export const NumberSetting: Component<{
     }
   };
   // Batched inside the Advanced tab's SectionSave; standalone (returns false) in
-  // AdultRowAdmin, where it keeps its own per-card Save button.
+  // any future non-batched usage, in which case this field keeps its own
+  // per-card Save button below (disabled the same way while out of range).
   const batched = useSectionSaveItem({
     id: `number:${props.id}`,
     label: props.label,
     dirty,
+    valid: () => !outOfRange(),
     save,
   });
   return (
@@ -376,7 +384,11 @@ export const NumberSetting: Component<{
       </label>
       <div class="mt-2 flex items-center gap-2">
         <Show when={!batched()}>
-          <Button variant="primary" onClick={() => void save().catch(() => {})}>
+          <Button
+            variant="primary"
+            disabled={outOfRange()}
+            onClick={() => void save().catch(() => {})}
+          >
             Save
           </Button>
         </Show>
