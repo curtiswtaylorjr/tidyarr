@@ -271,9 +271,7 @@ above, so don't drop them for convenience:
     coexisting with `internal/release.ScoreCandidate` (which still ranks the
     manual Search view). See `internal/autograb`'s package doc for the full
     reconciliation and why there are two scorers, not one.
-  - **Break-glass after a wipe**: a normal deploy no longer wipes anything
-    (that data-wipe policy was removed from the normal deploy path on
-    2026-07-12 — see `sakms_auto_update.md` in memory). Only a failed deploy's
+  - **Break-glass after a wipe**: Only a failed deploy's
     rollback, or an explicit manual `--wipe-data` CLI flag, wipes the DB +
     `secret.key`; either case logs a fresh `X-Api-Key` once on the next start
     (`main.go:104`). If a deploy lands with a broken auth-boot shell after a
