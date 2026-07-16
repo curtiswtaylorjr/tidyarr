@@ -435,7 +435,7 @@ describe("Discover — row-order Edit mode", () => {
 
     // Scope to the editor panel — "NZBGeek Movies" also still appears as the
     // live carousel's own <h2> title below it.
-    const editorCard = screen.getByText("Reorder rows").closest("fieldset") as HTMLElement;
+    const editorCard = screen.getByText("Reorder rows").closest("div") as HTMLElement;
     const feedRow = within(editorCard)
       .getByText("NZBGeek Movies")
       .closest("li") as HTMLElement;
