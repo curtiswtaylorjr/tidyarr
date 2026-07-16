@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 
 	"github.com/curtiswtaylorjr/sakms/internal/adultnewest"
@@ -56,6 +57,12 @@ import (
 func NewMux(httpClient *http.Client, connStore *connections.Store, propStore *proposals.Store, allowStore *allowlist.Store, prober dedup.Prober, hasher dedup.PHasher, videoHasher rename.PHasher, settingsStore *settings.Store, grabsStore *grabs.Store, libStore *library.Store, slidersStore *discoversliders.Store, traktStore *trakt.Store, adultNewestRowStore *adultnewest.Store, adultNewestReleaseStore *adultnewest.ReleaseStore, rssFeedsStore *rssfeeds.Store, entityStore parseentity.EntityStore) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/connections/test", connectionsTestHandler(httpClient))
+	// test-stored tests an ALREADY-SAVED connection using its stored secret,
+	// which the client never holds (see connections.Summary) — so it can't be
+	// tested via the stateless /test endpoint without round-tripping the real
+	// key to the browser. See connectionsTestStoredHandler's doc for the
+	// deliberate no-detail error contract.
+	mux.HandleFunc("POST /api/connections/{service}/test-stored", connectionsTestStoredHandler(httpClient, connStore))
 	mux.HandleFunc("GET /api/connections", listConnectionsHandler(connStore))
 	mux.HandleFunc("PUT /api/connections/{service}", upsertConnectionHandler(connStore))
 	mux.HandleFunc("DELETE /api/connections/{service}", deleteConnectionHandler(connStore))
@@ -73,6 +80,10 @@ func NewMux(httpClient *http.Client, connStore *connections.Store, propStore *pr
 	mux.HandleFunc("GET /api/modes/{mode}/tracked", listTrackedHandler(httpClient, connStore, settingsStore, libStore))
 	mux.HandleFunc("GET /api/modes/{mode}/library/root-folder", getLibraryRootFolderHandler(settingsStore))
 	mux.HandleFunc("PUT /api/modes/{mode}/library/root-folder", putLibraryRootFolderHandler(settingsStore))
+	// Validates that a candidate root folder both exists and is writable (SAK
+	// writes into it for rename/dedup) — deliberately NOT confined to
+	// browse.go's browsableRoots, which scope only the autocomplete helper.
+	mux.HandleFunc("POST /api/modes/{mode}/library/root-folder/test", testLibraryRootFolderHandler())
 
 	// Server-side directory browser for the Settings root-folder pickers +
 	// their as-you-type autocomplete — restricted to the mounted roots (see
@@ -283,6 +294,44 @@ func connectionsTestHandler(httpClient *http.Client) http.HandlerFunc {
 		result := TestConnection(r.Context(), httpClient, req)
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(result)
+	}
+}
+
+// connectionsTestStoredHandler tests an already-configured connection using
+// the secret held in the store — the client never has the real key (see
+// connections.Summary), so it can't drive the stateless /test endpoint for a
+// saved connection without the key round-tripping to the browser, which must
+// never happen.
+//
+// Security contract: on failure the raw downstream error is NEVER propagated.
+// A Go http-client error echoes the target URL (e.g. `dial tcp ... connection
+// refused` includes host:port), and some clients put the key in a query param
+// — either would leak stored config the client isn't allowed to see. So any
+// non-OK result (and any internal error) is reported with a fixed, detail-free
+// message. The response is exactly ConnectionTestResult, same as /test.
+func connectionsTestStoredHandler(httpClient *http.Client, store *connections.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		service := r.PathValue("service")
+		conn, err := store.Get(r.Context(), service)
+		if err != nil {
+			if errors.Is(err, connections.ErrNotFound) {
+				http.Error(w, "no connection configured for that service", http.StatusNotFound)
+				return
+			}
+			http.Error(w, "failed to load stored connection", http.StatusInternalServerError)
+			return
+		}
+
+		result := TestConnection(r.Context(), httpClient, ConnectionTestRequest{
+			Service:  service,
+			URL:      conn.URL,
+			Username: conn.Username,
+			APIKey:   conn.APIKey,
+		})
+		if !result.OK {
+			result.Error = "connection test failed"
+		}
+		writeJSON(w, result)
 	}
 }
 

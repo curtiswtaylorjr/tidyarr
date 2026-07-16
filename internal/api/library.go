@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"os"
 	"strconv"
 
 	"github.com/curtiswtaylorjr/sakms/internal/mode"
@@ -96,6 +97,79 @@ func putLibraryRootFolderHandler(settingsStore *settings.Store) http.HandlerFunc
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+// pathTestRequest is the small JSON body for the root-folder path test — just
+// the candidate path the operator typed. The {mode} path param isn't used: the
+// check validates whatever path string is sent, full stop (see
+// testLibraryRootFolderHandler).
+type pathTestRequest struct {
+	Path string `json:"path"`
+}
+
+// pathTestResult mirrors ConnectionTestResult's {ok,error} shape so the
+// frontend can treat a path test and a connection test identically. A false OK
+// with a populated Error is the normal, expected shape for a wrong/missing/
+// unwritable path — not a server error.
+type pathTestResult struct {
+	OK    bool   `json:"ok"`
+	Error string `json:"error,omitempty"`
+}
+
+// testLibraryRootFolderHandler validates that the posted path both EXISTS as a
+// directory and is WRITABLE — existence alone isn't enough, since SAK writes
+// into the root folder for rename/dedup. Writability is proven by actually
+// creating and removing a temp file (the ground truth; a bare permission-bit
+// check can lie under some filesystems/ACLs), matching the Linux-container
+// deployment target.
+//
+// Deliberately NOT confined to browse.go's browsableRoots: that allowlist
+// scopes only the autocomplete helper's suggestion range. The root folder
+// itself is free-typed under this app's single-operator trust model, so the
+// test validates whatever path is configured.
+//
+// A wrong/missing/not-a-directory/unwritable path is ordinary user input, so
+// it returns {ok:false} with a clear message, never a 500 — 500 is reserved
+// for a genuinely malformed request body.
+func testLibraryRootFolderHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req pathTestRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+		if req.Path == "" {
+			writeJSON(w, pathTestResult{Error: "path is required"})
+			return
+		}
+
+		info, err := os.Stat(req.Path)
+		if err != nil {
+			if os.IsNotExist(err) {
+				writeJSON(w, pathTestResult{Error: "path does not exist"})
+				return
+			}
+			// A permission or other stat error is still "the path is wrong from
+			// the operator's side," not a server fault — report it as a normal
+			// failed result rather than a 500.
+			writeJSON(w, pathTestResult{Error: "path is not accessible"})
+			return
+		}
+		if !info.IsDir() {
+			writeJSON(w, pathTestResult{Error: "path is not a directory"})
+			return
+		}
+
+		f, err := os.CreateTemp(req.Path, ".sak-write-test-*")
+		if err != nil {
+			writeJSON(w, pathTestResult{Error: "path is not writable"})
+			return
+		}
+		f.Close()
+		os.Remove(f.Name())
+
+		writeJSON(w, pathTestResult{OK: true})
 	}
 }
 
