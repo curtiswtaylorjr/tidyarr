@@ -2,9 +2,7 @@ package api
 
 import (
 	"encoding/json"
-	"errors"
 	"net/http"
-	"strconv"
 
 	"github.com/curtiswtaylorjr/sakms/internal/settings"
 )
@@ -31,17 +29,14 @@ type recheckIntervalRequest struct {
 // or 0 when unset — 0 is the normal "off" default (the background recheck job
 // is opt-in), not an error. A stored-but-unparseable value degrades to 0 for
 // the same reason recheck.LoadInterval does: a corrupt value means "off", not a
-// 500.
+// 500. Parsing/degrade logic lives in loadIntervalSeconds (interval.go),
+// shared with adult_newest_scan.go and entity_sync.go's equivalents.
 func getRecheckIntervalHandler(settingsStore *settings.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		secs := 0
-		v, err := settingsStore.Get(r.Context(), recheckIntervalKey)
-		if err != nil && !errors.Is(err, settings.ErrNotFound) {
+		secs, err := loadIntervalSeconds(r.Context(), settingsStore, recheckIntervalKey, 0)
+		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
-		}
-		if n, convErr := strconv.Atoi(v); convErr == nil && n > 0 {
-			secs = n
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(recheckIntervalResponse{IntervalSeconds: secs})
@@ -51,7 +46,8 @@ func getRecheckIntervalHandler(settingsStore *settings.Store) http.HandlerFunc {
 // putRecheckIntervalHandler stores the recheck interval in seconds. 0 disables
 // the job (the opt-in gate); a negative value is rejected. A change takes
 // effect on the running loop's next tick if it's already enabled, or on next
-// restart if it was off at boot (see recheck.Run's doc).
+// restart if it was off at boot (see recheck.Run's doc). Validation/
+// persistence logic lives in storeIntervalSeconds (interval.go).
 func putRecheckIntervalHandler(settingsStore *settings.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req recheckIntervalRequest
@@ -59,12 +55,13 @@ func putRecheckIntervalHandler(settingsStore *settings.Store) http.HandlerFunc {
 			http.Error(w, "invalid request body", http.StatusBadRequest)
 			return
 		}
-		if req.IntervalSeconds < 0 {
-			http.Error(w, "intervalSeconds must be zero (off) or a positive number of seconds", http.StatusBadRequest)
-			return
-		}
-		if err := settingsStore.Set(r.Context(), recheckIntervalKey, strconv.Itoa(req.IntervalSeconds)); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+		badRequest, err := storeIntervalSeconds(r.Context(), settingsStore, recheckIntervalKey, req.IntervalSeconds)
+		if err != nil {
+			status := http.StatusInternalServerError
+			if badRequest {
+				status = http.StatusBadRequest
+			}
+			http.Error(w, err.Error(), status)
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)

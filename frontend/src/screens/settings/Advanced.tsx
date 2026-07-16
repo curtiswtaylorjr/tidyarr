@@ -170,6 +170,33 @@ export const DurationSetting: Component<{
     e.currentTarget.value = String(clamped);
   };
 
+  // onNumberInput is the number box's own handler — unlike the range slider
+  // (which can never yield an empty string), a raw input can be genuinely
+  // blank mid-edit, e.g. the operator selecting the digit(s) and pressing
+  // Backspace before typing a fresh value. Forcing that straight back to "0"
+  // (what setClampedAmount would do, since Number("") is 0) makes it
+  // impossible to clear-then-retype: every Backspace would immediately snap
+  // back to a visible "0". Instead, let the field stay blank while amount()
+  // tracks 0 underneath (so Save behaves correctly even without a blur), and
+  // only re-sync the visible text on blur via finalizeNumberInput below.
+  const onNumberInput = (e: { currentTarget: HTMLInputElement }) => {
+    const raw = e.currentTarget.value;
+    if (raw === "") {
+      setAmount(0);
+      setDirty(true);
+      return;
+    }
+    setClampedAmount(e, Number(raw));
+  };
+
+  // finalizeNumberInput runs on blur: if the operator left the field blank
+  // (amount() is 0 from the branch above but the input itself still shows
+  // ""), write the committed value back so it doesn't linger empty once
+  // they've moved on.
+  const finalizeNumberInput = (e: { currentTarget: HTMLInputElement }) => {
+    e.currentTarget.value = String(amount());
+  };
+
   return (
     <div class="mb-3">
       <span class={labelClass}>{props.label}</span>
@@ -208,7 +235,8 @@ export const DurationSetting: Component<{
           max={UNIT_MAX[unit()]}
           aria-label={props.label}
           value={amount()}
-          onInput={(e) => setClampedAmount(e, Number(e.currentTarget.value))}
+          onInput={(e) => onNumberInput(e)}
+          onBlur={(e) => finalizeNumberInput(e)}
         />
         <span class="text-xs text-muted">
           {UNIT_LABELS[unit()].toLowerCase()}

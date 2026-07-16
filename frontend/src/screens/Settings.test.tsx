@@ -1193,6 +1193,51 @@ describe("Advanced Settings", () => {
     expect(put.body).toEqual({ intervalSeconds: 0 });
   });
 
+  it("clearing the recheck-interval amount stays blank while editing, not forced back to 0", async () => {
+    stubFetch();
+    renderSettings();
+    goToSection("Advanced");
+    const input = (await screen.findByLabelText(
+      "Background recheck interval — global",
+    )) as HTMLInputElement;
+    fireEvent.input(input, { target: { value: "" } });
+    // Must stay blank so the operator can clear-then-retype — snapping back
+    // to a visible "0" on every Backspace would make that impossible.
+    expect(input.value).toBe("");
+  });
+
+  it("an emptied recheck-interval field re-syncs to 0 on blur, and still submits 0 correctly", async () => {
+    const calls = stubFetch((url) => {
+      if (url.includes("/api/settings/recheck-interval") && url.includes("/api"))
+        return jsonResponse({ intervalSeconds: 3600 });
+      return undefined;
+    });
+    renderSettings();
+    goToSection("Advanced");
+    const input = (await screen.findByLabelText(
+      "Background recheck interval — global",
+    )) as HTMLInputElement;
+    await waitFor(() => expect(input.value).toBe("1")); // 3600s = 1 hour
+    fireEvent.input(input, { target: { value: "" } });
+    fireEvent.blur(input);
+    expect(input.value).toBe("0");
+    clickSectionSave();
+    await waitFor(() =>
+      expect(
+        calls.some(
+          (c) =>
+            c.method === "PUT" &&
+            c.url.includes("/api/settings/recheck-interval"),
+        ),
+      ).toBe(true),
+    );
+    const put = calls.find(
+      (c) =>
+        c.method === "PUT" && c.url.includes("/api/settings/recheck-interval"),
+    )!;
+    expect(put.body).toEqual({ intervalSeconds: 0 });
+  });
+
   it("phash-threshold rejects a value above 64 client-side (no PUT)", async () => {
     const calls = stubFetch();
     renderSettings();

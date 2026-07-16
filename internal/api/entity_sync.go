@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"strconv"
 
 	"github.com/curtiswtaylorjr/sakms/internal/connections"
 	"github.com/curtiswtaylorjr/sakms/internal/parseentity"
@@ -147,16 +146,14 @@ type entitySyncIntervalRequest struct {
 // internal/recheck (deliberately import-avoided so it stays independently
 // deletable), internal/api already hard-depends on internal/parseentity for
 // entity sync's other handlers above, so there is no import to avoid here.
+// Parsing/degrade logic lives in loadIntervalSeconds (interval.go), shared
+// with recheck.go and adult_newest_scan.go's equivalents.
 func getEntitySyncIntervalHandler(settingsStore *settings.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		secs := 0
-		v, err := settingsStore.Get(r.Context(), parseentity.IntervalSettingKey)
-		if err != nil && !errors.Is(err, settings.ErrNotFound) {
+		secs, err := loadIntervalSeconds(r.Context(), settingsStore, parseentity.IntervalSettingKey, 0)
+		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
-		}
-		if n, convErr := strconv.Atoi(v); convErr == nil && n > 0 {
-			secs = n
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(entitySyncIntervalResponse{IntervalSeconds: secs})
@@ -167,7 +164,8 @@ func getEntitySyncIntervalHandler(settingsStore *settings.Store) http.HandlerFun
 // seconds. 0 disables the background job (the opt-in gate, and the default);
 // a negative value is rejected. A change takes effect on the running loop's
 // next tick if it's already enabled, or on next restart if it was off at
-// boot — same contract as putRecheckIntervalHandler.
+// boot — same contract as putRecheckIntervalHandler. Validation/persistence
+// logic lives in storeIntervalSeconds (interval.go).
 func putEntitySyncIntervalHandler(settingsStore *settings.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req entitySyncIntervalRequest
@@ -175,12 +173,13 @@ func putEntitySyncIntervalHandler(settingsStore *settings.Store) http.HandlerFun
 			http.Error(w, "invalid request body", http.StatusBadRequest)
 			return
 		}
-		if req.IntervalSeconds < 0 {
-			http.Error(w, "intervalSeconds must be zero (off) or a positive number of seconds", http.StatusBadRequest)
-			return
-		}
-		if err := settingsStore.Set(r.Context(), parseentity.IntervalSettingKey, strconv.Itoa(req.IntervalSeconds)); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+		badRequest, err := storeIntervalSeconds(r.Context(), settingsStore, parseentity.IntervalSettingKey, req.IntervalSeconds)
+		if err != nil {
+			status := http.StatusInternalServerError
+			if badRequest {
+				status = http.StatusBadRequest
+			}
+			http.Error(w, err.Error(), status)
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)

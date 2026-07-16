@@ -2,9 +2,7 @@ package api
 
 import (
 	"encoding/json"
-	"errors"
 	"net/http"
-	"strconv"
 
 	"github.com/curtiswtaylorjr/sakms/internal/settings"
 )
@@ -41,22 +39,15 @@ type adultNewestScanIntervalRequest struct {
 // seconds — adultNewestScanDefaultSeconds when the key was never explicitly
 // saved, 0 when an operator explicitly saved "0" (turning the job off), and
 // whatever positive value was last saved otherwise. See this file's package
-// doc for why the unset case can't just return 0 here.
+// doc for why the unset case can't just return 0 here. Parsing/degrade logic
+// lives in loadIntervalSeconds (interval.go), shared with recheck.go and
+// entity_sync.go's equivalents.
 func getAdultNewestScanIntervalHandler(settingsStore *settings.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		v, err := settingsStore.Get(r.Context(), adultNewestScanIntervalKey)
-		secs := adultNewestScanDefaultSeconds
-		switch {
-		case errors.Is(err, settings.ErrNotFound):
-			// secs already holds the default.
-		case err != nil:
+		secs, err := loadIntervalSeconds(r.Context(), settingsStore, adultNewestScanIntervalKey, adultNewestScanDefaultSeconds)
+		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
-		default:
-			secs = 0 // a stored-but-invalid value degrades to off, matching LoadInterval
-			if n, convErr := strconv.Atoi(v); convErr == nil && n > 0 {
-				secs = n
-			}
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(adultNewestScanIntervalResponse{IntervalSeconds: secs})
@@ -64,8 +55,8 @@ func getAdultNewestScanIntervalHandler(settingsStore *settings.Store) http.Handl
 }
 
 // putAdultNewestScanIntervalHandler stores the scan interval in seconds. 0
-// disables the job; a negative value is rejected. Mirrors
-// putRecheckIntervalHandler exactly.
+// disables the job; a negative value is rejected. Validation/persistence
+// logic lives in storeIntervalSeconds (interval.go).
 func putAdultNewestScanIntervalHandler(settingsStore *settings.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req adultNewestScanIntervalRequest
@@ -73,12 +64,13 @@ func putAdultNewestScanIntervalHandler(settingsStore *settings.Store) http.Handl
 			http.Error(w, "invalid request body", http.StatusBadRequest)
 			return
 		}
-		if req.IntervalSeconds < 0 {
-			http.Error(w, "intervalSeconds must be zero (off) or a positive number of seconds", http.StatusBadRequest)
-			return
-		}
-		if err := settingsStore.Set(r.Context(), adultNewestScanIntervalKey, strconv.Itoa(req.IntervalSeconds)); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+		badRequest, err := storeIntervalSeconds(r.Context(), settingsStore, adultNewestScanIntervalKey, req.IntervalSeconds)
+		if err != nil {
+			status := http.StatusInternalServerError
+			if badRequest {
+				status = http.StatusBadRequest
+			}
+			http.Error(w, err.Error(), status)
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
