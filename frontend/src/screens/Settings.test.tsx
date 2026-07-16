@@ -1143,7 +1143,7 @@ describe("Advanced Settings", () => {
     // Value 0 defaults the picker to the "Hours" unit; typing "1" there means
     // 1 hour = 3600 seconds.
     const input = (await screen.findByLabelText(
-      "Background recheck interval — global",
+      "Monitored title scan interval — global",
     )) as HTMLInputElement;
     fireEvent.input(input, { target: { value: "1" } });
     clickSectionSave();
@@ -1172,7 +1172,7 @@ describe("Advanced Settings", () => {
     renderSettings();
     goToSection("Advanced");
     const input = (await screen.findByLabelText(
-      "Background recheck interval — global",
+      "Monitored title scan interval — global",
     )) as HTMLInputElement;
     fireEvent.input(input, { target: { value: "-5" } });
     await waitFor(() => expect(input.value).toBe("0"));
@@ -1198,7 +1198,7 @@ describe("Advanced Settings", () => {
     renderSettings();
     goToSection("Advanced");
     const input = (await screen.findByLabelText(
-      "Background recheck interval — global",
+      "Monitored title scan interval — global",
     )) as HTMLInputElement;
     fireEvent.input(input, { target: { value: "" } });
     // Must stay blank so the operator can clear-then-retype — snapping back
@@ -1215,7 +1215,7 @@ describe("Advanced Settings", () => {
     renderSettings();
     goToSection("Advanced");
     const input = (await screen.findByLabelText(
-      "Background recheck interval — global",
+      "Monitored title scan interval — global",
     )) as HTMLInputElement;
     await waitFor(() => expect(input.value).toBe("1")); // 3600s = 1 hour
     fireEvent.input(input, { target: { value: "" } });
@@ -1236,6 +1236,45 @@ describe("Advanced Settings", () => {
         c.method === "PUT" && c.url.includes("/api/settings/recheck-interval"),
     )!;
     expect(put.body).toEqual({ intervalSeconds: 0 });
+  });
+
+  it("'Scan now' fires the manual recheck trigger and confirms it started", async () => {
+    const calls = stubFetch();
+    renderSettings();
+    goToSection("Advanced");
+    await screen.findByLabelText("Monitored title scan interval — global");
+    fireEvent.click(screen.getByRole("button", { name: "Scan now" }));
+    await waitFor(() =>
+      expect(
+        calls.some(
+          (c) =>
+            c.method === "POST" &&
+            c.url.includes("/api/admin/recheck/trigger"),
+        ),
+      ).toBe(true),
+    );
+    expect(
+      await screen.findByText(/scan started/i),
+    ).toBeInTheDocument();
+  });
+
+  it("'Scan now' surfaces an error instead of a false success", async () => {
+    stubFetch((url, init) => {
+      if (
+        url.includes("/api/admin/recheck/trigger") &&
+        (init?.method ?? "GET").toUpperCase() === "POST"
+      ) {
+        return new Response("prowlarr not configured", { status: 400 });
+      }
+      return undefined;
+    });
+    renderSettings();
+    goToSection("Advanced");
+    await screen.findByLabelText("Monitored title scan interval — global");
+    fireEvent.click(screen.getByRole("button", { name: "Scan now" }));
+    expect(
+      await screen.findByText(/prowlarr not configured/i),
+    ).toBeInTheDocument();
   });
 
   it("phash-threshold rejects a value above 64 client-side (no PUT)", async () => {
@@ -1354,7 +1393,7 @@ describe("Section tabs", () => {
     expect(screen.queryByPlaceholderText(/qwen2.5vl/)).toBeNull(); // AI
     expect(screen.queryByLabelText("Library root folder")).toBeNull(); // Library
     expect(
-      screen.queryByLabelText("Background recheck interval — global"),
+      screen.queryByLabelText("Monitored title scan interval — global"),
     ).toBeNull(); // Advanced
   });
 
@@ -1422,7 +1461,7 @@ describe("Section tabs", () => {
     expect(screen.getByText("Adult")).toBeInTheDocument();
     // Advanced's global field is NOT on this tab.
     expect(
-      screen.queryByLabelText("Background recheck interval — global"),
+      screen.queryByLabelText("Monitored title scan interval — global"),
     ).toBeNull();
   });
 
@@ -1432,7 +1471,7 @@ describe("Section tabs", () => {
     goToSection("Advanced");
     expect(
       await screen.findByLabelText(
-        "Background recheck interval — global",
+        "Monitored title scan interval — global",
       ),
     ).toBeInTheDocument();
     expect(screen.queryByLabelText("Library root folder")).toBeNull();

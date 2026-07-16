@@ -177,6 +177,13 @@ func run() error {
 	oidcMux := api.NewOIDCMux(authStore, secretStore)
 	protectedOIDC := auth.Middleware(secretStore, authStore, oidcMux)
 
+	// Manual "Scan now" trigger for the recheck feature (see
+	// api.NewRecheckTriggerMux's doc comment) — its own small mux, same
+	// precedent as apikeyMux/authModeMux/oidcMux above, since it needs
+	// watchStore, a dependency NewMux doesn't otherwise carry.
+	recheckTriggerMux := api.NewRecheckTriggerMux(connStore, watchStore)
+	protectedRecheckTrigger := auth.Middleware(secretStore, authStore, recheckTriggerMux)
+
 	top := http.NewServeMux()
 	top.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("ok"))
@@ -190,9 +197,10 @@ func run() error {
 	// login/callback subpaths stay public (they must run before a session
 	// exists).
 	top.Handle("/api/auth/", api.NewAuthMux(authStore, secretStore))
-	top.Handle("/api/apikey", protectedAPIKey)  // exact match: GET status
-	top.Handle("/api/apikey/", protectedAPIKey) // subtree: POST .../regenerate
-	top.Handle("/api/", protectedAPI)           // more general; still wins for everything else
+	top.Handle("/api/apikey", protectedAPIKey)                        // exact match: GET status
+	top.Handle("/api/apikey/", protectedAPIKey)                       // subtree: POST .../regenerate
+	top.Handle("/api/admin/recheck/trigger", protectedRecheckTrigger) // exact match: manual "Scan now"
+	top.Handle("/api/", protectedAPI)                                 // more general; still wins for everything else
 	// The frontend is mounted last and matches only what no /api/... route
 	// already claimed — Go's ServeMux picks the most specific pattern, so
 	// this never shadows a real API route. It's deliberately NOT behind

@@ -68,7 +68,7 @@ func TestRunCycle_FlipsFlagWhenAvailable(t *testing.T) {
 		t.Fatalf("add watch: %v", err)
 	}
 
-	runCycle(ctx, prow.Client(), connStore, watchStore, time.Hour)
+	runCycle(ctx, prow.Client(), connStore, watchStore, time.Now().Add(-time.Hour))
 
 	got := reload(t, watchStore, w.ID)
 	if !got.LastAvailable {
@@ -96,7 +96,7 @@ func TestRunCycle_UnavailableRecordsCheck(t *testing.T) {
 		t.Fatalf("add watch: %v", err)
 	}
 
-	runCycle(ctx, prow.Client(), connStore, watchStore, time.Hour)
+	runCycle(ctx, prow.Client(), connStore, watchStore, time.Now().Add(-time.Hour))
 
 	got := reload(t, watchStore, w.ID)
 	if got.LastAvailable {
@@ -119,7 +119,7 @@ func TestRunCycle_NoProwlarrConnectionSkips(t *testing.T) {
 		t.Fatalf("add watch: %v", err)
 	}
 
-	runCycle(ctx, &http.Client{Timeout: time.Second}, connStore, watchStore, time.Hour)
+	runCycle(ctx, &http.Client{Timeout: time.Second}, connStore, watchStore, time.Now().Add(-time.Hour))
 
 	got := reload(t, watchStore, w.ID)
 	if got.LastCheckedAt != "" {
@@ -155,7 +155,7 @@ func TestRunCycle_OnlyChecksDueEntries(t *testing.T) {
 	}
 
 	// Interval 1h: the recent entry (checked "now") is NOT due; the fresh one is.
-	runCycle(ctx, prow.Client(), connStore, watchStore, time.Hour)
+	runCycle(ctx, prow.Client(), connStore, watchStore, time.Now().Add(-time.Hour))
 
 	gotRecent := reload(t, watchStore, recent.ID)
 	if gotRecent.LastAvailable {

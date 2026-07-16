@@ -105,21 +105,37 @@ func Run(ctx context.Context, interval time.Duration, connStore *connections.Sto
 				interval = cur
 				ticker.Reset(cur)
 			}
-			runCycle(ctx, httpClient, connStore, watchStore, interval)
+			runCycle(ctx, httpClient, connStore, watchStore, time.Now().Add(-interval))
 		}
 	}
 }
 
+// TriggerOnce runs exactly one recheck pass over every watched pick RIGHT
+// NOW — the on-demand counterpart to Run's periodic loop, for an operator-
+// triggered "Scan now" action. since is time.Now(), not "now minus the
+// configured interval": ListDue treats anything last checked before the
+// given cutoff as due, so passing the current instant means every entry
+// qualifies regardless of the interval setting or how recently each was last
+// checked — a full forced recheck, not a partial one. Builds its own bounded
+// HTTP client, same as Run, so it shares no state with a concurrently
+// running Run loop and is safe to call whether or not the background job is
+// enabled.
+func TriggerOnce(ctx context.Context, connStore *connections.Store, watchStore *WatchStore) {
+	httpClient := &http.Client{Timeout: outboundTimeout}
+	runCycle(ctx, httpClient, connStore, watchStore, time.Now())
+}
+
 // runCycle performs exactly one recheck pass and returns — the single-tick
-// logic, extracted from Run's ticker loop so tests exercise it directly rather
-// than sleeping on the ticker. It re-probes every watch entry due for a
-// recheck (never checked, or last checked longer ago than interval) and
-// records the result. Fault isolation matches the rest of the codebase: a
-// listing error or a missing Prowlarr connection skips the whole pass
-// (there's nothing to probe against), and a single entry's probe failure is
-// logged and skipped without aborting the others.
-func runCycle(ctx context.Context, httpClient *http.Client, connStore *connections.Store, watchStore *WatchStore, interval time.Duration) {
-	due, err := watchStore.ListDue(ctx, time.Now().Add(-interval))
+// logic, extracted from Run's ticker loop (and reused by TriggerOnce) so
+// tests exercise it directly rather than sleeping on the ticker. It
+// re-probes every watch entry due for a recheck as of the given cutoff
+// (never checked, or last checked before since) and records the result.
+// Fault isolation matches the rest of the codebase: a listing error or a
+// missing Prowlarr connection skips the whole pass (there's nothing to
+// probe against), and a single entry's probe failure is logged and skipped
+// without aborting the others.
+func runCycle(ctx context.Context, httpClient *http.Client, connStore *connections.Store, watchStore *WatchStore, since time.Time) {
+	due, err := watchStore.ListDue(ctx, since)
 	if err != nil {
 		log.Printf("recheck: listing due watch entries: %v", err)
 		return

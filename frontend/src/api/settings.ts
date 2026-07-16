@@ -437,6 +437,15 @@ export function putRecheckInterval(intervalSeconds: number): Promise<void> {
   });
 }
 
+// Manual "Scan now" trigger for the recheck job — runs one pass over every
+// watched title immediately, regardless of the configured interval. Fires
+// in the background server-side; the request returns as soon as it's
+// accepted (202), not once the scan finishes, so there's nothing to poll —
+// same fire-and-forget contract as triggerEntitySync.
+export function triggerRecheck(): Promise<void> {
+  return api<void>("/api/admin/recheck/trigger", { method: "POST" });
+}
+
 // BYOAI fallback toggle (off by default — DB-first parsing runs alone).
 export function fetchAIFallbackEnabled(): Promise<boolean> {
   return api<{ enabled: boolean }>("/api/settings/ai-fallback-enabled").then(

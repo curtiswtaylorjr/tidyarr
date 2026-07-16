@@ -25,6 +25,7 @@ import {
   putPHashThreshold,
   putRecheckInterval,
   triggerEntitySync,
+  triggerRecheck,
   type EntitySyncSource,
 } from "../../api/settings";
 import { Button, Muted, inputClass, labelClass } from "../../components/ui";
@@ -408,6 +409,53 @@ const IdentifyEnabledSetting: Component<{ mode: () => Mode }> = (props) => {
   );
 };
 
+// RecheckTriggerButton is the manual "Scan now" action for the monitored-
+// title scan — an immediate, always-available fire-and-forget POST, not a
+// tracked/dirty field, so it doesn't register with the enclosing
+// SectionSave (same as Entity Database's per-source "Sync now" buttons).
+// The request only confirms the scan STARTED (202 Accepted); there's no
+// count or last-run timestamp to poll afterward, unlike Entity Database's
+// sync status, since a monitored-title scan just flips flags on entries
+// nothing else in this screen surfaces.
+const RecheckTriggerButton: Component = () => {
+  const [state, setState] = createSignal<
+    "idle" | "triggering" | "started" | "error"
+  >("idle");
+  const [error, setError] = createSignal<string | null>(null);
+
+  const trigger = async () => {
+    setState("triggering");
+    setError(null);
+    try {
+      await triggerRecheck();
+      setState("started");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      setState("error");
+    }
+  };
+
+  return (
+    <div class="mb-3 flex items-center gap-2">
+      <Button
+        variant="secondary"
+        onClick={() => void trigger()}
+        disabled={state() === "triggering"}
+      >
+        {state() === "triggering" ? "Starting…" : "Scan now"}
+      </Button>
+      <Show when={state() === "started"}>
+        <span class="text-xs text-muted">
+          Scan started — runs in the background.
+        </span>
+      </Show>
+      <Show when={state() === "error"}>
+        <span class="text-xs text-red-500">{error()}</span>
+      </Show>
+    </div>
+  );
+};
+
 export const AdvancedSection: Component<{ mode: () => Mode }> = (props) => {
   // recheck-interval is GLOBAL, not per-mode — fetched once, independent of the
   // mode tab.
@@ -425,11 +473,12 @@ export const AdvancedSection: Component<{ mode: () => Mode }> = (props) => {
       <Card title={`Advanced Settings (${MODE_LABELS[props.mode()]})`}>
         <SectionSave>
         <DurationSetting
-          label="Background recheck interval — global"
-          help="Re-checks availability for every watched title on this cadence."
+          label="Monitored title scan interval — global"
+          help="Re-checks availability for every monitored title on this cadence."
           value={() => recheck()}
           onSave={(v) => putRecheckInterval(v)}
         />
+        <RecheckTriggerButton />
         <NumberSetting
           label="Dedup phash similarity threshold (0–64)"
           help="Per-frame average Hamming bits below which two files are treated as perceptual duplicates by Dedup. Lower is stricter."
