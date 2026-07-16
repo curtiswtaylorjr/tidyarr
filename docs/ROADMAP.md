@@ -13,7 +13,7 @@ briefly here.
 
 ## In progress
 
-### phash-based Dedup — Movies + Series refinement shipped; Adult and phash-primary grouping still open
+### phash-based Dedup — Movies/Series/Adult refinement shipped; phash-primary grouping still open
 The other half of "phash as the defacto standard across all media." Unlike
 Adult, there's no Stash instance for Movies/Series to lean on — SAK computes
 perceptual hashes itself (real frame-decode work via ffmpeg).
@@ -126,13 +126,31 @@ already committed by the time notify runs. See the CHANGELOG entries dated
 2026-07-10 (5 entries, one per slice) for the full design/test detail per
 slice. Spec at `.omc/autopilot/spec-player-rescan-trigger.md`.
 
+**Shipped (2026-07-12): Whisparr elimination for Adult.** Decided
+2026-07-10 (`CLAUDE.md` Scope) — this entry previously listed it under
+"Still open" as not-yet-designed, which went stale without the roadmap
+being updated; corrected 2026-07-16 after an audit found the codebase and
+`CLAUDE.md`'s own "Current state" section already described it as done.
+Adult now owns its own library (`internal/library`'s `Scene` type +
+`library_scenes` table, keyed on the stash-box `(box, scene_id)` identity
+pair, not a Whisparr foreign id), its own library-backed Rename/Purge/
+Dedup/Tag paths (`rename.ScanLibraryAdult`/`ApplyLibraryAdult` and the
+matching Dedup/Purge siblings, plus scene-level tags via
+`/api/modes/adult/scenes/...`), its own free-typed root-folder setting,
+and its own fixed naming scheme (`naming.AdultFileName`:
+`Studio - Title (Date) [phash-HASH]`). `mode.Build` constructs no Servarr
+client for Adult anymore (`sess.Servarr` is nil, proven by
+`TestBuild_Adult_ServarrAlwaysNil`) — same displacement already done to
+Radarr/Sonarr. `internal/servarr`'s Whisparr support is retained as
+generic capability, same precedent as Radarr/Sonarr, even though nothing
+in `mode.Build` constructs one. The one-time `internal/whisparrimport`
+migration tool was removed entirely (2026-07-12) — no Whisparr connection
+type remains. Stash is unchanged and still used, but only as a downstream
+player/identification source (phash-first Rename reads a phash Stash
+already computed; player-rescan-notify still fires to it) — never as an
+organizational authority.
+
 **Still open (next slices):**
-- **Whisparr elimination for Adult.** Adult gets its own library-owned
-  Rename/Purge/Dedup/Tag path, same pattern as Movies/Sonarr. Decided
-  2026-07-10 (`CLAUDE.md` Scope), no design yet — this is a substantial
-  slice (Adult's own `library.Item`-equivalent schema, its own Search/grab,
-  migrating off `internal/servarr`'s Whisparr client for the app-level path
-  while keeping `internal/servarr` itself, same precedent as Radarr/Sonarr).
 - **phash-PRIMARY grouping (TMDB-less).** The larger ambition from the original
   entry: making phash the *primary* duplicate signal that groups files with no
   shared identifier at all — replacing identifier-based grouping rather than
@@ -165,8 +183,10 @@ One classification point, not four — every caller (`rename.ScanLibrary`/
 free through their existing `fmt.Errorf("scanning %s: %w", ...)` wraps.
 
 ### Confidence scoring for Rename matches — shipped 2026-07-11
-Closed the "Matching quality" backlog item above for Movies/Series (see that
-entry for the deliberate Adult/`lookupFirst` scope deferral). `internal/
+Closed the "Matching quality" backlog item above for Movies/Series (that
+entry originally noted a deliberate Adult/`lookupFirst` scope deferral —
+see its 2026-07-16 correction below, since Whisparr elimination for Adult
+made the deferred code path disappear entirely). `internal/
 rename/confidence.go` (new): `matchConfidence` scores TMDB's best
 (`items[0]`) search result against the cleaned search term, 0-100, combining
 a Dice-coefficient word-token similarity (`titleSimilarity`) with a year-
@@ -282,18 +302,85 @@ refused with 409 while env-managed). `/healthz` and `/api/auth/*` are
 unchanged and still fully public. See `CHANGELOG.md`'s entry of the same
 date for the full design/honesty-framing detail.
 
+### Frontend redesign (shell) — shipped 2026-07-13
+The "Frontend redesign" backlog item below previously described this as
+not-yet-started, which went stale without the roadmap being updated;
+corrected 2026-07-16 after an audit found the shell already shipped. The
+old 2,284-line hand-written vanilla-JS `static/index.html` is gone
+entirely — the frontend is now a SolidJS + Vite SPA (`frontend/`),
+compiled at build time into the Go binary's embedded `static/` tree, same
+as before (`internal/web`, `//go:embed static`; no Node.js runs in
+production). A collapsible left sidebar (`AppShell.tsx`) replaced the old
+horizontal top nav, and a generic `useScreenTabs`/`ScreenTabBar` mechanism
+(`components/ui.tsx`) lets any screen register its own tab set with the
+shell's one consistent tab-bar slot — used by both Settings (Connections/
+Library/UI/Auth/Advanced) and Discover (Mainstream/Adult). This shipped
+the *shell* only; the mockup-driven content it was meant to eventually
+host (bulk-apply tables, the system dashboard, Collections/tagging UI)
+remains genuinely unbuilt — see the trimmed "Frontend redesign" backlog
+entry below, which now only describes that remaining work.
+
+### Adult Discover "newest releases" background scan — shipped 2026-07-15
+A human-directed addition, not a pre-existing backlog item. New
+`internal/adultnewest` package: an opt-in (off by default, same
+convention as `internal/recheck`) periodic job that scans Prowlarr's
+newest Adult releases and matches each one to a TPDB/StashDB/FansDB
+entity via the existing identify pipeline, caching matched results
+(migrations `0024`-`0027`) for Adult Discover's "newest releases" rows to
+read at request time — Discover itself never queries Prowlarr directly,
+preserving the existing "Discover never queries Prowlarr" rule. Rows are
+admin-configurable (Movie/Scene/Performer/Studio, optionally genre-
+narrowed) via a Settings admin UI (`AdultRowAdmin.tsx`), the same
+CRUD+reorder shape as the existing TMDB-backed Discover sliders. See
+`CHANGELOG.md` for full per-slice detail (not yet backfilled there as of
+2026-07-16 — flagged as a gap during the same audit).
+
+### RSS-sourced Discover rows — shipped 2026-07-15
+A human-directed addition, not a pre-existing backlog item. New
+`internal/rssfeeds` package (migration `0028`): admin-defined raw RSS 2.0
+feed rows (NZBGeek saved-search style) — a per-row feed URL fetched and
+parsed server-side at resolve time, distinct from the TMDB-backed
+Discover sliders and the Prowlarr-backed Adult-newest rows above (three
+separate row-config systems now, deliberately not unified — see CLAUDE.md's
+"no premature abstraction" convention). Admin UI mirrors the existing
+slider/Adult-row editors' CRUD+reorder shape.
+
+### DB-first Adult filename parsing; bundled-Ollama image removed — shipped 2026-07-16
+A human-directed addition, not a pre-existing backlog item. New
+`internal/parseentity` package (migration `0029`): a local SQLite cache of
+normalized studio/performer names sourced from Stash/TPDB/StashDB/FansDB,
+letting Adult filename parsing resolve studio/performer/title
+deterministically from this DB-first lookup instead of relying on an AI
+model for every file. AI (`ParseFilename`) is now an explicit, off-by-
+default *fallback* only, gated by a new toggle — it runs when DB-first
+parsing can't resolve a field, not unconditionally. New Settings UI
+(Connections → AI tab): entity-cache counts, per-source "Sync now"
+buttons, and (added same day as a follow-up, see `CHANGELOG.md`) a shared
+opt-in background sync interval plus a manual on-demand trigger. The
+previously-documented opt-in Ollama-bundled Docker image (`ai` build
+target, see the 2026-07-11 CHANGELOG entry) was removed as part of this
+same change, superseding that entry — DB-first parsing needing no AI
+backend at all removed the motivation for shipping one bundled. See
+`CHANGELOG.md` for full detail (not yet backfilled there as of
+2026-07-16 — flagged as a gap during the same audit, along with the two
+entries above).
+
 ---
 
 ## Backlog (not yet started, roughly in discussion order)
 
-### Frontend redesign
-Sidebar nav + dashboard-style layout, dark theme, replacing today's
-lightweight single-page tab UI. See "UI mockup reference" below for the
-visual direction. Scope decision (2026-07-10): build the redesign wrapping
-SAK's *existing* data and workflows — do not treat the mockups as a literal
-feature spec. Needed as the home for several other backlog items below
-(bulk apply's multi-select tables, the system dashboard, Collections/tagging
-UI) — likely the natural first thing to build once current work lands.
+### Frontend redesign — content surfaces still needed
+The sidebar/SPA *shell* already shipped 2026-07-13 (see "Recently shipped"
+above) — this entry previously described the whole redesign, shell
+included, as not-yet-started, which was stale; corrected 2026-07-16 (same
+audit as the Whisparr-elimination fix above). What's genuinely still
+backlog is the mockup-driven *content* the shell was meant to eventually
+host: bulk apply's multi-select tables, the system dashboard, and
+Collections/structured tagging UI — see "UI mockup reference" below for
+the visual direction on all three, and their own backlog entries further
+down for scope detail. Scope decision (2026-07-10, still holds): build
+each wrapping SAK's *existing* data and workflows — do not treat the
+mockups as a literal feature spec.
 
 ### Bulk apply
 A deliberate, considered reversal of "no apply-everything path anywhere, by
@@ -364,18 +451,18 @@ end-to-end this session but not yet built.
 ### Matching quality
 - **Confidence scoring** — shipped 2026-07-11 for the TMDB-backed Movies/
   Series paths (`proposeOneLibrary`/`proposeOneEpisodeLibrary`), see
-  "Recently shipped" below. **Deliberately NOT extended to Adult's
-  Whisparr-lookup path** (`lookupFirst`/`lookupWithAIFallback` in
-  `internal/rename/rename.go`, called from `Scan`) — a different mechanism
-  entirely (`servarr.LookupResult` from Whisparr's own `/lookup` proxy to
-  TPDB, not a raw `tmdb.Item`), and Adult/Whisparr elimination (see
-  `CLAUDE.md` Scope) hasn't started. `lookupFirst` still takes
-  `results[0]` unconditionally today — a conscious deferral, not an
-  oversight, flagged by the same-day code-reviewer pass and left for
-  whoever designs Adult's own library-owned Rename path to pick up (the
-  natural point to revisit Adult's matching logic anyway, since that
-  slice replaces `lookupFirst`'s Whisparr dependency entirely rather than
-  patching it in place).
+  "Recently shipped" below. **This entry's original deferral note is now
+  MOOT, corrected 2026-07-16 (same audit as the Whisparr-elimination
+  fix above):** it said this was "deliberately NOT extended to Adult's
+  Whisparr-lookup path (`lookupFirst`/`lookupWithAIFallback`)," to be
+  revisited once Adult got its own library-owned Rename path.
+  `lookupFirst`/`lookupWithAIFallback` no longer exist anywhere in
+  `internal/rename` — Whisparr elimination for Adult (see "In progress"
+  above) replaced that whole path with `rename.ScanLibraryAdult`/
+  `ApplyLibraryAdult`'s own phash-first identification pipeline (see
+  CLAUDE.md's Adult section), which was never a candidate for this
+  TMDB-search confidence-scoring mechanism to begin with — there's no
+  live gap here anymore to revisit, the code this note was about is gone.
 - **Manual override / re-pick** — shipped 2026-07-11 for Movies/Series
   (TMDB-backed), see "Recently shipped" below. Adult's community-scene
   correction (a different id space, foreignId via Whisparr) already has its
