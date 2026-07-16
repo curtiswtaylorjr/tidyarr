@@ -24,7 +24,12 @@ import {
   type ScreenTabsRegistration,
 } from "../components/ui";
 import { Settings } from "./Settings";
-import { secondsToUnitAmount } from "./settings/Advanced";
+import {
+  DurationSetting,
+  NumberSetting,
+  secondsToUnitAmount,
+} from "./settings/Advanced";
+import { SectionSave } from "./settings/shared";
 
 const jsonResponse = (obj: unknown): Response =>
   new Response(JSON.stringify(obj), {
@@ -1128,6 +1133,135 @@ describe("secondsToUnitAmount", () => {
     expect(result.unit).toBe("days");
     expect(result.amount).toBe(30);
     expect(Number.isNaN(result.amount)).toBe(false);
+  });
+});
+
+// --- DurationSetting/NumberSetting registration id (not label-derived) ----
+
+describe("DurationSetting / NumberSetting registration — id, not label", () => {
+  it("two DurationSettings sharing the same label save independently, keyed by id", async () => {
+    // Regression test for a real bug: SectionSave's registry replaces any
+    // existing entry with the same id on (re-)register
+    // (`prev.filter(i => i.id !== item.id)` then append) — when id was
+    // derived from label, two same-labeled fields would silently evict one
+    // another and only the LAST-registered field's save would ever fire,
+    // with no visible error. Explicit, caller-supplied ids fix this
+    // structurally rather than relying on every label staying unique.
+    const saveA = vi.fn().mockResolvedValue(undefined);
+    const saveB = vi.fn().mockResolvedValue(undefined);
+    render(() => (
+      <SectionSave>
+        <DurationSetting
+          id="field-a"
+          label="Same label"
+          help="help a"
+          value={() => 3600}
+          onSave={saveA}
+        />
+        <DurationSetting
+          id="field-b"
+          label="Same label"
+          help="help b"
+          value={() => 7200}
+          onSave={saveB}
+        />
+      </SectionSave>
+    ));
+    const inputs = (await screen.findAllByLabelText(
+      "Same label",
+    )) as HTMLInputElement[];
+    expect(inputs).toHaveLength(2);
+    fireEvent.input(inputs[0]!, { target: { value: "2" } }); // 2 hours = 7200s
+    fireEvent.input(inputs[1]!, { target: { value: "3" } }); // 3 hours = 10800s
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => {
+      expect(saveA).toHaveBeenCalledWith(7200);
+      expect(saveB).toHaveBeenCalledWith(10800);
+    });
+  });
+
+  it("two NumberSettings sharing the same label save independently, keyed by id", async () => {
+    const saveA = vi.fn().mockResolvedValue(undefined);
+    const saveB = vi.fn().mockResolvedValue(undefined);
+    render(() => (
+      <SectionSave>
+        <NumberSetting
+          id="field-a"
+          label="Same label"
+          help="help a"
+          value={() => 1}
+          min={0}
+          onSave={saveA}
+        />
+        <NumberSetting
+          id="field-b"
+          label="Same label"
+          help="help b"
+          value={() => 2}
+          min={0}
+          onSave={saveB}
+        />
+      </SectionSave>
+    ));
+    const inputs = (await screen.findAllByLabelText(
+      "Same label",
+    )) as HTMLInputElement[];
+    expect(inputs).toHaveLength(2);
+    fireEvent.input(inputs[0]!, { target: { value: "10" } });
+    fireEvent.input(inputs[1]!, { target: { value: "20" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => {
+      expect(saveA).toHaveBeenCalledWith(10);
+      expect(saveB).toHaveBeenCalledWith(20);
+    });
+  });
+});
+
+// --- DurationSetting's number input select-on-focus ------------------------
+
+describe("DurationSetting — select-all-on-focus", () => {
+  it("focusing the amount field selects its current text, so typing replaces rather than appends", async () => {
+    render(() => (
+      <DurationSetting
+        id="focus-test"
+        label="Focus test field"
+        help="help"
+        value={() => 20 * 3600} // 20 hours — near the 23-hour max
+        onSave={vi.fn().mockResolvedValue(undefined)}
+      />
+    ));
+    const input = (await screen.findByLabelText(
+      "Focus test field",
+    )) as HTMLInputElement;
+    await waitFor(() => expect(input.value).toBe("20"));
+    fireEvent.focus(input);
+    expect(input.selectionStart).toBe(0);
+    expect(input.selectionEnd).toBe(input.value.length);
+  });
+
+  it("typing a non-numeric character is ignored, not saved as NaN", async () => {
+    // The field is type="text" (needed for select() to work at all — see
+    // the component's own doc comment), so unlike a native type="number"
+    // input nothing stops a stray letter from reaching onInput.
+    const save = vi.fn().mockResolvedValue(undefined);
+    render(() => (
+      <DurationSetting
+        id="nan-test"
+        label="NaN test field"
+        help="help"
+        value={() => 3600}
+        onSave={save}
+      />
+    ));
+    const input = (await screen.findByLabelText(
+      "NaN test field",
+    )) as HTMLInputElement;
+    await waitFor(() => expect(input.value).toBe("1"));
+    fireEvent.input(input, { target: { value: "x" } });
+    // Ignored: neither the displayed value nor the underlying amount moves.
+    expect(input.value).toBe("x"); // raw DOM text isn't rewritten mid-typing
+    fireEvent.blur(input);
+    expect(input.value).toBe("1"); // blur re-syncs to the untouched amount
   });
 });
 

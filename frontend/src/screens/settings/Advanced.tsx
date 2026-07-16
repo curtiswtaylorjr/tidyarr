@@ -104,6 +104,13 @@ export function secondsToUnitAmount(totalSeconds: number): {
 // purely a display/input convenience layered on top. 0 (in any unit) always
 // means "off" — the same convention every interval setting in this app uses.
 export const DurationSetting: Component<{
+  // id is a required, stable registration key — deliberately NOT derived
+  // from label (as an earlier version of this component did), since two
+  // fields sharing display text would then silently share one batched-save
+  // registration and one would shadow the other. Each call site must supply
+  // its own unique id (e.g. "recheck-interval"); labels stay free to change
+  // or even collide without touching save behavior.
+  id: string;
   label: string;
   help: string;
   value: () => number | undefined; // seconds
@@ -141,7 +148,7 @@ export const DurationSetting: Component<{
   // card, and Entity Database's card below — same dual-mode contract as
   // NumberSetting).
   const batched = useSectionSaveItem({
-    id: `duration:${props.label}`,
+    id: `duration:${props.id}`,
     label: props.label,
     dirty,
     save,
@@ -180,6 +187,13 @@ export const DurationSetting: Component<{
   // back to a visible "0". Instead, let the field stay blank while amount()
   // tracks 0 underneath (so Save behaves correctly even without a blur), and
   // only re-sync the visible text on blur via finalizeNumberInput below.
+  //
+  // The field is type="text" (see below), not type="number", so unlike a
+  // native number input it has no built-in filter against non-digit
+  // characters — a stray letter parses to NaN. Ignore that keystroke's
+  // effect on state entirely rather than let NaN flow into amount()/the
+  // saved value; any leftover garbage text gets wiped by finalizeNumberInput
+  // on blur.
   const onNumberInput = (e: { currentTarget: HTMLInputElement }) => {
     const raw = e.currentTarget.value;
     if (raw === "") {
@@ -187,7 +201,9 @@ export const DurationSetting: Component<{
       setDirty(true);
       return;
     }
-    setClampedAmount(e, Number(raw));
+    const parsed = Number(raw);
+    if (Number.isNaN(parsed)) return;
+    setClampedAmount(e, parsed);
   };
 
   // finalizeNumberInput runs on blur: if the operator left the field blank
@@ -196,6 +212,27 @@ export const DurationSetting: Component<{
   // they've moved on.
   const finalizeNumberInput = (e: { currentTarget: HTMLInputElement }) => {
     e.currentTarget.value = String(amount());
+  };
+
+  // selectAllOnFocus: without this, focusing a field that already shows a
+  // value near the unit's max and typing a replacement digit-by-digit
+  // appends to the stale text first — e.g. hours capped at 23, field shows
+  // "12", operator wants "8": their "8" keystroke briefly reads as "128",
+  // clamps to 23, and the intended "8" never lands. Selecting the existing
+  // text on focus means the first keystroke replaces it wholesale instead
+  // of appending, which is what "type a new number" wants in the first
+  // place for a bounded field. Same fix on the range slider isn't needed —
+  // dragging always sets an absolute position, never appends.
+  //
+  // This is WHY the input below is type="text", not type="number": the
+  // HTML living standard restricts selectionStart/selectionEnd/select() to
+  // text/search/url/tel/password inputs — calling select() on a real
+  // type="number" input is a no-op (or throws) in every major browser, so
+  // an earlier version of this fix that kept type="number" did nothing at
+  // all despite looking correct. inputmode="numeric" keeps the numeric
+  // virtual keyboard on mobile without needing the native number type.
+  const selectAllOnFocus = (e: { currentTarget: HTMLInputElement }) => {
+    e.currentTarget.select();
   };
 
   return (
@@ -230,14 +267,14 @@ export const DurationSetting: Component<{
           onInput={(e) => setClampedAmount(e, Number(e.currentTarget.value))}
         />
         <input
-          type="number"
+          type="text"
+          inputmode="numeric"
           class={`${inputClass} !w-20`}
-          min={0}
-          max={UNIT_MAX[unit()]}
           aria-label={props.label}
           value={amount()}
           onInput={(e) => onNumberInput(e)}
           onBlur={(e) => finalizeNumberInput(e)}
+          onFocus={(e) => selectAllOnFocus(e)}
         />
         <span class="text-xs text-muted">
           {UNIT_LABELS[unit()].toLowerCase()}
@@ -262,12 +299,15 @@ export const DurationSetting: Component<{
 };
 
 // NumberSetting is one bounded integer field (phash-threshold,
-// match-confidence-threshold, recheck-interval). It mirrors the backend's range
-// client-side (min/max) before submitting; the backend re-validates. save
-// disabled while out of range so the operator sees the bound, never a 400.
-// Exported so AdultRowAdmin can reuse the exact same control for its own global
-// scan-interval field (same 0 = off convention).
+// match-confidence-threshold). It mirrors the backend's range client-side
+// (min/max) before submitting; the backend re-validates. save disabled while
+// out of range so the operator sees the bound, never a 400. Exported so
+// AdultRowAdmin can reuse the exact same control for its own fields.
 export const NumberSetting: Component<{
+  // id is a required, stable registration key — see DurationSetting's id
+  // doc for why this can't be derived from label (two fields sharing
+  // display text would otherwise silently share one batched-save slot).
+  id: string;
   label: string;
   help: string;
   value: () => number | undefined;
@@ -310,10 +350,9 @@ export const NumberSetting: Component<{
     }
   };
   // Batched inside the Advanced tab's SectionSave; standalone (returns false) in
-  // AdultRowAdmin, where it keeps its own per-card Save button. Label is unique
-  // per instance, so it doubles as the registration id.
+  // AdultRowAdmin, where it keeps its own per-card Save button.
   const batched = useSectionSaveItem({
-    id: `number:${props.label}`,
+    id: `number:${props.id}`,
     label: props.label,
     dirty,
     save,
@@ -473,6 +512,7 @@ export const AdvancedSection: Component<{ mode: () => Mode }> = (props) => {
       <Card title={`Advanced Settings (${MODE_LABELS[props.mode()]})`}>
         <SectionSave>
         <DurationSetting
+          id="recheck-interval"
           label="Monitored title refresh interval — global"
           help="Re-checks availability for every monitored title on this cadence."
           value={() => recheck()}
@@ -480,6 +520,7 @@ export const AdvancedSection: Component<{ mode: () => Mode }> = (props) => {
         />
         <RecheckTriggerButton />
         <NumberSetting
+          id="phash-threshold"
           label="Dedup phash similarity threshold (0–64)"
           help="Per-frame average Hamming bits below which two files are treated as perceptual duplicates by Dedup. Lower is stricter."
           value={() => phash()}
@@ -489,6 +530,7 @@ export const AdvancedSection: Component<{ mode: () => Mode }> = (props) => {
         />
         <Show when={props.mode() !== "adult"}>
           <NumberSetting
+            id="match-confidence-threshold"
             label="Rename match-confidence threshold (0–100)"
             help="Minimum TMDB match confidence (a percentage) before Rename auto-accepts a match instead of surfacing it for manual re-pick."
             value={() => confidence()}
@@ -548,6 +590,7 @@ const EntityDatabaseSection: Component = () => {
     <>
       <Card title="Entity Database — background sync">
         <DurationSetting
+          id="entity-sync-interval"
           label="Entity sync interval (all sources)"
           help="How often Stash/ThePornDB/StashDB/FansDB are synced together to keep the entity cache current, on top of the manual per-source buttons below."
           value={() => interval()}

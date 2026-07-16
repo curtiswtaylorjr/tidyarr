@@ -303,6 +303,7 @@ export const AdultRowAdminSection: Component = () => {
     <>
       <Card title="Adult newest rows — background scan">
         <DurationSetting
+          id="adult-newest-scan-interval"
           label="Background scan interval"
           help="How often Prowlarr's newest Adult releases are scanned and matched to TPDB/StashDB/FansDB entities to populate these rows."
           value={() => scanInterval()}
