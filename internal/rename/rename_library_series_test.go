@@ -112,6 +112,38 @@ func TestScanLibrarySeries_SeasonPackProducesOneProposalPerEpisode(t *testing.T)
 // episode file dropped in beside it surfaces individually, rather than the
 // whole "Show Name/Season 01/" subtree staying masked forever just because
 // one episode in it is already tracked.
+// TestScanLibrarySeries_LogicalSplitProducesOneProposalWithExtraEpisodes
+// proves a bundled multi-episode file ("S01E01-E02") produces exactly ONE
+// proposal (not two, and not a truncated single-episode one) with
+// EpisodeNumber set to the primary and ExtraEpisodeNumbers carrying the
+// rest.
+func TestScanLibrarySeries_LogicalSplitProducesOneProposalWithExtraEpisodes(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "Show.Name.S01E01-E02.mkv"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	sess := &mode.Session{Mode: mode.Series, TMDB: fakeTMDBSeriesServer(t, map[string]string{
+		"Show Name": `{"results":[{"id":555,"name":"Show Name"}]}`,
+	}, nil)}
+	libStore := newTestLibraryStore(t)
+
+	got, err := ScanLibrarySeries(context.Background(), sess, libStore, root, naming.Jellyfin, DefaultConfidenceThreshold)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected exactly 1 proposal for the bundled file, got %d: %+v", len(got), got)
+	}
+	p := got[0]
+	if p.Status != proposals.Pending || p.SeasonNumber != 1 || p.EpisodeNumber != 1 {
+		t.Errorf("unexpected proposal: %+v", p)
+	}
+	if len(p.ExtraEpisodeNumbers) != 1 || p.ExtraEpisodeNumbers[0] != 2 {
+		t.Errorf("expected ExtraEpisodeNumbers=[2], got %+v", p.ExtraEpisodeNumbers)
+	}
+}
+
 func TestScanLibrarySeries_DiscoversNewEpisodeAlongsideAlreadyTrackedOne(t *testing.T) {
 	root := t.TempDir()
 	seasonDir := filepath.Join(root, "Show Name", "Season 01")
@@ -393,6 +425,87 @@ func TestApplyLibrarySeries_RelocatesIntoSeasonFolderAndPreservesMetadata(t *tes
 	want := []mode.PathChange{{Path: sourcePath, Kind: mode.Deleted}, {Path: wantDest, Kind: mode.Created}}
 	if len(changes) != 2 || changes[0] != want[0] || changes[1] != want[1] {
 		t.Errorf("expected changes %+v, got %+v", want, changes)
+	}
+}
+
+// TestApplyLibrarySeries_LogicalSplitCreatesOneEpisodeRowPerNumber proves
+// the core of logical episode-splitting: a proposal carrying
+// ExtraEpisodeNumbers relocates the source file exactly ONCE (a single
+// range-shaped destination name), then creates one Episode row per bundled
+// number — all pointing at that same relocated path — preserving each
+// number's own pre-existing title/air-date metadata rather than blanking
+// it (the fix the advisor flagged: the extra-episode loop must repeat the
+// primary's metadata-preserve dance, not just upsert a bare FilePath).
+func TestApplyLibrarySeries_LogicalSplitCreatesOneEpisodeRowPerNumber(t *testing.T) {
+	base := t.TempDir()
+	sourceRoot := filepath.Join(base, "incoming")
+	destRoot := filepath.Join(base, "TV")
+	if err := os.MkdirAll(sourceRoot, 0o755); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	sourcePath := filepath.Join(sourceRoot, "Show.Name.S01E01-E02.mkv")
+	if err := os.WriteFile(sourcePath, []byte("fake video data"), 0o644); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	libStore := newTestLibraryStore(t)
+	ctx := context.Background()
+	series, err := libStore.UpsertSeries(ctx, library.Series{TMDBID: 555, Title: "Show Name", RootFolderPath: destRoot})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Episode 2 already has TMDB-seeded metadata (e.g. from a prior Scan
+	// reporting it as missing) — this must survive, not get blanked.
+	if _, err := libStore.UpsertEpisode(ctx, library.Episode{
+		SeriesID: series.ID, SeasonNumber: 1, EpisodeNumber: 2, Title: "Part Two", AirDate: "2020-01-08",
+	}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	p := proposals.Proposal{
+		ID: 1, Status: proposals.Pending, Title: "Show Name", TMDBID: 555,
+		SeasonNumber: 1, EpisodeNumber: 1, ExtraEpisodeNumbers: []int{2},
+		SourcePath: sourcePath, RootFolderPath: destRoot,
+	}
+	epID, changes, err := ApplyLibrarySeries(ctx, libStore, p, naming.Jellyfin)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if epID == 0 {
+		t.Error("expected a nonzero episode id for the primary episode")
+	}
+
+	wantDest := filepath.Join(destRoot, "Show Name [tmdbid-555]", "Season 01", "Show Name S01E01-E02.mkv")
+	if _, err := os.Stat(sourcePath); !os.IsNotExist(err) {
+		t.Errorf("expected the source file to be gone, stat returned: %v", err)
+	}
+	if data, err := os.ReadFile(wantDest); err != nil || string(data) != "fake video data" {
+		t.Errorf("expected the file at %q, err=%v data=%q", wantDest, err, data)
+	}
+
+	ep1, err := libStore.GetEpisode(ctx, series.ID, 1, 1)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if ep1.FilePath != wantDest {
+		t.Errorf("expected episode 1's file path to be the relocated path, got %q", ep1.FilePath)
+	}
+
+	ep2, err := libStore.GetEpisode(ctx, series.ID, 1, 2)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if ep2.FilePath != wantDest {
+		t.Errorf("expected episode 2 to point at the SAME relocated path as episode 1, got %q", ep2.FilePath)
+	}
+	if ep2.Title != "Part Two" || ep2.AirDate != "2020-01-08" {
+		t.Errorf("expected episode 2's existing metadata to be preserved, not blanked, got %+v", ep2)
+	}
+
+	// Only one relocate happened — exactly one Deleted+Created pair, not two.
+	want := []mode.PathChange{{Path: sourcePath, Kind: mode.Deleted}, {Path: wantDest, Kind: mode.Created}}
+	if len(changes) != 2 || changes[0] != want[0] || changes[1] != want[1] {
+		t.Errorf("expected exactly one relocate's worth of changes %+v, got %+v", want, changes)
 	}
 }
 

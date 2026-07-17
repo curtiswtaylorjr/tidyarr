@@ -422,7 +422,7 @@ func checkImportHandler(httpClient *http.Client, connStore *connections.Store, s
 					return
 				}
 				for _, videoPath := range videoPaths {
-					season, episode, ok := library.ParseEpisodeFilename(filepath.Base(videoPath))
+					season, episodes, ok := library.ParseEpisodeNumbers(filepath.Base(videoPath))
 					if !ok {
 						// A season-pack grab's own request already recorded
 						// which season it targeted; a single-episode grab
@@ -435,13 +435,23 @@ func checkImportHandler(httpClient *http.Client, connStore *connections.Store, s
 						if len(videoPaths) != 1 || !g.SeasonSpecified {
 							continue
 						}
-						season, episode = g.SeasonNumber, g.EpisodeNumber
+						season, episodes = g.SeasonNumber, []int{g.EpisodeNumber}
 					}
-					if _, err := libStore.UpsertEpisode(ctx, library.Episode{
-						SeriesID: series.ID, SeasonNumber: season, EpisodeNumber: episode, FilePath: videoPath,
-					}); err != nil {
-						http.Error(w, fmt.Sprintf("file relocated but recording episode s%de%d failed: %v", season, episode, err), http.StatusBadGateway)
-						return
+					// Logical episode-splitting: a bundled multi-episode
+					// filename (e.g. "S01E01-E02") relocates as ONE file but
+					// must record an Episode row for EVERY number it
+					// contains — episodes[1:] were silently dropped before
+					// this fix (a real, confirmed gap: a grabbed multi-
+					// episode file used to leave every episode past the
+					// first untracked forever). One Created PathChange per
+					// physical file still, not per episode row.
+					for _, episode := range episodes {
+						if _, err := libStore.UpsertEpisode(ctx, library.Episode{
+							SeriesID: series.ID, SeasonNumber: season, EpisodeNumber: episode, FilePath: videoPath,
+						}); err != nil {
+							http.Error(w, fmt.Sprintf("file relocated but recording episode s%de%d failed: %v", season, episode, err), http.StatusBadGateway)
+							return
+						}
 					}
 					changes = append(changes, mode.PathChange{Path: videoPath, Kind: mode.Created})
 				}

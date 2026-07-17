@@ -135,6 +135,26 @@ func TestMatchesSeriesSchema(t *testing.T) {
 			t.Error("expected a loose scene-release file to not match either preset")
 		}
 	})
+
+	// A logical-episode-split file's range-shaped name (EpisodeRangeFileName's
+	// own output) must be recognized as conformant — otherwise it would be
+	// endlessly re-proposed on every Scan despite already being correctly
+	// organized (the real bug this coverage guards against).
+	t.Run("a Jellyfin range-shaped episode matches", func(t *testing.T) {
+		root := t.TempDir()
+		videoPath := writeFile(t, filepath.Join(root, "Some Show (2019) [tmdbid-555]", "Season 01"), "Some Show S01E01-E02.mkv")
+		if !MatchesSeriesSchema(videoPath, Jellyfin) {
+			t.Error("expected a conformant Jellyfin range-shaped episode to match")
+		}
+	})
+
+	t.Run("a Legacy range-shaped episode matches", func(t *testing.T) {
+		root := t.TempDir()
+		videoPath := writeFile(t, filepath.Join(root, "Some Show", "Season 01"), "Some Show - S01E01-E02.mkv")
+		if !MatchesSeriesSchema(videoPath, Legacy) {
+			t.Error("expected a conformant Legacy range-shaped episode to match")
+		}
+	})
 }
 
 func TestMatchesAdultSchema(t *testing.T) {

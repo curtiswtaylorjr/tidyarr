@@ -554,6 +554,10 @@ export interface Candidate {
  * button renders as already-done and can't re-submit. Studio/Date/PHash are
  * Adult-only (captured from Adult identification); SeasonNumber/EpisodeNumber
  * are Series-only (a season-pack orphan produces one proposal per episode).
+ * ExtraEpisodeNumbers is Series-only too, and only non-empty for a logical-
+ * episode-split file (e.g. "S01E01-E02" produces EpisodeNumber=1,
+ * ExtraEpisodeNumbers=[2]) — Apply relocates the file once and creates one
+ * Episode row per number, primary plus each of these, all at that path.
  * Candidates is Dedup-only: the duplicate group's files, exactly one flagged
  * Winner (the keeper); Rename/Purge never populate it (it's absent from their
  * wire rows, so the shared TS type carries it as optional).
@@ -567,6 +571,7 @@ export interface Proposal {
   year?: number /* int */;
   seasonNumber?: number /* int */;
   episodeNumber?: number /* int */;
+  extraEpisodeNumbers?: number /* int */[];
   studio?: string;
   date?: string;
   phash?: string;

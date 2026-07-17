@@ -95,3 +95,28 @@ func TestEpisodeFileName(t *testing.T) {
 		t.Errorf("unexpected legacy file name with no episode title: %q", got)
 	}
 }
+
+func TestEpisodeRangeFileName(t *testing.T) {
+	if got := EpisodeRangeFileName(Jellyfin, "Show Name", 3, []int{5, 6}, "", ".mkv"); got != "Show Name S03E05-E06.mkv" {
+		t.Errorf("unexpected jellyfin range file name: %q", got)
+	}
+	if got := EpisodeRangeFileName(Legacy, "Show Name", 3, []int{5, 6}, "", ".mkv"); got != "Show Name - S03E05-E06.mkv" {
+		t.Errorf("unexpected legacy range file name: %q", got)
+	}
+	// A 3+ episode range uses first/last, not every number in between.
+	if got := EpisodeRangeFileName(Jellyfin, "Show Name", 1, []int{1, 2, 3}, "", ".mkv"); got != "Show Name S01E01-E03.mkv" {
+		t.Errorf("unexpected 3-episode range file name: %q", got)
+	}
+	if got := EpisodeRangeFileName(Jellyfin, "Show Name", 3, []int{5, 6}, "Episode Title", ".mkv"); got != "Show Name S03E05-E06 Episode Title.mkv" {
+		t.Errorf("unexpected jellyfin range file name with episode title: %q", got)
+	}
+	// Fewer than 2 numbers falls straight through to EpisodeFileName's
+	// ordinary single-episode rendering — no separate branch needed by
+	// callers.
+	if got := EpisodeRangeFileName(Jellyfin, "Show Name", 3, []int{5}, "", ".mkv"); got != "Show Name S03E05.mkv" {
+		t.Errorf("expected single-episode fallback, got %q", got)
+	}
+	if got := EpisodeRangeFileName(Jellyfin, "Show Name", 3, nil, "", ".mkv"); got != "Show Name S03E00.mkv" {
+		t.Errorf("expected empty-slice fallback to episode 0, got %q", got)
+	}
+}

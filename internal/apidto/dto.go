@@ -569,24 +569,29 @@ type Candidate struct {
 // button renders as already-done and can't re-submit. Studio/Date/PHash are
 // Adult-only (captured from Adult identification); SeasonNumber/EpisodeNumber
 // are Series-only (a season-pack orphan produces one proposal per episode).
+// ExtraEpisodeNumbers is Series-only too, and only non-empty for a logical-
+// episode-split file (e.g. "S01E01-E02" produces EpisodeNumber=1,
+// ExtraEpisodeNumbers=[2]) — Apply relocates the file once and creates one
+// Episode row per number, primary plus each of these, all at that path.
 // Candidates is Dedup-only: the duplicate group's files, exactly one flagged
 // Winner (the keeper); Rename/Purge never populate it (it's absent from their
 // wire rows, so the shared TS type carries it as optional).
 type Proposal struct {
-	ID             int64       `json:"id"`
-	Status         string      `json:"status"`
-	SourceName     string      `json:"sourceName"`
-	RootFolderPath string      `json:"rootFolderPath"`
-	Title          string      `json:"title,omitempty"`
-	Year           int         `json:"year,omitempty"`
-	SeasonNumber   int         `json:"seasonNumber,omitempty"`
-	EpisodeNumber  int         `json:"episodeNumber,omitempty"`
-	Studio         string      `json:"studio,omitempty"`
-	Date           string      `json:"date,omitempty"`
-	PHash          string      `json:"phash,omitempty"`
-	Reason         string      `json:"reason,omitempty"`
-	DraftID        string      `json:"draftId,omitempty"`
-	Candidates     []Candidate `json:"candidates,omitempty"`
+	ID                  int64       `json:"id"`
+	Status              string      `json:"status"`
+	SourceName          string      `json:"sourceName"`
+	RootFolderPath      string      `json:"rootFolderPath"`
+	Title               string      `json:"title,omitempty"`
+	Year                int         `json:"year,omitempty"`
+	SeasonNumber        int         `json:"seasonNumber,omitempty"`
+	EpisodeNumber       int         `json:"episodeNumber,omitempty"`
+	ExtraEpisodeNumbers []int       `json:"extraEpisodeNumbers,omitempty"`
+	Studio              string      `json:"studio,omitempty"`
+	Date                string      `json:"date,omitempty"`
+	PHash               string      `json:"phash,omitempty"`
+	Reason              string      `json:"reason,omitempty"`
+	DraftID             string      `json:"draftId,omitempty"`
+	Candidates          []Candidate `json:"candidates,omitempty"`
 }
 
 // --- Purge allowlist (Stage 3) --------------------------------------------

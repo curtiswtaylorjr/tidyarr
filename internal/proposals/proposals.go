@@ -92,6 +92,14 @@ type Proposal struct {
 	// unambiguously means the filename itself encoded season 0 (Specials).
 	SeasonNumber  int `json:"seasonNumber,omitempty"`
 	EpisodeNumber int `json:"episodeNumber,omitempty"`
+	// ExtraEpisodeNumbers holds any ADDITIONAL episode numbers bundled into
+	// the same file as EpisodeNumber (logical episode-splitting — see
+	// library.ParseEpisodeNumbers) — e.g. a "S01E01-E02" file produces
+	// EpisodeNumber=1, ExtraEpisodeNumbers=[2]. Empty/nil for the ordinary
+	// single-episode case, the overwhelming majority. Apply relocates the
+	// file exactly once, then upserts one Episode row per number (the
+	// primary plus each of these) all pointing at that same resulting path.
+	ExtraEpisodeNumbers []int `json:"extraEpisodeNumbers,omitempty"`
 	// Year is the release year resolved from TMDB at Scan time (Rename
 	// only) — carried through to Apply so RelocateMovie/RelocateEpisode can
 	// include it in the Jellyfin/Emby-style destination name, and so the
@@ -171,18 +179,22 @@ func (s *Store) ReplacePending(ctx context.Context, m mode.Mode, wf Workflow, fr
 		if err != nil {
 			return nil, fmt.Errorf("encoding candidates for %q: %w", p.SourceName, err)
 		}
+		extraEpisodesJSON, err := marshalExtraEpisodes(p.ExtraEpisodeNumbers)
+		if err != nil {
+			return nil, fmt.Errorf("encoding extra episode numbers for %q: %w", p.SourceName, err)
+		}
 		row := tx.QueryRowContext(ctx, `
 			INSERT INTO proposals (
 				mode, workflow, status, source_name, source_path, root_folder_path,
 				title, tvdb_id, tmdb_id, season_number, episode_number, year, quality_profile_id, reason, tracked_id,
 				foreign_id, item_type, candidates_json, studio, scene_date,
-				phash, duration_seconds, give_back_box, give_back_scene_id
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				phash, duration_seconds, give_back_box, give_back_scene_id, extra_episode_numbers
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			RETURNING id, created_at
 		`, string(p.Mode), string(p.Workflow), string(p.Status), p.SourceName, p.SourcePath, p.RootFolderPath,
 			p.Title, p.TVDBID, p.TMDBID, p.SeasonNumber, p.EpisodeNumber, p.Year, p.QualityProfileID, p.Reason, p.TrackedID,
 			p.ForeignID, p.ItemType, string(candidatesJSON), p.Studio, p.Date,
-			p.PHash, p.DurationSeconds, p.GiveBackBox, p.GiveBackSceneID)
+			p.PHash, p.DurationSeconds, p.GiveBackBox, p.GiveBackSceneID, extraEpisodesJSON)
 		if err := row.Scan(&p.ID, &p.CreatedAt); err != nil {
 			return nil, fmt.Errorf("inserting proposal for %q: %w", p.SourceName, err)
 		}
@@ -203,7 +215,7 @@ func (s *Store) List(ctx context.Context, m mode.Mode, wf Workflow) ([]Proposal,
 		       foreign_id, item_type, candidates_json, studio, scene_date,
 		       draft_id, COALESCE(draft_submitted_at, ''),
 		       phash, duration_seconds, give_back_box, give_back_scene_id, COALESCE(fingerprint_submitted_at, ''),
-		       created_at, COALESCE(applied_at, '')
+		       created_at, COALESCE(applied_at, ''), extra_episode_numbers
 		FROM proposals WHERE mode = ? AND workflow = ? ORDER BY id DESC
 	`, string(m), string(wf))
 	if err != nil {
@@ -234,7 +246,7 @@ func (s *Store) Get(ctx context.Context, id int64) (*Proposal, error) {
 		       foreign_id, item_type, candidates_json, studio, scene_date,
 		       draft_id, COALESCE(draft_submitted_at, ''),
 		       phash, duration_seconds, give_back_box, give_back_scene_id, COALESCE(fingerprint_submitted_at, ''),
-		       created_at, COALESCE(applied_at, '')
+		       created_at, COALESCE(applied_at, ''), extra_episode_numbers
 		FROM proposals WHERE id = ?
 	`, id)
 	p, err := scanProposal(row)
@@ -325,18 +337,39 @@ type rowScanner interface {
 
 func scanProposal(row rowScanner) (Proposal, error) {
 	var p Proposal
-	var m, wf, status, candidatesJSON string
+	var m, wf, status, candidatesJSON, extraEpisodesJSON string
 	if err := row.Scan(&p.ID, &m, &wf, &status, &p.SourceName, &p.SourcePath, &p.RootFolderPath,
 		&p.Title, &p.TVDBID, &p.TMDBID, &p.SeasonNumber, &p.EpisodeNumber, &p.Year, &p.QualityProfileID, &p.Reason, &p.TrackedID,
 		&p.ForeignID, &p.ItemType, &candidatesJSON, &p.Studio, &p.Date,
 		&p.DraftID, &p.DraftSubmittedAt,
 		&p.PHash, &p.DurationSeconds, &p.GiveBackBox, &p.GiveBackSceneID, &p.FingerprintSubmittedAt,
-		&p.CreatedAt, &p.AppliedAt); err != nil {
+		&p.CreatedAt, &p.AppliedAt, &extraEpisodesJSON); err != nil {
 		return Proposal{}, err
 	}
 	p.Mode, p.Workflow, p.Status = mode.Mode(m), Workflow(wf), Status(status)
 	if err := json.Unmarshal([]byte(candidatesJSON), &p.Candidates); err != nil {
 		return Proposal{}, fmt.Errorf("decoding candidates for proposal %d: %w", p.ID, err)
 	}
+	if extraEpisodesJSON != "" {
+		if err := json.Unmarshal([]byte(extraEpisodesJSON), &p.ExtraEpisodeNumbers); err != nil {
+			return Proposal{}, fmt.Errorf("decoding extra episode numbers for proposal %d: %w", p.ID, err)
+		}
+	}
 	return p, nil
+}
+
+// marshalExtraEpisodes encodes nums for the extra_episode_numbers column —
+// "" (not "null"/"[]") for the empty/nil case, matching the column's own
+// NOT NULL DEFAULT ” "empty string means absent" convention (the same
+// convention FilePath already uses), rather than always storing a JSON
+// array even when there's nothing to say.
+func marshalExtraEpisodes(nums []int) (string, error) {
+	if len(nums) == 0 {
+		return "", nil
+	}
+	b, err := json.Marshal(nums)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
 }

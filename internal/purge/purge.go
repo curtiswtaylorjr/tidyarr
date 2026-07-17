@@ -162,6 +162,17 @@ func ScanLibrarySeries(ctx context.Context, libStore *library.Store, allowlist [
 // post-delete failure (libStore.DeleteSeries) still reports every file that
 // was actually removed to the caller for Session.NotifyPlayers. An episode
 // with no file (ep.FilePath == "") is skipped entirely, same as before.
+//
+// A logical-episode-split file (library.ParseEpisodeNumbers) can back TWO
+// episode rows with an identical FilePath — removedPaths dedupes so that
+// case reports exactly one Deleted PathChange per physical file, not one
+// per row that happened to reference it (the second os.Remove is already a
+// safe IsNotExist no-op; only the PathChange bookkeeping needed the fix).
+// Unlike Dedup's ApplyLibrarySeries, no shared-file survival guard is
+// needed here: every episode of the series is enumerated and removed in
+// this same call, so split siblings always die together atomically —
+// there's no window where one sibling's row could survive pointing at a
+// file the other sibling just had deleted out from under it.
 func ApplyLibrarySeries(ctx context.Context, libStore *library.Store, p proposals.Proposal) (changes []mode.PathChange, err error) {
 	if p.Status != proposals.Pending {
 		return nil, fmt.Errorf("proposal %d is %q, not pending — nothing to apply", p.ID, p.Status)
@@ -174,13 +185,15 @@ func ApplyLibrarySeries(ctx context.Context, libStore *library.Store, p proposal
 	if err != nil {
 		return nil, fmt.Errorf("loading episodes for series %d: %w", p.TrackedID, err)
 	}
+	removedPaths := make(map[string]bool, len(episodes))
 	for _, ep := range episodes {
-		if ep.FilePath == "" {
+		if ep.FilePath == "" || removedPaths[ep.FilePath] {
 			continue
 		}
 		if err := os.Remove(ep.FilePath); err != nil && !os.IsNotExist(err) {
 			return changes, fmt.Errorf("deleting %q: %w", ep.FilePath, err)
 		}
+		removedPaths[ep.FilePath] = true
 		changes = append(changes, mode.PathChange{Path: ep.FilePath, Kind: mode.Deleted})
 	}
 	if err := libStore.DeleteSeries(ctx, int64(p.TrackedID)); err != nil {

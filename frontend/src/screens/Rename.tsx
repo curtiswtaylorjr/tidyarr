@@ -62,6 +62,24 @@ function shortHash(hash: string): string {
   return hash.length > 12 ? `${hash.slice(0, 12)}…` : hash;
 }
 
+// episodeDisplay renders the Episode column: a plain number for the
+// ordinary single-episode case, or "N-M" (e.g. "1-2") for a logical-
+// episode-split proposal (extraEpisodeNumbers non-empty) — so an operator
+// sees BOTH episodes Apply will actually create before approving it,
+// rather than only the primary number with the bundled one silently
+// implied.
+function episodeDisplay(
+  episodeNumber?: number,
+  extraEpisodeNumbers?: number[],
+): string {
+  if (episodeNumber == null) return "";
+  if (!extraEpisodeNumbers || extraEpisodeNumbers.length === 0) {
+    return String(episodeNumber);
+  }
+  const last = extraEpisodeNumbers[extraEpisodeNumbers.length - 1];
+  return `${episodeNumber}-${last}`;
+}
+
 // RepickPanel is the shared Movies/Series re-pick search area — one instance
 // below the table, opened against whichever proposal's Re-pick was clicked. It
 // auto-searches the prefilled query on mount (matching the old openRepick's
@@ -252,7 +270,7 @@ const RenameQueue: Component<{ mode: Mode }> = (props) => {
                             {p.seasonNumber ?? ""}
                           </td>
                           <td class="px-2 py-2 text-muted">
-                            {p.episodeNumber ?? ""}
+                            {episodeDisplay(p.episodeNumber, p.extraEpisodeNumbers)}
                           </td>
                         </Show>
                         <Show when={props.mode === "adult"}>

@@ -2844,3 +2844,111 @@ Verified via `go build`/`go vet`/`go test -race ./internal/tmdb/...
 under the race detector) plus full repo `go build ./...`/`go test ./...`,
 and frontend `pnpm typecheck`/`pnpm test` (272 tests, up from 268)/`pnpm
 build`, all clean. Merged, pushed, auto-deployed, health checks passed.
+
+## 2026-07-16 — Logical episode-splitting: one file, multiple Episode rows sharing a FilePath — plus a real Dedup data-loss fix found along the way
+
+Second item off `docs/ROADMAP.md`'s backlog, taken in the same
+least-complex-to-most-complex order as the trailer/hide-unreleased-movies
+item above — but this one turned out to be more complex than its one-line
+ROADMAP description suggested. A research pass done BEFORE any
+implementation (per the user's explicit choice — "do the design pass
+first, then build" — after the initial complexity estimate was corrected
+mid-conversation) found a real, reachable correctness risk in Dedup, not
+just an implementation detail to figure out. Built in a dedicated worktree
+(`logical-episode-splitting`).
+
+**The feature**: a video file that's actually two (or more) bundled Series
+episodes (e.g. `Show.S01E01-E02.mkv`) now records one `library.Episode` row
+per bundled episode number, all pointing at the SAME `FilePath` — never
+physical file-splitting or re-encoding, which stays explicitly out of
+scope. New `internal/library.ParseEpisodeNumbers(name) (season int,
+episodes []int, ok bool)` extracts the full bundled list, supporting three
+shapes: concatenated (`S01E01E02E03`), dash range (`S01E01-E02`/
+`S01E01-02`, inclusive expansion capped at a 26-episode span to reject a
+pathological `S01E01-E99` misparse), and the alt `01x01-02` format.
+`ParseEpisodeFilename` (every pre-existing caller) is now a thin wrapper
+over this returning just the first number — confirmed byte-for-byte
+behaviorally identical for the single-episode case via its own unchanged
+pre-existing test. New `proposals.Proposal.ExtraEpisodeNumbers []int`
+(migration `0030_proposal_extra_episodes.sql`, JSON-encoded column, empty
+string = none, same convention `FilePath` already uses) carries the
+bundled numbers from Scan through to Apply. `rename.ApplyLibrarySeries`
+relocates the file exactly ONCE (new `RelocateEpisodeRange` sibling of
+`RelocateEpisode`, using new `naming.EpisodeRangeFileName` to render
+`S03E05-E06`), then upserts one `Episode` row per number — each getting the
+SAME existing-metadata-preserve dance (`GetEpisode` before `UpsertEpisode`)
+the primary episode already had, so a bundled episode's prior TMDB-seeded
+title/air-date isn't silently blanked. `internal/naming/schema.go`'s
+conformance regexes (`episodeFileJellyfin`/`episodeFileLegacy`) now
+recognize the range shape too — without this, a correctly-split,
+already-renamed file would never register as schema-conformant and would
+be endlessly re-proposed on every Scan. Search's check-import
+(`internal/api/search.go`) got the identical fix for a directly-grabbed
+multi-episode file: a confirmed pre-existing bug (every episode past the
+first silently dropped forever, never recorded anywhere) is now fixed —
+covered by a new regression test proving both episode rows get created.
+
+**The real complexity, found by research before implementation, not
+discovered mid-build**: Dedup's `ApplyLibrarySeries`
+(`internal/dedup/dedup.go`) deletes a losing duplicate candidate's file per
+`(series, season, episode)` dedup key. Its own doc comment asserted
+"there's nothing else that could ever point at that exact slot" — true
+before this feature, false once two episodes can legitimately share one
+file. Concrete failure mode: episode 1 and episode 2 share file F; Dedup's
+episode-1 dedup group finds a better standalone copy of episode 1
+elsewhere, F loses that comparison, and the old code would unconditionally
+`os.Remove(F)` — deleting a file episode 2's row still needed, a live,
+reachable violation of this project's core "no drift" mission (CLAUDE.md's
+Mission section: "the filesystem is exactly as organized as the UI says it
+is — no drift between them"), not a hypothetical edge case. Fixed via a new
+`library.Store.CountEpisodesByFilePath(ctx, filePath) (int, error)`: before
+physically deleting any losing candidate's file, the guard checks whether
+any OTHER episode row still references that exact path; a count `<= 1`
+(only the row about to be overwritten, or nothing) is safe to delete
+exactly as before; `> 1` skips the delete (logging why) while still letting
+this proposal's own key advance to its winner via `UpsertEpisode`. Purge's
+`ApplyLibrarySeries` needed no equivalent fix — it deletes an entire
+series' episodes (and the series row) in one atomic call, so split
+siblings always die together, no orphan window exists — confirmed by
+direct trace, not assumed. Purge did get a smaller, separately-found fix in
+the same review pass: it was double-appending a `Deleted` `PathChange` for
+a shared file (the second `os.Remove` was already a safe `IsNotExist`
+no-op, but the `PathChange` bookkeeping wasn't deduped) — cosmetic, not
+data loss, but corrected with its own regression test.
+
+Independently code-reviewed pre-merge (`oh-my-claudecode:code-reviewer`,
+fresh context, own advisor consultation, own build/test run): 0 CRITICAL,
+0 HIGH at HIGH confidence — APPROVE. The reviewer traced the Dedup fix's
+exact ordering (the refCount check runs entirely inside the loser-deletion
+loop, completing before the winner's own `UpsertEpisode` further down —
+correct, since it must read the OLD database state) and confirmed the
+critical regression test
+(`TestApplyLibrarySeries_SharedFileLosesItsOwnKey_NotDeleted_SiblingIntact`)
+is genuine — it would fail against the pre-fix unconditional `os.Remove`,
+not a shallow unit test of `CountEpisodesByFilePath` in isolation. One Open
+Question was raised and closed before merge: the guard's correctness
+depends on exact `file_path` string equality between sibling rows: could a
+future divergent path-normalization silently reopen the exact bug the fix
+prevents? Confirmed every writer of split-sibling rows (rename's Apply,
+check-import) upserts every number with the IDENTICAL already-relocated
+path string in one call, never re-derived per row — and separately, that
+`ScanLibrarySeries`'s own `known`-path masking means a shared file can
+never surface as a scan-discovered orphan with a differently-formatted
+path in the first place (a tracked path is excluded from orphan discovery
+entirely, regardless of what key it would parse to). Both findings are now
+documented directly on `CountEpisodesByFilePath`'s doc comment for future
+readers. A second regression test was added proving the guard is
+path-based, not candidate-label-based (protects a shared file even when it
+arrives as a plain, non-"tracked"-labeled candidate) — closing the
+reviewer's exact follow-up request. Three further LOW findings (check-
+import not repeating the metadata-preserve dance for extras — consistent
+with the primary episode's own long-standing behavior, not a new
+asymmetry; a rare mixed concat+range filename dropping a trailing segment;
+`ParseEpisodeFilename`'s primary-number choice on a descending concat)
+were accepted as documented, narrow edge cases rather than fixed.
+
+Verified via `go build`/`go vet`/`go test -race` across every touched
+package (`library`, `proposals`, `naming`, `rename`, `dedup`, `purge`,
+`api`) plus full repo `go build ./...`/`go test ./...`, and frontend `pnpm
+typecheck`/`pnpm test` (273 tests, up from 272)/`pnpm build`, all clean.
+Merged, pushed, auto-deployed, health checks passed.

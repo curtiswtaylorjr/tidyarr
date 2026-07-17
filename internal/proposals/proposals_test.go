@@ -84,6 +84,51 @@ func TestReplacePending_PersistsCandidates(t *testing.T) {
 	}
 }
 
+// TestReplacePending_PersistsExtraEpisodeNumbers proves the logical-episode-
+// splitting field round-trips through the extra_episode_numbers column, and
+// that the ordinary single-episode case (no ExtraEpisodeNumbers at all)
+// round-trips as nil/empty, not a stray "[]" or "null".
+func TestReplacePending_PersistsExtraEpisodeNumbers(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	saved, err := s.ReplacePending(ctx, mode.Series, Rename, []Proposal{
+		{
+			Status: Pending, SourceName: "Show S01E01-E02.mkv", Title: "Show", TMDBID: 1,
+			SeasonNumber: 1, EpisodeNumber: 1, ExtraEpisodeNumbers: []int{2},
+		},
+		{
+			Status: Pending, SourceName: "Show S01E03.mkv", Title: "Show", TMDBID: 1,
+			SeasonNumber: 1, EpisodeNumber: 3,
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(saved[0].ExtraEpisodeNumbers) != 1 || saved[0].ExtraEpisodeNumbers[0] != 2 {
+		t.Fatalf("expected ExtraEpisodeNumbers=[2] to survive the insert, got %+v", saved[0].ExtraEpisodeNumbers)
+	}
+	if len(saved[1].ExtraEpisodeNumbers) != 0 {
+		t.Fatalf("expected the single-episode proposal to have no extra episodes, got %+v", saved[1].ExtraEpisodeNumbers)
+	}
+
+	got, err := s.Get(ctx, saved[0].ID)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got.ExtraEpisodeNumbers) != 1 || got.ExtraEpisodeNumbers[0] != 2 {
+		t.Fatalf("expected ExtraEpisodeNumbers to round-trip from storage, got %+v", got.ExtraEpisodeNumbers)
+	}
+
+	gotSingle, err := s.Get(ctx, saved[1].ID)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(gotSingle.ExtraEpisodeNumbers) != 0 {
+		t.Fatalf("expected the single-episode proposal to round-trip with no extra episodes, got %+v", gotSingle.ExtraEpisodeNumbers)
+	}
+}
+
 // TestReplacePending_PersistsCandidatePHash proves the SAK-computed per-file
 // perceptual hash (Movies Dedup) survives the candidates_json round-trip — a
 // zero-migration field carried only inside the JSON blob, distinct from

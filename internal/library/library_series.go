@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -205,6 +206,39 @@ func (s *Store) GetEpisode(ctx context.Context, seriesID int64, seasonNumber, ep
 	return &ep, nil
 }
 
+// CountEpisodesByFilePath reports how many Episode rows (across every
+// series, not scoped to one) currently have exactly filePath as their
+// FilePath. A path names exactly one filesystem location, so this is a
+// global lookup, not a per-series one. Dedup's ApplyLibrarySeries
+// (internal/dedup/dedup.go) uses this to guard against deleting a file a
+// logical-episode-split sibling row still references: a count <= 1 means
+// only the row about to be overwritten (if any) claims this path, safe to
+// delete; > 1 means another row still needs it.
+//
+// This is a pure string-equality lookup — it holds only because every
+// writer of a split file's sibling rows (rename.ApplyLibrarySeries's extra-
+// episode loop, search.go's check-import multi-episode loop) upserts every
+// sibling with the SAME already-relocated path variable in one call, never
+// re-deriving or re-normalizing it per row. If a future writer ever stored
+// a differently-formatted-but-equivalent path for one sibling (e.g. after
+// symlink resolution or a Clean() only one side applies), this guard would
+// silently stop protecting that file — flagged here since Dedup's own scan
+// can never surface a counterexample itself: ScanLibrarySeries's `known`
+// set masks every already-tracked FilePath from ever being re-discovered
+// as an unmapped/orphan entry in the first place, so a shared file can only
+// ever reach ApplyLibrarySeries labeled as ITS OWN "tracked" candidate, with
+// the exact DB-stored string — never as a scan-produced orphan path that
+// could diverge from it.
+func (s *Store) CountEpisodesByFilePath(ctx context.Context, filePath string) (int, error) {
+	var count int
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM library_episodes WHERE file_path = ?
+	`, filePath).Scan(&count); err != nil {
+		return 0, fmt.Errorf("counting episodes for file path %q: %w", filePath, err)
+	}
+	return count, nil
+}
+
 // ListEpisodes returns every episode of seriesID, ordered by season then
 // episode number.
 func (s *Store) ListEpisodes(ctx context.Context, seriesID int64) ([]Episode, error) {
@@ -337,26 +371,114 @@ func scanEpisode(row rowScanner) (Episode, error) {
 // best-effort, same posture as internal/searchterm's own doc comment —
 // real-world release names are inconsistent enough that a full parser
 // isn't worth building for this.
+//
+// concatPrefixPattern/concatNumPattern and rangeSuffixPattern/
+// altRangeSuffixPattern detect a bundled multi-episode filename
+// immediately following the primary match — concatenated ("S01E01E02E03")
+// or dash-range ("S01E01-E02", "01x01-02"). Go's RE2 engine has no
+// repeated-capture-group extraction (unlike PCRE), so concatenated numbers
+// are pulled out with a second, non-anchored FindAllStringSubmatch pass
+// over just the matched prefix substring, not one combined regex.
 var (
-	episodePattern    = regexp.MustCompile(`(?i)S(\d{1,2})E(\d{1,3})`)
-	altEpisodePattern = regexp.MustCompile(`(?i)\b(\d{1,2})x(\d{1,3})\b`)
+	episodePattern        = regexp.MustCompile(`(?i)S(\d{1,2})E(\d{1,3})`)
+	altEpisodePattern     = regexp.MustCompile(`(?i)\b(\d{1,2})x(\d{1,3})\b`)
+	concatPrefixPattern   = regexp.MustCompile(`(?i)^(?:E\d{1,3})+`)
+	concatNumPattern      = regexp.MustCompile(`(?i)E(\d{1,3})`)
+	rangeSuffixPattern    = regexp.MustCompile(`(?i)^-E?(\d{1,3})`)
+	altRangeSuffixPattern = regexp.MustCompile(`^-(\d{1,3})`)
 )
 
-// ParseEpisodeFilename best-effort extracts a season and episode number
-// from name (a release or file name). ok is false if neither pattern
-// matches.
+// maxEpisodeRangeSpan caps a dash-range expansion (e.g. "S01E01-E02") to
+// reject a pathological misparse — "S01E01-E99" expanding into 99
+// fabricated episode rows — rather than trusting an arbitrarily large gap.
+const maxEpisodeRangeSpan = 26
+
+// expandRange returns the inclusive [first, last] integer sequence, or just
+// []int{first} if the range is invalid (last < first) or exceeds
+// maxEpisodeRangeSpan — the same "don't trust an implausible parse" posture
+// as the rest of this file's best-effort parsing.
+func expandRange(first, last int) []int {
+	if last < first || last-first+1 > maxEpisodeRangeSpan {
+		return []int{first}
+	}
+	out := make([]int, 0, last-first+1)
+	for n := first; n <= last; n++ {
+		out = append(out, n)
+	}
+	return out
+}
+
+// dedupSorted returns nums deduplicated and ascending-sorted.
+func dedupSorted(nums []int) []int {
+	seen := make(map[int]bool, len(nums))
+	out := make([]int, 0, len(nums))
+	for _, n := range nums {
+		if !seen[n] {
+			seen[n] = true
+			out = append(out, n)
+		}
+	}
+	sort.Ints(out)
+	return out
+}
+
+// ParseEpisodeNumbers extracts a season and ALL bundled episode numbers from
+// name (a release or file name) — the logical-episode-splitting parser.
+// Supports three shapes on top of the plain single-episode case
+// ParseEpisodeFilename already handled: concatenated multi-episode
+// ("S01E01E02E03"), dash range ("S01E01-E02"/"S01E01-02", inclusive
+// expansion), and the alt-format's own range sibling ("01x01-02"). Returns
+// a deduped, ascending-sorted slice; ok is false only when neither the
+// SxxExx nor NxNN format matches at all — the same "no match" contract
+// ParseEpisodeFilename already had.
+func ParseEpisodeNumbers(name string) (season int, episodes []int, ok bool) {
+	if loc := episodePattern.FindStringSubmatchIndex(name); loc != nil {
+		season, _ = strconv.Atoi(name[loc[2]:loc[3]])
+		first, _ := strconv.Atoi(name[loc[4]:loc[5]])
+		rest := name[loc[1]:]
+		switch {
+		case concatPrefixPattern.MatchString(rest):
+			prefix := concatPrefixPattern.FindString(rest)
+			nums := []int{first}
+			for _, m := range concatNumPattern.FindAllStringSubmatch(prefix, -1) {
+				n, _ := strconv.Atoi(m[1])
+				nums = append(nums, n)
+			}
+			return season, dedupSorted(nums), true
+		case rangeSuffixPattern.MatchString(rest):
+			m := rangeSuffixPattern.FindStringSubmatch(rest)
+			last, _ := strconv.Atoi(m[1])
+			return season, expandRange(first, last), true
+		default:
+			return season, []int{first}, true
+		}
+	}
+	if loc := altEpisodePattern.FindStringSubmatchIndex(name); loc != nil {
+		season, _ = strconv.Atoi(name[loc[2]:loc[3]])
+		first, _ := strconv.Atoi(name[loc[4]:loc[5]])
+		rest := name[loc[1]:]
+		if altRangeSuffixPattern.MatchString(rest) {
+			m := altRangeSuffixPattern.FindStringSubmatch(rest)
+			last, _ := strconv.Atoi(m[1])
+			return season, expandRange(first, last), true
+		}
+		return season, []int{first}, true
+	}
+	return 0, nil, false
+}
+
+// ParseEpisodeFilename best-effort extracts a season and PRIMARY episode
+// number from name — a thin wrapper over ParseEpisodeNumbers returning just
+// the first bundled episode number, for the many existing callers that only
+// ever need one (Dedup's orphan matching, autograb's grab-time lookups,
+// etc. — see ParseEpisodeNumbers' doc comment for why Dedup deliberately
+// stays on this single-episode view rather than adopting the full list).
 func ParseEpisodeFilename(name string) (season, episode int, ok bool) {
-	if m := episodePattern.FindStringSubmatch(name); m != nil {
-		season, _ = strconv.Atoi(m[1])
-		episode, _ = strconv.Atoi(m[2])
-		return season, episode, true
+	season, episodes, ok := ParseEpisodeNumbers(name)
+	if !ok {
+		return 0, 0, false
 	}
-	if m := altEpisodePattern.FindStringSubmatch(name); m != nil {
-		season, _ = strconv.Atoi(m[1])
-		episode, _ = strconv.Atoi(m[2])
-		return season, episode, true
-	}
-	return 0, 0, false
+	return season, episodes[0], true
 }
 
 // StripEpisodeMarker removes the first SxxExx/NxNN token (and everything
