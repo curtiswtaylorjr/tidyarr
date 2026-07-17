@@ -37,6 +37,12 @@ func fakeTMDBSearch(t *testing.T, results map[string]string) *tmdb.Client {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		term := r.URL.Query().Get("query")
+		// enrichment calls (credits, details) carry no "query" param — return 404
+		// so the soft-fail paths in rename.go leave genres/cast as empty slices.
+		if term == "" {
+			http.NotFound(w, r)
+			return
+		}
 		body, ok := results[term]
 		if !ok {
 			t.Fatalf("unexpected search term %q", term)
@@ -436,8 +442,10 @@ func fakeTMDBMovieDetails(t *testing.T, id int, movieJSON string) *tmdb.Client {
 		if r.URL.Path == "/search/movie" {
 			t.Fatalf("NFO fast-path should not call /search/movie")
 		}
+		// enrichment calls (credits, etc.) — soft-fail is fine, return 404
 		if r.URL.Path != "/movie/"+strconv.Itoa(id) {
-			t.Fatalf("unexpected request: %s", r.URL.Path)
+			http.NotFound(w, r)
+			return
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(movieJSON))

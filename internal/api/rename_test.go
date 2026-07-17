@@ -27,7 +27,8 @@ func fakeTMDBSeriesRenameHandler(t *testing.T, tmdbID int, title string) http.Ha
 		case r.URL.Path == "/tv/"+strconv.Itoa(tmdbID)+"/season/1":
 			w.Write([]byte(`{"episodes":[{"episode_number":1,"name":"Pilot","air_date":"2020-01-01"}]}`))
 		default:
-			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+			// enrichment calls (/tv/{id}, /tv/{id}/aggregate_credits) — soft-fail
+			http.NotFound(w, r)
 		}
 	}
 }
@@ -130,7 +131,8 @@ func fakeTMDBSearchHandler(t *testing.T, tmdbID int, title string) http.HandlerF
 			// No belongs_to_collection — most movies don't have one.
 			json.NewEncoder(w).Encode(map[string]any{"id": tmdbID, "title": title})
 		default:
-			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+			// enrichment calls (/movie/{id}/credits, etc.) — soft-fail
+			http.NotFound(w, r)
 		}
 	}
 }

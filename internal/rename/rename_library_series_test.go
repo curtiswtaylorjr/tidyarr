@@ -36,7 +36,9 @@ func fakeTMDBSeriesServer(t *testing.T, searchResults map[string]string, failSea
 		case strings.HasPrefix(r.URL.Path, "/tv/"):
 			var tmdbID, season int
 			if _, err := fmt.Sscanf(r.URL.Path, "/tv/%d/season/%d", &tmdbID, &season); err != nil {
-				t.Fatalf("unexpected path: %s", r.URL.Path)
+				// enrichment calls (/tv/{id}, /tv/{id}/aggregate_credits) — soft-fail
+				http.NotFound(w, r)
+				return
 			}
 			if failSeasons[season] {
 				http.Error(w, "not found", http.StatusNotFound)

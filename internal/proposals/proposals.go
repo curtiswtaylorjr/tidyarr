@@ -202,7 +202,7 @@ func (s *Store) ReplacePending(ctx context.Context, m mode.Mode, wf Workflow, fr
 				title, tvdb_id, tmdb_id, season_number, episode_number, year, quality_profile_id, reason, tracked_id,
 				foreign_id, item_type, candidates_json, studio, scene_date,
 				phash, duration_seconds, give_back_box, give_back_scene_id, extra_episode_numbers,
-				genres, cast
+				genres, "cast"
 			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			RETURNING id, created_at
 		`, string(p.Mode), string(p.Workflow), string(p.Status), p.SourceName, p.SourcePath, p.RootFolderPath,
@@ -231,7 +231,7 @@ func (s *Store) List(ctx context.Context, m mode.Mode, wf Workflow) ([]Proposal,
 		       draft_id, COALESCE(draft_submitted_at, ''),
 		       phash, duration_seconds, give_back_box, give_back_scene_id, COALESCE(fingerprint_submitted_at, ''),
 		       created_at, COALESCE(applied_at, ''), extra_episode_numbers,
-		       COALESCE(genres, '[]'), COALESCE(cast, '[]')
+		       COALESCE(genres, '[]'), COALESCE("cast", '[]')
 		FROM proposals WHERE mode = ? AND workflow = ? ORDER BY id DESC
 	`, string(m), string(wf))
 	if err != nil {
@@ -263,7 +263,7 @@ func (s *Store) Get(ctx context.Context, id int64) (*Proposal, error) {
 		       draft_id, COALESCE(draft_submitted_at, ''),
 		       phash, duration_seconds, give_back_box, give_back_scene_id, COALESCE(fingerprint_submitted_at, ''),
 		       created_at, COALESCE(applied_at, ''), extra_episode_numbers,
-		       COALESCE(genres, '[]'), COALESCE(cast, '[]')
+		       COALESCE(genres, '[]'), COALESCE("cast", '[]')
 		FROM proposals WHERE id = ?
 	`, id)
 	p, err := scanProposal(row)

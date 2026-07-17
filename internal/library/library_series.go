@@ -74,7 +74,7 @@ func (s *Store) UpsertSeries(ctx context.Context, series Series) (Series, error)
 		return Series{}, fmt.Errorf("encoding cast for %q: %w", series.Title, err)
 	}
 	row := s.db.QueryRowContext(ctx, `
-		INSERT INTO library_series (tmdb_id, tvdb_id, title, year, root_folder_path, genres, cast)
+		INSERT INTO library_series (tmdb_id, tvdb_id, title, year, root_folder_path, genres, "cast")
 		VALUES (?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(tmdb_id) DO UPDATE SET
 			tvdb_id = excluded.tvdb_id,
@@ -82,7 +82,7 @@ func (s *Store) UpsertSeries(ctx context.Context, series Series) (Series, error)
 			year = excluded.year,
 			root_folder_path = excluded.root_folder_path,
 			genres = excluded.genres,
-			cast = excluded.cast,
+			"cast" = excluded."cast",
 			updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
 		RETURNING id, created_at, updated_at
 	`, series.TMDBID, series.TVDBID, series.Title, series.Year, series.RootFolderPath, genresJSON, castJSON)
@@ -98,7 +98,7 @@ func (s *Store) UpsertSeries(ctx context.Context, series Series) (Series, error)
 func (s *Store) GetSeriesByTMDBID(ctx context.Context, tmdbID int) (*Series, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT id, tmdb_id, tvdb_id, title, year, root_folder_path,
-		       COALESCE(genres, '[]'), COALESCE(cast, '[]'),
+		       COALESCE(genres, '[]'), COALESCE("cast", '[]'),
 		       created_at, updated_at
 		FROM library_series WHERE tmdb_id = ?
 	`, tmdbID)
@@ -116,7 +116,7 @@ func (s *Store) GetSeriesByTMDBID(ctx context.Context, tmdbID int) (*Series, err
 func (s *Store) ListSeries(ctx context.Context) ([]Series, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, tmdb_id, tvdb_id, title, year, root_folder_path,
-		       COALESCE(genres, '[]'), COALESCE(cast, '[]'),
+		       COALESCE(genres, '[]'), COALESCE("cast", '[]'),
 		       created_at, updated_at
 		FROM library_series ORDER BY title
 	`)

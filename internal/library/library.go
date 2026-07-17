@@ -96,7 +96,7 @@ func (s *Store) Upsert(ctx context.Context, item Item) (Item, error) {
 		return Item{}, fmt.Errorf("encoding cast for %q: %w", item.Title, err)
 	}
 	row := s.db.QueryRowContext(ctx, `
-		INSERT INTO library_items (mode, tmdb_id, title, year, file_path, root_folder_path, phash, phash_file_size, phash_file_mtime, genres, cast)
+		INSERT INTO library_items (mode, tmdb_id, title, year, file_path, root_folder_path, phash, phash_file_size, phash_file_mtime, genres, "cast")
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(mode, tmdb_id) DO UPDATE SET
 			title = excluded.title,
@@ -107,7 +107,7 @@ func (s *Store) Upsert(ctx context.Context, item Item) (Item, error) {
 			phash_file_size = excluded.phash_file_size,
 			phash_file_mtime = excluded.phash_file_mtime,
 			genres = excluded.genres,
-			cast = excluded.cast,
+			"cast" = excluded."cast",
 			updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
 		RETURNING id, created_at, updated_at
 	`, string(item.Mode), item.TMDBID, item.Title, item.Year, item.FilePath, item.RootFolderPath, item.PHash, item.PHashFileSize, item.PHashFileMTime, genresJSON, castJSON)
@@ -143,7 +143,7 @@ func (s *Store) List(ctx context.Context, m mode.Mode) ([]Item, error) {
 		SELECT li.id, li.mode, li.tmdb_id, li.title, li.year, li.file_path, li.root_folder_path,
 		       li.phash, li.phash_file_size, li.phash_file_mtime, li.created_at, li.updated_at,
 		       COALESCE(c.tmdb_collection_id, 0), COALESCE(c.name, ''),
-		       COALESCE(li.genres, '[]'), COALESCE(li.cast, '[]')
+		       COALESCE(li.genres, '[]'), COALESCE(li."cast", '[]')
 		FROM library_items li
 		LEFT JOIN library_collections c ON c.id = li.collection_id
 		WHERE li.mode = ? ORDER BY li.title
@@ -170,7 +170,7 @@ func (s *Store) Get(ctx context.Context, id int64) (*Item, error) {
 		SELECT li.id, li.mode, li.tmdb_id, li.title, li.year, li.file_path, li.root_folder_path,
 		       li.phash, li.phash_file_size, li.phash_file_mtime, li.created_at, li.updated_at,
 		       COALESCE(c.tmdb_collection_id, 0), COALESCE(c.name, ''),
-		       COALESCE(li.genres, '[]'), COALESCE(li.cast, '[]')
+		       COALESCE(li.genres, '[]'), COALESCE(li."cast", '[]')
 		FROM library_items li
 		LEFT JOIN library_collections c ON c.id = li.collection_id
 		WHERE li.id = ?
@@ -193,7 +193,7 @@ func (s *Store) GetByTMDBID(ctx context.Context, m mode.Mode, tmdbID int) (*Item
 		SELECT li.id, li.mode, li.tmdb_id, li.title, li.year, li.file_path, li.root_folder_path,
 		       li.phash, li.phash_file_size, li.phash_file_mtime, li.created_at, li.updated_at,
 		       COALESCE(c.tmdb_collection_id, 0), COALESCE(c.name, ''),
-		       COALESCE(li.genres, '[]'), COALESCE(li.cast, '[]')
+		       COALESCE(li.genres, '[]'), COALESCE(li."cast", '[]')
 		FROM library_items li
 		LEFT JOIN library_collections c ON c.id = li.collection_id
 		WHERE li.mode = ? AND li.tmdb_id = ?
