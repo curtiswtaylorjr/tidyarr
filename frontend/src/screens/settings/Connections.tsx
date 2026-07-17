@@ -20,6 +20,7 @@ import {
 import {
   CONNECTION_SERVICES,
   SERVICES_WITH_FIXED_URL,
+  SERVICES_WITH_HOST_LOOKUP,
   SERVICES_WITH_USERNAME,
   buildConnectionUpsertBody,
   deleteConnection,
@@ -81,7 +82,7 @@ export const ConnectionRow: Component<{
   // needsFixedUrl services have a hardcoded server-side base URL — the row shows
   // no URL input, and save/test skip the "url is required" guard for them.
   const needsFixedUrl = SERVICES_WITH_FIXED_URL.includes(props.service);
-  const allowHostProbe = props.service === "jellyfin" || props.service === "stash";
+  const allowHostProbe = SERVICES_WITH_HOST_LOOKUP.includes(props.service);
   const [url, setUrl] = createSignal(props.existing?.url ?? "");
   const [username, setUsername] = createSignal(props.existing?.username ?? "");
   const [key, setKey] = createSignal("");
@@ -271,13 +272,13 @@ export const ConnectionRow: Component<{
             </Show>
             <Show when={allowHostProbe}>
               <div class="mt-1">
-                On a different host? Probe a specific LAN IP:
+                On a different host? Look up by IP or hostname:
                 <div class="mt-1 flex gap-2">
                   <input
                     type="text"
                     class={`${inputClass} !w-40 !py-1 !text-xs`}
                     placeholder="e.g. 10.1.10.4"
-                    aria-label={`Probe host for ${props.service}`}
+                    aria-label={`Look up host for ${props.service}`}
                     value={probeHost()}
                     onInput={(e) => setProbeHost(e.currentTarget.value)}
                   />
@@ -285,7 +286,7 @@ export const ConnectionRow: Component<{
                     class="!px-2 !py-1 !text-xs"
                     onClick={() => void doProbe()}
                   >
-                    Probe
+                    Look up
                   </Button>
                 </div>
                 <Show when={probed()}>

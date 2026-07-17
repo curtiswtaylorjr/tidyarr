@@ -80,6 +80,10 @@ export const SERVICES_WITH_USERNAME = ["qbittorrent", "nzbget"];
 // exactly these services (mirrors fixedURLServices in internal/api/handler.go).
 export const SERVICES_WITH_FIXED_URL = ["tmdb", "stashdb", "fansdb", "tpdb"];
 
+// SERVICES_WITH_HOST_LOOKUP are the services the netscan package can identify
+// on the LAN, enabling a "look up on a different host" input on their rows.
+export const SERVICES_WITH_HOST_LOOKUP = ["prowlarr", "qbittorrent", "nzbget", "jellyfin", "stash"];
+
 // CONNECTION_SERVICES is the full ordered set the Connections table lists, one
 // row each (verbatim from index.html). There is no radarr/sonarr/whisparr — SAK
 // owns those libraries now (see internal/library's package doc).
