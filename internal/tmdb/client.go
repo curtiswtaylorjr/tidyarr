@@ -228,22 +228,26 @@ type CollectionRef struct {
 // cheap extras from the same response. Collection carries the
 // belongs_to_collection franchise data (zero value when absent).
 type MovieDetails struct {
-	ID         int
-	Title      string
-	PosterPath string // "" if TMDB has none on file
-	IMDBID     string // "" if TMDB has none on file
-	Runtime    int    // minutes; 0 if TMDB reports null
-	Genres     []string
-	Collection CollectionRef // zero (ID==0) when movie has no franchise collection
+	ID          int
+	Title       string
+	PosterPath  string // "" if TMDB has none on file
+	IMDBID      string // "" if TMDB has none on file
+	Runtime     int    // minutes; 0 if TMDB reports null
+	Overview    string
+	ReleaseDate string // "YYYY-MM-DD" or "" if absent
+	Genres      []string
+	Collection  CollectionRef // zero (ID==0) when movie has no franchise collection
 }
 
 type movieDetailsResponse struct {
-	ID         int    `json:"id"`
-	Title      string `json:"title"`
-	PosterPath string `json:"poster_path"`
-	IMDBID     string `json:"imdb_id"`
-	Runtime    int    `json:"runtime"`
-	Genres     []struct {
+	ID          int    `json:"id"`
+	Title       string `json:"title"`
+	PosterPath  string `json:"poster_path"`
+	IMDBID      string `json:"imdb_id"`
+	Runtime     int    `json:"runtime"`
+	Overview    string `json:"overview"`
+	ReleaseDate string `json:"release_date"`
+	Genres      []struct {
 		Name string `json:"name"`
 	} `json:"genres"`
 	BelongsToCollection struct {
@@ -263,12 +267,14 @@ func (c *Client) MovieDetails(ctx context.Context, tmdbID int) (MovieDetails, er
 		return MovieDetails{}, err
 	}
 	details := MovieDetails{
-		ID:         resp.ID,
-		Title:      resp.Title,
-		PosterPath: resp.PosterPath,
-		IMDBID:     resp.IMDBID,
-		Runtime:    resp.Runtime,
-		Genres:     make([]string, len(resp.Genres)),
+		ID:          resp.ID,
+		Title:       resp.Title,
+		PosterPath:  resp.PosterPath,
+		IMDBID:      resp.IMDBID,
+		Runtime:     resp.Runtime,
+		Overview:    resp.Overview,
+		ReleaseDate: resp.ReleaseDate,
+		Genres:      make([]string, len(resp.Genres)),
 	}
 	for i, g := range resp.Genres {
 		details.Genres[i] = g.Name

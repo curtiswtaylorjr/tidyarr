@@ -26,6 +26,7 @@ import (
 	"github.com/curtiswtaylorjr/sakms/internal/library"
 	"github.com/curtiswtaylorjr/sakms/internal/mode"
 	"github.com/curtiswtaylorjr/sakms/internal/naming"
+	"github.com/curtiswtaylorjr/sakms/internal/nfo"
 	"github.com/curtiswtaylorjr/sakms/internal/place"
 	"github.com/curtiswtaylorjr/sakms/internal/proposals"
 	"github.com/curtiswtaylorjr/sakms/internal/searchterm"
@@ -204,6 +205,39 @@ func proposeOneLibrary(
 	p := proposals.Proposal{
 		Mode: mode.Movies, Workflow: proposals.Rename,
 		SourceName: entry.Name, SourcePath: entry.Path, RootFolderPath: foundRoot,
+	}
+
+	// NFO fast-path: if a Kodi/Jellyfin .nfo sidecar is present and carries
+	// a TMDB ID, use it directly — no fuzzy filename search, no confidence
+	// gate. The ID in the .nfo is authoritative; still run the duplicate and
+	// kids-root checks that follow.
+	if hint := nfo.ReadSidecar(entry.Path); hint.TMDBID != 0 {
+		if byTMDB[hint.TMDBID] {
+			p.Status = proposals.Unmatched
+			p.Reason = fmt.Sprintf(".nfo TMDB id %d appears to already be in the library — leaving in place for manual review", hint.TMDBID)
+			return p
+		}
+		details, err := sess.TMDB.MovieDetails(ctx, hint.TMDBID)
+		if err != nil {
+			p.Status = proposals.Unmatched
+			p.Reason = fmt.Sprintf(".nfo TMDB id %d: lookup failed: %v", hint.TMDBID, err)
+			return p
+		}
+		targetRoot := generalRoot
+		switch {
+		case foundRoot == sess.KidsRootPath:
+			targetRoot = sess.KidsRootPath
+		case sess.KidsRootPath != "" && sess.MainstreamAI != nil:
+			if result, err := classify.WithAI(ctx, sess.MainstreamAI, details.Title, details.Overview); err == nil && result.IsKids {
+				targetRoot = sess.KidsRootPath
+			}
+		}
+		p.Status = proposals.Pending
+		p.Title = details.Title
+		p.TMDBID = details.ID
+		p.Year = yearFromReleaseDate(details.ReleaseDate)
+		p.RootFolderPath = targetRoot
+		return p
 	}
 
 	term := searchterm.FromName(entry.Name)

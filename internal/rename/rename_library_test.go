@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	"github.com/curtiswtaylorjr/sakms/internal/db"
@@ -423,5 +424,110 @@ func TestApplyLibrary_NoMoveWhenAlreadyCorrectlyPlaced(t *testing.T) {
 	// same unchanged path should be reported.
 	if len(changes) != 0 {
 		t.Errorf("expected zero PathChanges when the file didn't move, got %+v", changes)
+	}
+}
+
+// fakeTMDBMovieDetails returns a *tmdb.Client whose /movie/{id} endpoint
+// returns movieJSON for the given id, and rejects /search/movie (the NFO
+// fast-path must not fall through to the search).
+func fakeTMDBMovieDetails(t *testing.T, id int, movieJSON string) *tmdb.Client {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/search/movie" {
+			t.Fatalf("NFO fast-path should not call /search/movie")
+		}
+		if r.URL.Path != "/movie/"+strconv.Itoa(id) {
+			t.Fatalf("unexpected request: %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(movieJSON))
+	}))
+	t.Cleanup(srv.Close)
+	return tmdb.New(tmdb.Config{BaseURL: srv.URL, APIKey: "test-key"}, srv.Client())
+}
+
+func TestScanLibrary_NFOSidecarSkipsFuzzySearch(t *testing.T) {
+	root := t.TempDir()
+	// ScanRootFolder returns the directory as the atomic entry — the .nfo
+	// must live inside the directory, not alongside it.
+	dir := filepath.Join(root, "The.Matrix.1999.BluRay")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	videoPath := filepath.Join(dir, "The.Matrix.1999.BluRay.mkv")
+	if err := os.WriteFile(videoPath, []byte{}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Same-name .nfo sidecar inside the folder — matches SidecarPaths' first
+	// candidate when entryPath is a directory.
+	nfoPath := filepath.Join(dir, "The.Matrix.1999.BluRay.nfo")
+	if err := os.WriteFile(nfoPath, []byte(`<movie><tmdbid>603</tmdbid></movie>`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	sess := &mode.Session{
+		Mode: mode.Movies,
+		TMDB: fakeTMDBMovieDetails(t, 603,
+			`{"id":603,"title":"The Matrix","release_date":"1999-03-31","overview":"A hacker discovers reality."}`),
+	}
+
+	got, err := ScanLibrary(context.Background(), sess, newTestLibraryStore(t), root, naming.Jellyfin, DefaultConfidenceThreshold)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected 1 proposal, got %d", len(got))
+	}
+	p := got[0]
+	if p.Status != proposals.Pending {
+		t.Errorf("expected Pending, got %v: %s", p.Status, p.Reason)
+	}
+	if p.TMDBID != 603 {
+		t.Errorf("expected TMDBID 603, got %d", p.TMDBID)
+	}
+	if p.Title != "The Matrix" {
+		t.Errorf("expected title %q, got %q", "The Matrix", p.Title)
+	}
+}
+
+func TestScanLibrary_NFODuplicateMarkedUnmatched(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "The.Matrix.1999.BluRay")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	videoPath := filepath.Join(dir, "The.Matrix.1999.BluRay.mkv")
+	if err := os.WriteFile(videoPath, []byte{}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// .nfo inside the directory — same placement as the skip-fuzzy-search test.
+	nfoPath := filepath.Join(dir, "The.Matrix.1999.BluRay.nfo")
+	if err := os.WriteFile(nfoPath, []byte(`<movie><tmdbid>603</tmdbid></movie>`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	libStore := newTestLibraryStore(t)
+	if _, err := libStore.Upsert(context.Background(), library.Item{
+		Mode: mode.Movies, TMDBID: 603, Title: "The Matrix", FilePath: "/other/matrix.mkv",
+	}); err != nil {
+		t.Fatalf("seeding library: %v", err)
+	}
+
+	// The TMDB server is never reached — the duplicate check fires before
+	// the MovieDetails call. An unreachable base URL proves this.
+	sess := &mode.Session{
+		Mode: mode.Movies,
+		TMDB: tmdb.New(tmdb.Config{BaseURL: "http://127.0.0.1:0", APIKey: "test"}, nil),
+	}
+
+	got, err := ScanLibrary(context.Background(), sess, libStore, root, naming.Jellyfin, DefaultConfidenceThreshold)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected 1 proposal, got %d", len(got))
+	}
+	if got[0].Status != proposals.Unmatched {
+		t.Errorf("expected Unmatched for duplicate TMDB id from .nfo, got %v", got[0].Status)
 	}
 }
