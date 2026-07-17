@@ -169,6 +169,47 @@ organizational authority.
 
 ## Recently shipped (outside this backlog)
 
+### System dashboard — shipped 2026-07-17
+Fourth item off the "least complex to most complex" backlog ordering.
+New `internal/sysinfo` package reads five Linux pseudo-filesystem sources
+to provide container-scoped and server-level resource metrics with no new
+Go dependencies (pure stdlib + `runtime` + `syscall`):
+
+- **CPU %** (container): `/sys/fs/cgroup/cpu.stat` `usage_usec` delta over
+  elapsed time, normalized across all CPUs.
+- **RAM** (container): `/sys/fs/cgroup/memory.current` + `memory.max`
+  (unlimited when file reads "max").
+- **Network rx/tx BPS** (container): `/proc/net/dev` — container-scoped
+  via network namespace isolation; loopback excluded.
+- **Container disk I/O** (BPS): `/sys/fs/cgroup/io.stat` `rbytes`/`wbytes`
+  sum across all cgroup block devices.
+- **Server disk I/O** (BPS per disk): `/proc/diskstats` filtered to whole
+  physical devices only (`sd[a-z]+`, `nvme\d+n\d+`, etc. — partition
+  entries with numeric/`p\d+` suffixes excluded by anchored regexp).
+- **Storage usage** (data volume): `syscall.Statfs("/data")` —
+  `Bavail`/`Blocks * Frsize` gives available and total bytes for the
+  container's persistent data mount.
+
+`GET /api/admin/sysinfo/stream` is a server-sent events endpoint (SSE —
+no external dependency; pure HTTP `text/event-stream` via Go's stdlib
+`http.Flusher`). It fires every 2 seconds. Transport errors use the
+browser's native SSE reconnect; in-stream sample-read failures emit a
+named `sampleError` SSE event (distinct from transport errors so the
+frontend can surface them without closing the connection). The endpoint
+inherits the same `auth.Middleware` session/`X-Api-Key` gate as all other
+`/api/admin/*` routes.
+
+Frontend: new `Dashboard` screen (`EventSource` + SolidJS signals), cards
+for each metric group (fill bars for CPU/RAM/Storage, BPS labels for
+network and disk), `formatGB` helper for storage. Dashboard nav item added
+as the first entry in the sidebar. 10 new Go tests (9 sysinfo package, 3
+SSE handler); 4 new frontend tests; 287 total passing. `pnpm build` clean.
+
+One `UNVERIFIED ASSUMPTION` note: the storage path `/data` assumes the
+container's data volume is mounted there — confirmed correct for the
+current iSCSI bind-mount setup; will remain correct when the planned
+TrueNAS NFS mount replaces it (same container path, different backing).
+
 ### Bulk apply — shipped 2026-07-17
 Third item off the "least complex to most complex" backlog ordering — a
 deliberate, documented reversal of the "one item at a time" rule (see
@@ -533,12 +574,13 @@ The sidebar/SPA *shell* already shipped 2026-07-13 (see "Recently shipped"
 above) — this entry previously described the whole redesign, shell
 included, as not-yet-started, which was stale; corrected 2026-07-16 (same
 audit as the Whisparr-elimination fix above). Bulk apply's multi-select
-tables shipped 2026-07-17 (see "Recently shipped" below). What's genuinely
-still backlog is: the system dashboard and Collections/structured tagging
-UI — see "UI mockup reference" below for the visual direction on both, and
-their own backlog entries further down for scope detail. Scope decision
-(2026-07-10, still holds): build each wrapping SAK's *existing* data and
-workflows — do not treat the mockups as a literal feature spec.
+tables shipped 2026-07-17 (see "Recently shipped" below). The system
+dashboard shipped 2026-07-17 (see "Recently shipped" below). What's
+genuinely still backlog is: Collections/structured tagging UI — see "UI
+mockup reference" below for the visual direction, and its own backlog entry
+further down for scope detail. Scope decision (2026-07-10, still holds):
+build each wrapping SAK's *existing* data and workflows — do not treat the
+mockups as a literal feature spec.
 
 ### Unified downloader
 Consolidate qBittorrent and NZBGet the same way Radarr/Sonarr/Whisparr were
@@ -628,15 +670,7 @@ started — no design, no client package, no schema.
   explicitly considered and rejected — no clear win over the existing REST
   surface, would be a rewrite for no benefit.
 
-### System dashboard
-Live download/library-health widgets (see "Library Dashboard" mockup
-below). Download progress can reuse the existing Grabs list/status — just
-needs a live-refresh view. Library Health (matched/unmatched/error counts)
-is cheap — aggregating what `library.Store`/`proposals.Store` already
-track. Network/disk I/O has **no existing data source at all** — would mean
-reading `/proc/net/dev`/`/proc/diskstats` or similar, new capability with no
-current use case driving it. Least connected to the rest of the backlog;
-lowest priority.
+### System dashboard — shipped 2026-07-17, see "Recently shipped" below.
 
 ### Dropped from scope
 - **Token/regex-based custom renaming engine** — considered, then
