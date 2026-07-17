@@ -228,6 +228,91 @@ func TestParseEpisodeFilename(t *testing.T) {
 	}
 }
 
+func TestParseEpisodeNumbers(t *testing.T) {
+	cases := []struct {
+		name       string
+		wantSeason int
+		wantEps    []int
+		wantOK     bool
+	}{
+		// Single-episode — must match ParseEpisodeFilename's existing behavior.
+		{"Show.Name.S03E05.1080p.mkv", 3, []int{5}, true},
+		{"Show Name - 3x05 - Episode Title.mkv", 3, []int{5}, true},
+		{"s1e2.mkv", 1, []int{2}, true},
+		{"Show Name Complete Season.mkv", 0, nil, false},
+		// Concatenated multi-episode.
+		{"Show.Name.S01E01E02E03.mkv", 1, []int{1, 2, 3}, true},
+		{"Show.Name.S01E01E02.mkv", 1, []int{1, 2}, true},
+		// Dash range (SxxExx form and alt NxNN form), both "-Eyy" and "-yy".
+		{"Show.Name.S01E01-E02.mkv", 1, []int{1, 2}, true},
+		{"Show.Name.S01E01-02.mkv", 1, []int{1, 2}, true},
+		{"Show Name - 01x01-02.mkv", 1, []int{1, 2}, true},
+		// Pathological range span is rejected (falls back to single episode).
+		{"Show.Name.S01E01-E99.mkv", 1, []int{1}, true},
+	}
+	for _, c := range cases {
+		season, episodes, ok := ParseEpisodeNumbers(c.name)
+		if ok != c.wantOK || season != c.wantSeason || !intSlicesEqual(episodes, c.wantEps) {
+			t.Errorf("ParseEpisodeNumbers(%q) = (%d, %v, %v), want (%d, %v, %v)",
+				c.name, season, episodes, ok, c.wantSeason, c.wantEps, c.wantOK)
+		}
+	}
+}
+
+func intSlicesEqual(a, b []int) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func TestCountEpisodesByFilePath(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	series, err := s.UpsertSeries(ctx, Series{TMDBID: 500, Title: "Shared File Show", RootFolderPath: "/tv"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// No episode references this path yet.
+	count, err := s.CountEpisodesByFilePath(ctx, "/tv/Show/Season 01/Show S01E01-E02.mkv")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected 0, got %d", count)
+	}
+
+	sharedPath := "/tv/Show/Season 01/Show S01E01-E02.mkv"
+	if _, err := s.UpsertEpisode(ctx, Episode{SeriesID: series.ID, SeasonNumber: 1, EpisodeNumber: 1, FilePath: sharedPath}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	count, err = s.CountEpisodesByFilePath(ctx, sharedPath)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected 1, got %d", count)
+	}
+
+	if _, err := s.UpsertEpisode(ctx, Episode{SeriesID: series.ID, SeasonNumber: 1, EpisodeNumber: 2, FilePath: sharedPath}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	count, err = s.CountEpisodesByFilePath(ctx, sharedPath)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("expected 2 once a second episode shares the same file path, got %d", count)
+	}
+}
+
 func TestStripEpisodeMarker(t *testing.T) {
 	got := StripEpisodeMarker("Show.Name.S03E05.1080p.WEB-DL")
 	if got != "Show.Name" {

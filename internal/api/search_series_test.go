@@ -93,6 +93,96 @@ func TestCheckImportHandler_Series_SingleEpisode_PerformsImport(t *testing.T) {
 	}
 }
 
+// TestCheckImportHandler_Series_LogicalSplit_RecordsBothEpisodes proves the
+// confirmed pre-fix bug is actually fixed: a directly-grabbed logical-
+// episode-split file ("S01E01-E02") used to record only episode 1 (the
+// first match ParseEpisodeFilename's FindStringSubmatch ever returned) —
+// episode 2 was silently dropped forever. This asserts BOTH episode rows
+// exist, pointing at the SAME relocated file.
+func TestCheckImportHandler_Series_LogicalSplit_RecordsBothEpisodes(t *testing.T) {
+	dir := t.TempDir()
+	downloadDir := filepath.Join(dir, "downloads", "Some.Show.S01E01-E02.1080p.WEB-DL.x264-GROUP")
+	tvRoot := filepath.Join(dir, "TV")
+	if err := os.MkdirAll(downloadDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.MkdirAll(tvRoot, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(downloadDir, "Some.Show.S01E01-E02.mkv"), []byte("fake video"), 0o644); err != nil {
+		t.Fatalf("writing file: %v", err)
+	}
+
+	fakeQB := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v2/auth/login":
+			http.SetCookie(w, &http.Cookie{Name: "SID", Value: "test-sid"})
+			w.Write([]byte("Ok."))
+		case "/api/v2/torrents/info":
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`[{"hash":"abc123","state":"uploading","progress":1,"content_path":"` + downloadDir + `"}]`))
+		default:
+			t.Fatalf("unexpected request: %s", r.URL.Path)
+		}
+	}))
+	defer fakeQB.Close()
+
+	connStore, propStore, allowStore, settingsStore, grabsStore, libStore, slidersStore, traktStore, adultNewestRowStore, adultNewestReleaseStore, rssFeedsStore := testStores(t)
+	ctx := context.Background()
+	if err := connStore.UpsertWithUsername(ctx, "qbittorrent", fakeQB.URL, "wade", "hunter2"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	g, err := grabsStore.Create(ctx, grabs.Grab{
+		Mode: mode.Series, Title: "Some Show", TMDBID: 555, SeasonNumber: 1, EpisodeNumber: 1, SeasonSpecified: true,
+		Indexer: "I", Protocol: "torrent", DownloadClient: "qbittorrent",
+		ClientRef: "abc123", RootFolderPath: tvRoot,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	srv := httptest.NewServer(NewMux(testHTTPClient(), connStore, propStore, allowStore, testProber(t), testPHasher(t), testVideoHasher(t), settingsStore, grabsStore, libStore, slidersStore, traktStore, adultNewestRowStore, adultNewestReleaseStore, rssFeedsStore, nil))
+	defer srv.Close()
+
+	resp, err := http.Post(srv.URL+"/api/grabs/"+strconv.FormatInt(g.ID, 10)+"/check-import", "application/json", nil)
+	if err != nil {
+		t.Fatalf("POST failed: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	var updated grabs.Grab
+	if err := json.NewDecoder(resp.Body).Decode(&updated); err != nil {
+		t.Fatalf("decoding response: %v", err)
+	}
+	if updated.Status != grabs.Imported {
+		t.Errorf("expected status Imported, got %q", updated.Status)
+	}
+
+	series, err := libStore.GetSeriesByTMDBID(ctx, 555)
+	if err != nil {
+		t.Fatalf("expected the series to be recorded, got err=%v", err)
+	}
+	episodes, err := libStore.ListEpisodes(ctx, series.ID)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(episodes) != 2 {
+		t.Fatalf("expected both bundled episodes to be recorded, got %d: %+v", len(episodes), episodes)
+	}
+	if episodes[0].SeasonNumber != 1 || episodes[0].EpisodeNumber != 1 || episodes[0].FilePath == "" {
+		t.Errorf("unexpected episode 1: %+v", episodes[0])
+	}
+	if episodes[1].SeasonNumber != 1 || episodes[1].EpisodeNumber != 2 || episodes[1].FilePath == "" {
+		t.Errorf("unexpected episode 2: %+v", episodes[1])
+	}
+	if episodes[0].FilePath != episodes[1].FilePath {
+		t.Errorf("expected both episodes to point at the SAME relocated file, got %q vs %q", episodes[0].FilePath, episodes[1].FilePath)
+	}
+}
+
 // TestCheckImportHandler_Series_SeasonPack_PerformsImport proves a
 // season-pack grab (a directory containing multiple episode files) records
 // one episode row per file, not just one for the whole pack.

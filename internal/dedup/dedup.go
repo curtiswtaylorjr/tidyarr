@@ -16,6 +16,14 @@
 // runs its own libStore-backed ScanLibrary*/ApplyLibrary* sibling, dispatched
 // at the API layer.
 //
+// CORRECTION (logical episode-splitting): the UNIQUE(series_id, season,
+// episode) constraint rules out ambiguity for ONE key, but does NOT mean a
+// file backing that key is exclusively used there — a logical-episode-split
+// file (library.ParseEpisodeNumbers) legitimately backs TWO keys' FilePath
+// at once (e.g. a "S01E01-E02" file is both episode 1's and episode 2's
+// row). ApplyLibrarySeries' delete step accounts for this: see its own doc
+// comment and library.Store.CountEpisodesByFilePath.
+//
 // Quality comparison never trusts a *arr app's own reported file quality —
 // every candidate, tracked or not, gets ffprobed directly by SAK itself
 // (see internal/mediainfo and internal/place). This sidesteps depending on
@@ -28,6 +36,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -623,14 +632,31 @@ func ScanLibrarySeries(ctx context.Context, sess *mode.Session, libStore *librar
 // ApplyLibrarySeries is Dedup's Series-library counterpart to ApplyLibrary.
 // Unlike Movies, a losing tracked candidate never needs an explicit row
 // delete: the (series, season, episode) row the tracked loser occupied is
-// simply overwritten by the winner's file path via UpsertEpisode — there's
-// nothing else that could ever point at that exact slot.
+// simply overwritten by the winner's file path via UpsertEpisode.
 //
-// changes accumulates one Deleted PathChange per removed loser (the winner
-// never moves, so it never appears in changes) — a named return so a
-// post-removal failure further down still reports every loser that was
-// actually removed to the caller for Session.NotifyPlayers. keepAll never
-// removes anything, so it always returns nil changes.
+// A losing candidate's FILE, however, is NOT always safe to delete — a
+// logical-episode-split file (library.ParseEpisodeNumbers) can legitimately
+// back a DIFFERENT episode's row too (e.g. episode 1 and episode 2 sharing
+// one "S01E01-E02" file). If episode 1's dedup group picks a better
+// standalone copy of episode 1 and the shared file loses, deleting it
+// outright would orphan episode 2's row — a live, silent violation of this
+// project's "no drift" mission (see CLAUDE.md's Mission section), not a
+// hypothetical. Each losing candidate's path is checked via
+// library.Store.CountEpisodesByFilePath before removal: a count <= 1 means
+// only the row this Apply call is about to overwrite (or nothing) claims
+// it, safe to delete exactly as before; a count > 1 means another episode's
+// row still needs this file — skip the physical delete and log why, but
+// still let this proposal's own key move on to the winner via UpsertEpisode
+// below (that row's own reference to the shared path is what's being
+// replaced, not the file itself).
+//
+// changes accumulates one Deleted PathChange per ACTUALLY removed loser
+// (the winner never moves, so it never appears in changes; a loser skipped
+// via the shared-file guard above doesn't either, since nothing was
+// deleted) — a named return so a post-removal failure further down still
+// reports every loser that was actually removed to the caller for
+// Session.NotifyPlayers. keepAll never removes anything, so it always
+// returns nil changes.
 func ApplyLibrarySeries(ctx context.Context, libStore *library.Store, p proposals.Proposal, keepIndex *int, keepAll bool) (episodeID int64, changes []mode.PathChange, err error) {
 	if p.Status != proposals.Pending {
 		return 0, nil, fmt.Errorf("proposal %d is %q, not pending — nothing to apply", p.ID, p.Status)
@@ -661,12 +687,27 @@ func ApplyLibrarySeries(ctx context.Context, libStore *library.Store, p proposal
 		if i == idx {
 			continue
 		}
+		if c.Path == "" {
+			continue
+		}
+		// Shared-file guard (see this function's doc comment): don't delete
+		// a losing candidate's file out from under a DIFFERENT episode's
+		// row that still references it. refCount <= 1 means only the row
+		// this Apply call is about to overwrite (or nothing) claims this
+		// path — a count that already existed and was safe to delete before
+		// logical episode-splitting existed.
+		refCount, countErr := libStore.CountEpisodesByFilePath(ctx, c.Path)
+		if countErr != nil {
+			return 0, changes, fmt.Errorf("checking whether %s is still referenced: %w", c.Path, countErr)
+		}
+		if refCount > 1 {
+			log.Printf("dedup: skipping delete of %s — still referenced by %d episode row(s) other than this proposal's own (logical episode-split file)", c.Path, refCount)
+			continue
+		}
 		if err := os.Remove(c.Path); err != nil && !os.IsNotExist(err) {
 			return 0, changes, fmt.Errorf("removing %s: %w", c.Path, err)
 		}
-		if c.Path != "" {
-			changes = append(changes, mode.PathChange{Path: c.Path, Kind: mode.Deleted})
-		}
+		changes = append(changes, mode.PathChange{Path: c.Path, Kind: mode.Deleted})
 	}
 
 	if winner.TrackedID != 0 {

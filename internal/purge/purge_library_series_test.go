@@ -139,6 +139,48 @@ func TestApplyLibrarySeries_DeletesAllEpisodeFilesAndSeries(t *testing.T) {
 	}
 }
 
+// TestApplyLibrarySeries_SharedFileReportsOneDeletedPathChange proves the
+// dedup fix for a logical-episode-split file (two episode rows sharing one
+// FilePath): the whole series still deletes atomically (both rows and the
+// one physical file), but the returned changes must report exactly ONE
+// Deleted PathChange for that shared file, not two — the second episode
+// row's delete attempt hits the file the first row's delete already
+// removed (a safe IsNotExist no-op), and must not double-count.
+func TestApplyLibrarySeries_SharedFileReportsOneDeletedPathChange(t *testing.T) {
+	dir := t.TempDir()
+	sharedPath := filepath.Join(dir, "s01e01-e02.mkv")
+	if err := os.WriteFile(sharedPath, []byte("data"), 0o644); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	libStore := newTestLibraryStore(t)
+	ctx := context.Background()
+	series, err := libStore.UpsertSeries(ctx, library.Series{TMDBID: 1, Title: "Flagged Show", RootFolderPath: dir})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, err := libStore.UpsertEpisode(ctx, library.Episode{SeriesID: series.ID, SeasonNumber: 1, EpisodeNumber: 1, FilePath: sharedPath}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, err := libStore.UpsertEpisode(ctx, library.Episode{SeriesID: series.ID, SeasonNumber: 1, EpisodeNumber: 2, FilePath: sharedPath}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	changes, err := ApplyLibrarySeries(ctx, libStore, proposals.Proposal{
+		ID: 1, Status: proposals.Pending, Title: "Flagged Show", TrackedID: int(series.ID),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if _, err := os.Stat(sharedPath); !os.IsNotExist(err) {
+		t.Errorf("expected the shared file to be deleted, stat returned: %v", err)
+	}
+	if len(changes) != 1 || changes[0].Path != sharedPath || changes[0].Kind != mode.Deleted {
+		t.Errorf("expected exactly 1 Deleted PathChange for the shared file, got %+v", changes)
+	}
+}
+
 func TestApplyLibrarySeries_RejectsNonPendingProposal(t *testing.T) {
 	libStore := newTestLibraryStore(t)
 	for _, status := range []proposals.Status{proposals.Applied, proposals.Dismissed, proposals.Unmatched} {

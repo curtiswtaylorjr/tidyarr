@@ -266,6 +266,33 @@ describe("Rename — mode-specific columns", () => {
     expect(screen.queryByText("PHash")).toBeNull();
   });
 
+  it("Series renders a range (e.g. \"1-2\") in the Episode column for a logical-episode-split proposal", async () => {
+    stubFetch((url) => {
+      if (url.includes("/api/modes/movies/rename/proposals"))
+        return jsonResponse([]);
+      if (url.includes("/api/modes/series/rename/proposals"))
+        return jsonResponse([
+          proposal({
+            id: 4,
+            sourceName: "Show.S01E01-E02",
+            title: "Some Show",
+            seasonNumber: 1,
+            episodeNumber: 1,
+            extraEpisodeNumbers: [2],
+          }),
+        ]);
+      throw new Error("unexpected fetch: " + url);
+    });
+
+    render(() => <Rename />);
+    fireEvent.click(await screen.findByText("Series"));
+    await screen.findByText("Show.S01E01-E02");
+
+    expect(screen.getByText("1-2")).toBeInTheDocument();
+    // Not a bare primary-episode-only "1" — the extra number must show too.
+    expect(screen.queryByText("2")).toBeNull();
+  });
+
   it("Adult shows Studio/Date/PHash columns, no Year/Season/Episode", async () => {
     stubFetch((url) => {
       if (url.includes("/api/modes/movies/rename/proposals"))

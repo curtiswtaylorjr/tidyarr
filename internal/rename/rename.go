@@ -429,12 +429,21 @@ func proposeOneEpisodeLibrary(
 		SourceName: name, SourcePath: videoPath, RootFolderPath: foundRoot,
 	}
 
-	season, episode, ok := library.ParseEpisodeFilename(name)
+	season, episodes, ok := library.ParseEpisodeNumbers(name)
 	if !ok {
 		p.Status = proposals.Unmatched
 		p.Reason = fmt.Sprintf("could not determine season/episode from %q", name)
 		return p
 	}
+	// episode is the PRIMARY (lowest) episode number — the tracked[]/TMDB
+	// confirmation checks below stay keyed on it alone, a deliberate v1
+	// simplification for a logical-episode-split file (see
+	// library.ParseEpisodeNumbers' doc comment): if the primary episode is
+	// already tracked but a bundled extra isn't, this still reports
+	// "already in the library" for the whole file rather than partially
+	// re-proposing just the missing extra.
+	episode := episodes[0]
+	extraEpisodes := episodes[1:]
 
 	term := searchterm.FromName(library.StripEpisodeMarker(name))
 	items, err := sess.TMDB.SearchTV(ctx, term)
@@ -493,6 +502,9 @@ func proposeOneEpisodeLibrary(
 	p.Year = yearFromReleaseDate(match.ReleaseDate)
 	p.SeasonNumber = season
 	p.EpisodeNumber = episode
+	if len(extraEpisodes) > 0 {
+		p.ExtraEpisodeNumbers = extraEpisodes
+	}
 	p.RootFolderPath = targetRoot
 	return p
 }
@@ -510,9 +522,21 @@ func proposeOneEpisodeLibrary(
 // sourcePath, this is a no-op — same self-collision guard RelocateMovie
 // uses.
 func RelocateEpisode(sourcePath, destRoot, seriesTitle string, seriesYear, tmdbID, seasonNumber, episodeNumber int, preset naming.Preset) (string, error) {
+	return RelocateEpisodeRange(sourcePath, destRoot, seriesTitle, seriesYear, tmdbID, seasonNumber, []int{episodeNumber}, preset)
+}
+
+// RelocateEpisodeRange is RelocateEpisode's logical-episode-split sibling:
+// identical relocation mechanics, but names the destination file via
+// naming.EpisodeRangeFileName's episodeNumbers list (e.g. "S03E05-E06")
+// instead of a single episode number. RelocateEpisode is now a thin
+// wrapper over this function with a 1-element slice, so the ordinary
+// single-episode path's behavior (including its exact destination name) is
+// unchanged — EpisodeRangeFileName falls straight through to
+// EpisodeFileName's own rendering for fewer than 2 numbers.
+func RelocateEpisodeRange(sourcePath, destRoot, seriesTitle string, seriesYear, tmdbID, seasonNumber int, episodeNumbers []int, preset naming.Preset) (string, error) {
 	seriesFolder := naming.SeriesFolderName(preset, seriesTitle, seriesYear, tmdbID)
 	seasonDir := filepath.Join(destRoot, seriesFolder, naming.SeasonDirName(seasonNumber))
-	dest := filepath.Join(seasonDir, naming.EpisodeFileName(preset, seriesTitle, seasonNumber, episodeNumber, "", filepath.Ext(sourcePath)))
+	dest := filepath.Join(seasonDir, naming.EpisodeRangeFileName(preset, seriesTitle, seasonNumber, episodeNumbers, "", filepath.Ext(sourcePath)))
 	if dest == sourcePath {
 		return dest, nil
 	}
@@ -556,11 +580,12 @@ func ApplyLibrarySeries(ctx context.Context, libStore *library.Store, p proposal
 		return 0, nil, fmt.Errorf("proposal %d is %q, not pending — nothing to apply", p.ID, p.Status)
 	}
 
-	moved, err := RelocateEpisode(p.SourcePath, p.RootFolderPath, p.Title, p.Year, p.TMDBID, p.SeasonNumber, p.EpisodeNumber, preset)
+	allEpisodeNumbers := append([]int{p.EpisodeNumber}, p.ExtraEpisodeNumbers...)
+	moved, err := RelocateEpisodeRange(p.SourcePath, p.RootFolderPath, p.Title, p.Year, p.TMDBID, p.SeasonNumber, allEpisodeNumbers, preset)
 	if err != nil {
 		return 0, nil, fmt.Errorf("relocating %q: %w", p.SourcePath, err)
 	}
-	// RelocateEpisode's self-collision guard means moved can equal
+	// RelocateEpisodeRange's self-collision guard means moved can equal
 	// p.SourcePath (file was already correctly placed — no os.Rename
 	// happened). Emitting a Deleted+Created pair for the same unchanged
 	// path would be a bogus notify, so only report a change when a move
@@ -589,6 +614,28 @@ func ApplyLibrarySeries(ctx context.Context, libStore *library.Store, p proposal
 	})
 	if err != nil {
 		return 0, changes, fmt.Errorf("recording episode: %w", err)
+	}
+
+	// Logical episode-splitting: the file was relocated exactly ONCE above
+	// (allEpisodeNumbers), so every bundled extra episode number gets its
+	// own Episode row pointing at that SAME moved path — never a second
+	// relocate. Each one gets the same existing-metadata-preserve dance the
+	// primary episode just got above (GetEpisode before UpsertEpisode), or
+	// a prior TMDB-seeded title/air-date for that exact episode would be
+	// silently blanked out.
+	for _, extraEpisodeNumber := range p.ExtraEpisodeNumbers {
+		extraTitle, extraAirDate := "", ""
+		if existing, err := libStore.GetEpisode(ctx, series.ID, p.SeasonNumber, extraEpisodeNumber); err == nil {
+			extraTitle, extraAirDate = existing.Title, existing.AirDate
+		} else if !errors.Is(err, library.ErrNotFound) {
+			return ep.ID, changes, fmt.Errorf("checking existing metadata for bundled episode %d: %w", extraEpisodeNumber, err)
+		}
+		if _, err := libStore.UpsertEpisode(ctx, library.Episode{
+			SeriesID: series.ID, SeasonNumber: p.SeasonNumber, EpisodeNumber: extraEpisodeNumber,
+			Title: extraTitle, AirDate: extraAirDate, FilePath: moved,
+		}); err != nil {
+			return ep.ID, changes, fmt.Errorf("recording bundled episode %d: %w", extraEpisodeNumber, err)
+		}
 	}
 	return ep.ID, changes, nil
 }

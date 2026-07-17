@@ -340,6 +340,168 @@ func TestApplyLibrarySeries_WinnerIsOrphan_DeletesTrackedLoserFile_UpsertsSameEp
 	}
 }
 
+// TestApplyLibrarySeries_SharedFileLosesItsOwnKey_NotDeleted_SiblingIntact is
+// the critical regression test for the logical-episode-splitting
+// correctness fix: episode 1 and episode 2 of the same series share ONE
+// physical file (a "S01E01-E02" split). Dedup's episode-1 dedup group finds
+// a better standalone copy of episode 1 elsewhere, so the shared file LOSES
+// its own key's comparison. Before the fix, ApplyLibrarySeries would
+// unconditionally os.Remove the loser — deleting the shared file while
+// episode 2's row still pointed at it, a live "no drift" mission violation
+// (see CLAUDE.md's Mission section and dedup.go's ApplyLibrarySeries doc
+// comment). This test proves: the shared file survives on disk, episode 2's
+// row is completely untouched, and episode 1's row is still correctly
+// updated to the winner.
+func TestApplyLibrarySeries_SharedFileLosesItsOwnKey_NotDeleted_SiblingIntact(t *testing.T) {
+	dir := t.TempDir()
+	sharedFile := writeVideoFile(t, dir, "Show.S01E01-E02.mkv", 10)
+	winnerPath := writeVideoFile(t, dir, "winner.mkv", 10)
+
+	libStore := newTestLibraryStore(t)
+	ctx := context.Background()
+	series, err := libStore.UpsertSeries(ctx, library.Series{TMDBID: 555, Title: "Show Name", RootFolderPath: dir})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Episode 1 AND episode 2 both point at the exact same file — the
+	// logical-episode-split scenario library.CountEpisodesByFilePath exists
+	// to detect.
+	ep1, err := libStore.UpsertEpisode(ctx, library.Episode{
+		SeriesID: series.ID, SeasonNumber: 1, EpisodeNumber: 1, Title: "Part One", FilePath: sharedFile,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	ep2Before, err := libStore.UpsertEpisode(ctx, library.Episode{
+		SeriesID: series.ID, SeasonNumber: 1, EpisodeNumber: 2, Title: "Part Two", AirDate: "2020-01-08", FilePath: sharedFile,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Dedup proposal for EPISODE 1's key only — the shared file is the
+	// tracked/losing candidate, a standalone orphan copy is the winner.
+	p := proposals.Proposal{
+		ID: 1, Status: proposals.Pending, Title: "Show Name", TMDBID: 555, SeasonNumber: 1, EpisodeNumber: 1,
+		RootFolderPath: dir,
+		Candidates: []proposals.Candidate{
+			{Label: "tracked", Path: sharedFile, TrackedID: int(ep1.ID)},
+			{Label: "winner", Path: winnerPath, Winner: true},
+		},
+	}
+	_, changes, err := ApplyLibrarySeries(ctx, libStore, p, nil, false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// The critical assertion: the shared file must survive on disk, even
+	// though it lost episode 1's dedup comparison, because episode 2's row
+	// still needs it.
+	if _, err := os.Stat(sharedFile); err != nil {
+		t.Fatalf("expected the shared file to SURVIVE (still referenced by episode 2), but stat failed: %v", err)
+	}
+	// No Deleted PathChange should be reported for a file that was never
+	// actually deleted.
+	for _, c := range changes {
+		if c.Path == sharedFile && c.Kind == mode.Deleted {
+			t.Errorf("expected no Deleted PathChange for the still-referenced shared file, got %+v", changes)
+		}
+	}
+
+	// Episode 2's row must be completely untouched — same file path, same
+	// metadata, same row id.
+	ep2After, err := libStore.GetEpisode(ctx, series.ID, 1, 2)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if ep2After.ID != ep2Before.ID || ep2After.FilePath != sharedFile {
+		t.Fatalf("expected episode 2's row to be completely untouched, got %+v (was %+v)", ep2After, ep2Before)
+	}
+	if ep2After.Title != "Part Two" || ep2After.AirDate != "2020-01-08" {
+		t.Errorf("expected episode 2's metadata untouched, got %+v", ep2After)
+	}
+
+	// Episode 1's row is still correctly updated to the winner — the fix
+	// doesn't mean episode 1's OWN dedup resolution stops working, only
+	// that the shared file's physical deletion is what's guarded.
+	ep1After, err := libStore.GetEpisode(ctx, series.ID, 1, 1)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if ep1After.FilePath != winnerPath {
+		t.Errorf("expected episode 1's row updated to the winner path, got %+v", ep1After)
+	}
+}
+
+// TestApplyLibrarySeries_SharedFileGuardIsPathBased_NotCandidateLabelBased
+// closes a follow-up flagged during pre-merge review: the shared-file guard
+// (CountEpisodesByFilePath) is a pure function of the candidate's PATH
+// STRING, not of how that candidate was labeled/discovered. This proves it
+// protects a shared file even when it arrives as a plain, non-"tracked"-
+// labeled losing candidate (TrackedID=0) — not just the "tracked" shape the
+// other regression test already covers. (Note: a shared file surfacing as
+// an actual Dedup-scan-discovered ORPHAN is not reachable in practice —
+// ScanLibrarySeries's `known` set masks every already-tracked FilePath from
+// ever being reported as an unmapped/orphan entry in the first place,
+// regardless of which key it would parse to — but ApplyLibrarySeries
+// itself makes no such assumption about how its Candidates arrived, so this
+// test exercises that generality directly.)
+func TestApplyLibrarySeries_SharedFileGuardIsPathBased_NotCandidateLabelBased(t *testing.T) {
+	dir := t.TempDir()
+	sharedFile := writeVideoFile(t, dir, "Show.S01E01-E02.mkv", 10)
+	winnerPath := writeVideoFile(t, dir, "winner.mkv", 10)
+
+	libStore := newTestLibraryStore(t)
+	ctx := context.Background()
+	series, err := libStore.UpsertSeries(ctx, library.Series{TMDBID: 555, Title: "Show Name", RootFolderPath: dir})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, err := libStore.UpsertEpisode(ctx, library.Episode{
+		SeriesID: series.ID, SeasonNumber: 1, EpisodeNumber: 1, FilePath: sharedFile,
+	}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, err := libStore.UpsertEpisode(ctx, library.Episode{
+		SeriesID: series.ID, SeasonNumber: 1, EpisodeNumber: 2, FilePath: sharedFile,
+	}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// The shared path arrives as a PLAIN candidate (TrackedID=0, not labeled
+	// "tracked") — a shape that wouldn't occur via today's real Scan, but
+	// which ApplyLibrarySeries must still guard correctly, since its guard
+	// keys purely on Path.
+	p := proposals.Proposal{
+		ID: 1, Status: proposals.Pending, Title: "Show Name", TMDBID: 555, SeasonNumber: 1, EpisodeNumber: 1,
+		RootFolderPath: dir,
+		Candidates: []proposals.Candidate{
+			{Label: "some-orphan-name", Path: sharedFile},
+			{Label: "winner", Path: winnerPath, Winner: true},
+		},
+	}
+	if _, changes, err := ApplyLibrarySeries(ctx, libStore, p, nil, false); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	} else {
+		for _, c := range changes {
+			if c.Path == sharedFile && c.Kind == mode.Deleted {
+				t.Errorf("expected no Deleted PathChange for the still-referenced shared file, got %+v", changes)
+			}
+		}
+	}
+
+	if _, err := os.Stat(sharedFile); err != nil {
+		t.Fatalf("expected the shared file to survive regardless of candidate labeling, but stat failed: %v", err)
+	}
+	ep2, err := libStore.GetEpisode(ctx, series.ID, 1, 2)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if ep2.FilePath != sharedFile {
+		t.Errorf("expected episode 2's row untouched, got %+v", ep2)
+	}
+}
+
 func TestApplyLibrarySeries_KeepAll_NoMutation(t *testing.T) {
 	libStore := newTestLibraryStore(t)
 	ctx := context.Background()

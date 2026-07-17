@@ -129,3 +129,39 @@ func EpisodeFileName(preset Preset, seriesTitle string, seasonNumber, episodeNum
 	}
 	return base + ext
 }
+
+// EpisodeRangeFileName is EpisodeFileName's sibling for a logical-episode-
+// split file — one physical file bundling more than one episode number
+// (library.ParseEpisodeNumbers), e.g. a "S01E01-E02" release. Renders
+// "Series Title S03E05-E06.ext" (Jellyfin) / "Series Title - S03E05-E06.ext"
+// (Legacy) from episodeNumbers' first and last entries (expects an already
+// ascending-sorted, deduped slice — ParseEpisodeNumbers' own contract).
+// Falls straight through to EpisodeFileName's ordinary single-episode
+// rendering when episodeNumbers has fewer than 2 entries, so a caller can
+// use this unconditionally without a separate single-vs-multi branch of its
+// own. schema.go's episodeFileJellyfin/episodeFileLegacy recognize this
+// range shape too, so a correctly-split, already-renamed file is seen as
+// schema-conformant and not endlessly re-proposed on a later Scan.
+func EpisodeRangeFileName(preset Preset, seriesTitle string, seasonNumber int, episodeNumbers []int, episodeTitle, ext string) string {
+	if len(episodeNumbers) < 2 {
+		episodeNumber := 0
+		if len(episodeNumbers) == 1 {
+			episodeNumber = episodeNumbers[0]
+		}
+		return EpisodeFileName(preset, seriesTitle, seasonNumber, episodeNumber, episodeTitle, ext)
+	}
+	first, last := episodeNumbers[0], episodeNumbers[len(episodeNumbers)-1]
+	var base string
+	if preset == Legacy {
+		base = fmt.Sprintf("%s - S%02dE%02d-E%02d", seriesTitle, seasonNumber, first, last)
+		if episodeTitle != "" {
+			base = fmt.Sprintf("%s - %s", base, episodeTitle)
+		}
+	} else {
+		base = fmt.Sprintf("%s S%02dE%02d-E%02d", seriesTitle, seasonNumber, first, last)
+		if episodeTitle != "" {
+			base = fmt.Sprintf("%s %s", base, episodeTitle)
+		}
+	}
+	return base + ext
+}

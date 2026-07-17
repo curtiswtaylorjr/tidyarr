@@ -21,9 +21,13 @@ var (
 	seasonDirPattern    = regexp.MustCompile(`^Season \d{2}$`)
 	// [^-] before the space excludes a Legacy-shaped "Title - SxxExx" name —
 	// RE2 has no lookbehind, so this is the plain-regex way to require the
-	// character right before "SxxExx" isn't a dash.
-	episodeFileJellyfin  = regexp.MustCompile(`^.+[^-] S\d{2}E\d{2}(?: .+)?$`)
-	episodeFileLegacy    = regexp.MustCompile(`^.+ - S\d{2}E\d{2}(?: - .+)?$`)
+	// character right before "SxxExx" isn't a dash. The optional (?:-E\d{2})?
+	// right after SxxExx recognizes a logical-episode-split file's range
+	// shape too (naming.EpisodeRangeFileName's "S03E05-E06") — without it, a
+	// correctly-split, already-renamed file would never register as
+	// schema-conformant and would be endlessly re-proposed on every Scan.
+	episodeFileJellyfin  = regexp.MustCompile(`^.+[^-] S\d{2}E\d{2}(?:-E\d{2})?(?: .+)?$`)
+	episodeFileLegacy    = regexp.MustCompile(`^.+ - S\d{2}E\d{2}(?:-E\d{2})?(?: - .+)?$`)
 	seriesFolderJellyfin = regexp.MustCompile(`^.+(?: \(\d{4}\))? \[tmdbid-\d+\]$`)
 	// adultPhashTag matches AdultFileName's embedded "[phash-HASH]" tag anywhere
 	// in a filename — Adult has one fixed scheme, not a per-preset shape, so
