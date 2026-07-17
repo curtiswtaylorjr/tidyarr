@@ -394,10 +394,6 @@ func upsertConnectionHandler(store *connections.Store) http.HandlerFunc {
 			http.Error(w, "invalid request body", http.StatusBadRequest)
 			return
 		}
-		if req.URL == "" && !fixedURLServices[service] {
-			http.Error(w, "url is required", http.StatusBadRequest)
-			return
-		}
 		if err := store.UpsertPreservingSecret(r.Context(), service, req.URL, req.Username, req.APIKey); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return

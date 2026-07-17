@@ -9,20 +9,15 @@ import (
 	"testing"
 )
 
-// TestUpsertConnection_FixedURLServices_SucceedWithoutURL confirms the four
-// fixed-public-API services (tmdb/stashdb/fansdb/tpdb) can be saved with no
-// `url` in the request body — the UI collects none for them because their base
-// URL is a hardcoded package constant. A service that DOES need a URL
-// (prowlarr) must still 400 when it's omitted, proving the carve-out didn't
-// relax validation for everyone.
-func TestUpsertConnection_FixedURLServices_SucceedWithoutURL(t *testing.T) {
+// TestUpsertConnection_SucceedsWithoutURL confirms any service can be saved
+// with no `url` in the request body — URL is never required.
+func TestUpsertConnection_SucceedsWithoutURL(t *testing.T) {
 	connStore, propStore, allowStore, settingsStore, grabsStore, libStore, slidersStore, traktStore, adultNewestRowStore, adultNewestReleaseStore, rssFeedsStore := testStores(t)
 	srv := httptest.NewServer(NewMux(testHTTPClient(), connStore, propStore, allowStore, testProber(t), testPHasher(t), testVideoHasher(t), settingsStore, grabsStore, libStore, slidersStore, traktStore, adultNewestRowStore, adultNewestReleaseStore, rssFeedsStore, nil))
 	defer srv.Close()
 
 	key := "some-api-key"
-	for _, service := range []string{"tmdb", "stashdb", "fansdb", "tpdb"} {
-		// Body carries an apiKey but no url at all.
+	for _, service := range []string{"tmdb", "stashdb", "fansdb", "tpdb", "prowlarr", "radarr"} {
 		body, _ := json.Marshal(upsertConnectionRequest{APIKey: &key})
 		req, _ := http.NewRequest(http.MethodPut, srv.URL+"/api/connections/"+service, bytes.NewReader(body))
 		resp, err := http.DefaultClient.Do(req)
@@ -33,18 +28,6 @@ func TestUpsertConnection_FixedURLServices_SucceedWithoutURL(t *testing.T) {
 		if resp.StatusCode != http.StatusNoContent {
 			t.Errorf("expected 204 saving %s without a url, got %d", service, resp.StatusCode)
 		}
-	}
-
-	// A URL-required service still rejects a body with no url.
-	body, _ := json.Marshal(upsertConnectionRequest{APIKey: &key})
-	req, _ := http.NewRequest(http.MethodPut, srv.URL+"/api/connections/prowlarr", bytes.NewReader(body))
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("PUT prowlarr failed: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Errorf("expected 400 saving prowlarr without a url, got %d", resp.StatusCode)
 	}
 }
 

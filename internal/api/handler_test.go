@@ -203,23 +203,6 @@ func TestConnectionsCRUD_EndToEnd(t *testing.T) {
 	}
 }
 
-func TestUpsertConnectionHandler_RequiresURL(t *testing.T) {
-	connStore, propStore, allowStore, settingsStore, grabsStore, libStore, slidersStore, traktStore, adultNewestRowStore, adultNewestReleaseStore, rssFeedsStore := testStores(t)
-	srv := httptest.NewServer(NewMux(testHTTPClient(), connStore, propStore, allowStore, testProber(t), testPHasher(t), testVideoHasher(t), settingsStore, grabsStore, libStore, slidersStore, traktStore, adultNewestRowStore, adultNewestReleaseStore, rssFeedsStore, nil))
-	defer srv.Close()
-
-	noURLKey := "key-with-no-url"
-	body, _ := json.Marshal(upsertConnectionRequest{APIKey: &noURLKey})
-	req, _ := http.NewRequest(http.MethodPut, srv.URL+"/api/connections/radarr", bytes.NewReader(body))
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("PUT failed: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("expected 400 when url is missing, got %d", resp.StatusCode)
-	}
-}
 
 // TestUpsertConnectionHandler_OmittedAPIKeyPreservesSecret locks the data-loss
 // fix: a PUT with apiKey absent from the JSON entirely (what the frontend sends

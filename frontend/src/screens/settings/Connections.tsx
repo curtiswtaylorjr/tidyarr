@@ -160,10 +160,7 @@ export const ConnectionRow: Component<{
     dirty,
     save,
   });
-  // upsertBody is split out so the URL-required guard mirrors the backend
-  // (url is required) with a clear inline message rather than a 400 round-trip.
   const upsertBody = async () => {
-    if (!needsFixedUrl && !url().trim()) throw new Error("url is required");
     await upsertConnection(props.service, body());
   };
 
