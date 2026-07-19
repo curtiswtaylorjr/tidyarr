@@ -1375,3 +1375,30 @@ var AllWebhookEvents = []string{
 	"dedup.applied",
 	"grab.completed",
 }
+
+// --- Unified downloader (aria2c queue) -------------------------------------
+
+// Download is one item in the unified downloader's queue (active, waiting, or
+// recently stopped), as reported by the aria2c engine (see
+// GET /api/downloads and the /api/downloads/stream SSE). All numeric fields
+// are real int64s here — the api layer parses aria2's decimal-string wire
+// values before this DTO is emitted.
+type Download struct {
+	GID             string `json:"gid"`
+	Status          string `json:"status"` // "active" | "waiting" | "paused" | "error" | "complete" | "removed"
+	Filename        string `json:"filename"`
+	TotalLength     int64  `json:"totalLength"`
+	CompletedLength int64  `json:"completedLength"`
+	DownloadSpeed   int64  `json:"downloadSpeed"`
+	Connections     int64  `json:"connections"`
+	ErrorMessage    string `json:"errorMessage"`
+}
+
+// DownloaderConfig is the unified downloader's operator-tunable settings
+// (GET/PUT /api/downloader/config). The RPC token is auto-generated and
+// stored via internal/secrets — it is deliberately NOT part of this config.
+type DownloaderConfig struct {
+	StagingDir     string `json:"stagingDir"`
+	MaxConcurrent  int    `json:"maxConcurrent"`
+	MaxConnections int    `json:"maxConnections"`
+}

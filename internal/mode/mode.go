@@ -17,6 +17,7 @@ import (
 	"github.com/curtiswtaylorjr/sakms/internal/anthropic"
 	"github.com/curtiswtaylorjr/sakms/internal/bravesearch"
 	"github.com/curtiswtaylorjr/sakms/internal/connections"
+	"github.com/curtiswtaylorjr/sakms/internal/downloader"
 	"github.com/curtiswtaylorjr/sakms/internal/gemini"
 	"github.com/curtiswtaylorjr/sakms/internal/identify"
 	"github.com/curtiswtaylorjr/sakms/internal/jellyfin"
@@ -179,16 +180,29 @@ type Session struct {
 	// skips kids classification/routing in that case.
 	KidsRootPath string
 
-	// Prowlarr, QBittorrent, and NZBGet back the native indexer-search-and-
-	// grab workflow. Like MainstreamAI, these are global — one Prowlarr/
-	// qBittorrent/NZBGet per install, not per-mode — populated the same way
-	// regardless of which mode is building, and tolerantly nil if that
-	// service simply isn't configured (a usenet-only install has no
-	// QBittorrent; a torrent-only one has no NZBGet). Consumers must
-	// nil-check before use, same as Identify.
-	Prowlarr    *prowlarr.Client
+	// Prowlarr backs the native indexer search. Like MainstreamAI, it's
+	// global — one Prowlarr per install, not per-mode — populated the same
+	// way regardless of which mode is building, and tolerantly nil if it
+	// isn't configured. Consumers must nil-check before use, same as Identify.
+	Prowlarr *prowlarr.Client
+
+	// QBittorrent and NZBGet remain as generic, still-valid capability (same
+	// precedent as internal/servarr keeping Radarr/Sonarr/Whisparr after
+	// their eliminations) — but Build no longer constructs them: the unified
+	// downloader (Downloader below) owns the actual download now, so these
+	// stay nil for every session. Kept because callers must not assume they
+	// disappeared, and a future usenet backend could reuse NZBGet.
 	QBittorrent *qbittorrent.Client
 	NZBGet      *nzbget.Client
+
+	// Downloader is the process-lifetime unified download engine (one aria2c
+	// subprocess managed by SAK — internal/downloader), injected as the same
+	// singleton into every session, not built per-request like the tolerant
+	// clients above. nil only when the downloader failed to start at boot
+	// (e.g. the embedded binary was missing); consumers must nil-check before
+	// use. Its RPC() client is what grab dispatch and the Downloads queue API
+	// call through.
+	Downloader *downloader.Manager
 
 	// TMDB backs the Discover browse view — same "global, tolerant" rule as
 	// Prowlarr/QBittorrent/NZBGet above.
@@ -232,8 +246,8 @@ type Session struct {
 // Adult's identification pipeline (sess.Identify) and local Stash notify
 // client (sess.Stash), Movies/Series' Jellyfin notify client (sess.Jellyfin),
 // and the shared search/download pipeline — each left nil when unconfigured.
-func Build(ctx context.Context, store *connections.Store, settingsStore *settings.Store, httpClient *http.Client, m Mode) (*Session, error) {
-	sess := &Session{Mode: m}
+func Build(ctx context.Context, store *connections.Store, settingsStore *settings.Store, httpClient *http.Client, dl *downloader.Manager, m Mode) (*Session, error) {
+	sess := &Session{Mode: m, Downloader: dl}
 
 	// Every mode owns its own library now — Movies/Series since their Radarr/
 	// Sonarr eliminations, Adult since Stage 4's Whisparr elimination — so no
@@ -302,17 +316,11 @@ func buildSearchPipeline(ctx context.Context, store *connections.Store, httpClie
 		sess.Prowlarr = prowlarr.New(prowlarr.Config{BaseURL: conn.URL, APIKey: conn.APIKey}, httpClient)
 	}
 
-	if conn, err := optionalConn(ctx, store, "qbittorrent"); err != nil {
-		return err
-	} else if conn != nil {
-		sess.QBittorrent = qbittorrent.New(qbittorrent.Config{BaseURL: conn.URL, Username: conn.Username, Password: conn.APIKey}, httpClient)
-	}
-
-	if conn, err := optionalConn(ctx, store, "nzbget"); err != nil {
-		return err
-	} else if conn != nil {
-		sess.NZBGet = nzbget.New(nzbget.Config{BaseURL: conn.URL, Username: conn.Username, Password: conn.APIKey}, httpClient)
-	}
+	// qBittorrent/NZBGet are no longer constructed here — the unified aria2c
+	// downloader (sess.Downloader, injected above) owns the actual download
+	// now. The clients (and their packages) are retained as generic
+	// capability but have no live caller, exactly the internal/servarr
+	// precedent.
 
 	if conn, err := optionalConn(ctx, store, "tmdb"); err != nil {
 		return err

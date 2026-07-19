@@ -1323,3 +1323,30 @@ export interface WebhookUpdateRequest {
   events: string[];
   enabled: boolean;
 }
+/**
+ * Download is one item in the unified downloader's queue (active, waiting, or
+ * recently stopped), as reported by the aria2c engine (see
+ * GET /api/downloads and the /api/downloads/stream SSE). All numeric fields
+ * are real int64s here — the api layer parses aria2's decimal-string wire
+ * values before this DTO is emitted.
+ */
+export interface Download {
+  gid: string;
+  status: string; // "active" | "waiting" | "paused" | "error" | "complete" | "removed"
+  filename: string;
+  totalLength: number /* int64 */;
+  completedLength: number /* int64 */;
+  downloadSpeed: number /* int64 */;
+  connections: number /* int64 */;
+  errorMessage: string;
+}
+/**
+ * DownloaderConfig is the unified downloader's operator-tunable settings
+ * (GET/PUT /api/downloader/config). The RPC token is auto-generated and
+ * stored via internal/secrets — it is deliberately NOT part of this config.
+ */
+export interface DownloaderConfig {
+  stagingDir: string;
+  maxConcurrent: number /* int */;
+  maxConnections: number /* int */;
+}

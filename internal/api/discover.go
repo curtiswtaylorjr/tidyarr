@@ -50,7 +50,7 @@ func discoverHandler(httpClient *http.Client, connStore *connections.Store, sett
 			page = p
 		}
 
-		sess, err := mode.Build(ctx, connStore, settingsStore, httpClient, m)
+		sess, err := mode.Build(ctx, connStore, settingsStore, httpClient, nil, m)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -246,7 +246,7 @@ func discoverGenresHandler(httpClient *http.Client, connStore *connections.Store
 		m := mode.Mode(r.PathValue("mode"))
 		ctx := r.Context()
 
-		sess, err := mode.Build(ctx, connStore, settingsStore, httpClient, m)
+		sess, err := mode.Build(ctx, connStore, settingsStore, httpClient, nil, m)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -310,7 +310,7 @@ func discoverKeywordsHandler(httpClient *http.Client, connStore *connections.Sto
 			return
 		}
 
-		sess, err := mode.Build(ctx, connStore, settingsStore, httpClient, mode.Movies)
+		sess, err := mode.Build(ctx, connStore, settingsStore, httpClient, nil, mode.Movies)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -358,7 +358,7 @@ func tmdbSearchHandler(httpClient *http.Client, connStore *connections.Store, se
 			return
 		}
 
-		sess, err := mode.Build(ctx, connStore, settingsStore, httpClient, m)
+		sess, err := mode.Build(ctx, connStore, settingsStore, httpClient, nil, m)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -405,7 +405,7 @@ func posterHandler(httpClient *http.Client, connStore *connections.Store, settin
 			return
 		}
 
-		sess, err := mode.Build(ctx, connStore, settingsStore, httpClient, m)
+		sess, err := mode.Build(ctx, connStore, settingsStore, httpClient, nil, m)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -451,7 +451,7 @@ func resolveTVDBIDHandler(httpClient *http.Client, connStore *connections.Store,
 			return
 		}
 
-		sess, err := mode.Build(ctx, connStore, settingsStore, httpClient, m)
+		sess, err := mode.Build(ctx, connStore, settingsStore, httpClient, nil, m)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return

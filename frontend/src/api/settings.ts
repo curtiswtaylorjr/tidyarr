@@ -69,9 +69,11 @@ export type {
 };
 
 // SERVICES_WITH_USERNAME authenticate with username+password rather than a bare
-// API key (verbatim from index.html) — their key field is a password, and they
-// surface a Username input.
-export const SERVICES_WITH_USERNAME = ["qbittorrent", "nzbget"];
+// API key — their key field is a password, and they surface a Username input.
+// Empty now that qbittorrent/nzbget (the only two username+password services)
+// were removed with the unified-downloader cutover; kept as the extension point
+// for any future username+password service rather than deleting the mechanism.
+export const SERVICES_WITH_USERNAME: string[] = [];
 
 // SERVICES_WITH_FIXED_URL are fixed public APIs with one canonical address each,
 // hardcoded server-side as package constants (internal/tmdb, internal/stashbox,
@@ -82,19 +84,20 @@ export const SERVICES_WITH_FIXED_URL = ["tmdb", "tvdb", "stashdb", "fansdb", "tp
 
 // SERVICES_WITH_HOST_LOOKUP are the services the netscan package can identify
 // on the LAN, enabling a "look up on a different host" input on their rows.
-export const SERVICES_WITH_HOST_LOOKUP = ["prowlarr", "qbittorrent", "nzbget", "jellyfin", "stash"];
+export const SERVICES_WITH_HOST_LOOKUP = ["prowlarr", "jellyfin", "stash"];
 
 // CONNECTION_SERVICES is the full ordered set the Connections table lists, one
-// row each (verbatim from index.html). There is no radarr/sonarr/whisparr — SAK
-// owns those libraries now (see internal/library's package doc).
+// row each. There is no radarr/sonarr/whisparr — SAK owns those libraries now
+// (see internal/library's package doc). qbittorrent/nzbget were also removed
+// (2026-07-18): the unified aria2c downloader replaced them as SAK's download
+// engine, so there's no external download-client connection to configure — the
+// engine's tunables live in the Downloader settings section instead.
 // The AI providers (ollama/openai/gemini/anthropic) and Brave web-search
 // grounding are deliberately NOT here — they live in the AI tab instead
 // (rendered via the same ConnectionRow so their save path stays identical),
 // scoped to the currently-selected provider plus the always-visible Brave row.
 export const CONNECTION_SERVICES = [
   "prowlarr",
-  "qbittorrent",
-  "nzbget",
   "tmdb",
   "tvdb",
   "stashdb",

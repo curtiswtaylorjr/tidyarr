@@ -171,7 +171,7 @@ func runWatcher(ctx context.Context, roots map[mode.Mode]string, httpClient *htt
 func scanFromWatcher(ctx context.Context, m mode.Mode, httpClient *http.Client, connStore *connections.Store, settingsStore *settings.Store, propStore *proposals.Store, libStore *library.Store, videoHasher rename.PHasher, prober dedup.Prober, entityStore parseentity.EntityStore) {
 	log.Printf("watchfolders: scan triggered for %s", m)
 
-	sess, err := mode.Build(ctx, connStore, settingsStore, httpClient, m)
+	sess, err := mode.Build(ctx, connStore, settingsStore, httpClient, nil, m)
 	if err != nil {
 		log.Printf("watchfolders: building session for %s: %v", m, err)
 		return

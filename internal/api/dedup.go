@@ -29,7 +29,7 @@ func dedupScanHandler(httpClient *http.Client, connStore *connections.Store, set
 		m := mode.Mode(r.PathValue("mode"))
 		ctx := r.Context()
 
-		sess, err := mode.Build(ctx, connStore, settingsStore, httpClient, m)
+		sess, err := mode.Build(ctx, connStore, settingsStore, httpClient, nil, m)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return

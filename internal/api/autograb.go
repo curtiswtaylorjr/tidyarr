@@ -13,6 +13,7 @@ import (
 	"github.com/curtiswtaylorjr/sakms/internal/apidto"
 	"github.com/curtiswtaylorjr/sakms/internal/autograb"
 	"github.com/curtiswtaylorjr/sakms/internal/connections"
+	"github.com/curtiswtaylorjr/sakms/internal/downloader"
 	"github.com/curtiswtaylorjr/sakms/internal/grabs"
 	"github.com/curtiswtaylorjr/sakms/internal/mode"
 	"github.com/curtiswtaylorjr/sakms/internal/prowlarr"
@@ -90,7 +91,7 @@ func minSeedersFor(m mode.Mode) int {
 //
 // Exactly one release is ever grabbed per call: no bulk action, the same
 // staged-single-mutation invariant every other SAK workflow keeps.
-func autoGrabHandler(httpClient *http.Client, connStore *connections.Store, settingsStore *settings.Store, grabsStore *grabs.Store) http.HandlerFunc {
+func autoGrabHandler(httpClient *http.Client, connStore *connections.Store, settingsStore *settings.Store, dl *downloader.Manager, grabsStore *grabs.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		m := mode.Mode(r.PathValue("mode"))
 		ctx := r.Context()
@@ -105,7 +106,7 @@ func autoGrabHandler(httpClient *http.Client, connStore *connections.Store, sett
 			return
 		}
 
-		sess, err := mode.Build(ctx, connStore, settingsStore, httpClient, m)
+		sess, err := mode.Build(ctx, connStore, settingsStore, httpClient, dl, m)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -154,7 +155,7 @@ func autoGrabHandler(httpClient *http.Client, connStore *connections.Store, sett
 		}
 		picked := releases[sel.PickIndex]
 
-		downloadClient, clientRef, status, err := dispatchToDownloadClient(ctx, sess, m, string(picked.Protocol), picked.DownloadURL, picked.Title)
+		downloadClient, gid, status, err := dispatchToDownloadClient(ctx, sess, m, string(picked.Protocol), picked.DownloadURL, picked.Title)
 		if err != nil {
 			http.Error(w, err.Error(), status)
 			return
@@ -164,11 +165,18 @@ func autoGrabHandler(httpClient *http.Client, connStore *connections.Store, sett
 			Mode: m, Title: req.Title, TMDBID: req.TMDBID,
 			SeasonNumber: req.SeasonNumber, EpisodeNumber: req.EpisodeNumber, SeasonSpecified: req.SeasonSpecified,
 			Indexer: picked.Indexer, Protocol: string(picked.Protocol),
-			DownloadClient: downloadClient, ClientRef: clientRef, RootFolderPath: rootFolder,
+			DownloadClient: downloadClient, RootFolderPath: rootFolder,
 		})
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
+		}
+		if gid != "" {
+			if err := grabsStore.SetDownloadGID(ctx, created.ID, gid); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			created.DownloadGID = gid
 		}
 
 		dto := toDTOGrab(created)

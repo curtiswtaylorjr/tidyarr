@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"testing"
 
+	"github.com/curtiswtaylorjr/sakms/internal/downloader"
 	"github.com/curtiswtaylorjr/sakms/internal/grabs"
 	"github.com/curtiswtaylorjr/sakms/internal/mediainfo"
 	"github.com/curtiswtaylorjr/sakms/internal/mode"
@@ -25,24 +26,14 @@ func (f fixedProber) Probe(ctx context.Context, path string) (*mediainfo.Probe, 
 	return &mediainfo.Probe{Duration: f.durationSeconds}, nil
 }
 
-// fakeCompletedQBittorrent serves the two qBittorrent endpoints a check-import
-// hits for an already-completed torrent whose content lives at contentPath.
-func fakeCompletedQBittorrent(t *testing.T, contentPath string) *httptest.Server {
+// fakeCompletedDownloader returns a download Manager backed by a fake aria2
+// that reports the download "abc123" as complete, staged at contentPath — the
+// setup a check-import test needs for an already-finished grab.
+func fakeCompletedDownloader(t *testing.T, contentPath string) *downloader.Manager {
 	t.Helper()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/api/v2/auth/login":
-			http.SetCookie(w, &http.Cookie{Name: "SID", Value: "test-sid"})
-			w.Write([]byte("Ok."))
-		case "/api/v2/torrents/info":
-			w.Header().Set("Content-Type", "application/json")
-			w.Write([]byte(`[{"hash":"abc123","state":"uploading","progress":1,"content_path":"` + contentPath + `"}]`))
-		default:
-			t.Fatalf("unexpected request: %s", r.URL.Path)
-		}
-	}))
-	t.Cleanup(srv.Close)
-	return srv
+	aria2Srv, fake := newFakeAria2(t, "abc123")
+	fake.setCompleteDir("abc123", contentPath)
+	return newTestDownloader(aria2Srv.URL, t.TempDir())
 }
 
 // TestPostGrabReview_Movies_RuntimeMismatchFlags proves the post-grab mislabel
@@ -64,14 +55,11 @@ func TestPostGrabReview_Movies_RuntimeMismatchFlags(t *testing.T) {
 		t.Fatalf("writing file: %v", err)
 	}
 
-	fakeQB := fakeCompletedQBittorrent(t, downloadDir)
+	dl := fakeCompletedDownloader(t, downloadDir)
 	tmdbSrv := fakeTMDBMovieRuntime(t, 100) // TMDB says 100 min = 6000 s
 
 	connStore, propStore, allowStore, settingsStore, grabsStore, libStore, slidersStore, traktStore, adultNewestRowStore, adultNewestReleaseStore, rssFeedsStore := testStores(t)
 	ctx := context.Background()
-	if err := connStore.UpsertWithUsername(ctx, "qbittorrent", fakeQB.URL, "wade", "hunter2"); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
 	overrideFixedURL(t, "tmdb", tmdbSrv.URL)
 	if err := connStore.Upsert(ctx, "tmdb", tmdbSrv.URL, "key"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -79,8 +67,8 @@ func TestPostGrabReview_Movies_RuntimeMismatchFlags(t *testing.T) {
 
 	g, err := grabsStore.Create(ctx, grabs.Grab{
 		Mode: mode.Movies, Title: "Some Movie", TMDBID: 42,
-		Indexer: "I", Protocol: "torrent", DownloadClient: "qbittorrent",
-		ClientRef: "abc123", RootFolderPath: moviesRoot,
+		Indexer: "I", Protocol: "torrent", DownloadClient: "aria2",
+		DownloadGID: "abc123", RootFolderPath: moviesRoot,
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -89,7 +77,7 @@ func TestPostGrabReview_Movies_RuntimeMismatchFlags(t *testing.T) {
 	// Imported file runs 20 min against a 100-min listing → ratio 0.2, well
 	// outside the [0.70, 1.30] band → flagged.
 	prober := fixedProber{durationSeconds: 20 * 60}
-	srv := httptest.NewServer(NewMux(testHTTPClient(), connStore, propStore, allowStore, prober, testPHasher(t), testVideoHasher(t), settingsStore, grabsStore, libStore, slidersStore, traktStore, adultNewestRowStore, adultNewestReleaseStore, rssFeedsStore, nil, nil))
+	srv := httptest.NewServer(NewMux(testHTTPClient(), connStore, propStore, allowStore, prober, testPHasher(t), testVideoHasher(t), settingsStore, grabsStore, libStore, slidersStore, traktStore, adultNewestRowStore, adultNewestReleaseStore, rssFeedsStore, nil, nil, dl))
 	defer srv.Close()
 
 	updated := postCheckImport(t, srv.URL, g.ID)
@@ -121,14 +109,11 @@ func TestPostGrabReview_Series_SingleEpisode_RuntimeMismatchFlags(t *testing.T) 
 		t.Fatalf("writing file: %v", err)
 	}
 
-	fakeQB := fakeCompletedQBittorrent(t, downloadDir)
+	dl := fakeCompletedDownloader(t, downloadDir)
 	tmdbSrv := fakeTMDBSeriesRuntime(t, 1, 58) // season 1 episode 1, 58 min = 3480 s
 
 	connStore, propStore, allowStore, settingsStore, grabsStore, libStore, slidersStore, traktStore, adultNewestRowStore, adultNewestReleaseStore, rssFeedsStore := testStores(t)
 	ctx := context.Background()
-	if err := connStore.UpsertWithUsername(ctx, "qbittorrent", fakeQB.URL, "wade", "hunter2"); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
 	overrideFixedURL(t, "tmdb", tmdbSrv.URL)
 	if err := connStore.Upsert(ctx, "tmdb", tmdbSrv.URL, "key"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -136,8 +121,8 @@ func TestPostGrabReview_Series_SingleEpisode_RuntimeMismatchFlags(t *testing.T) 
 
 	g, err := grabsStore.Create(ctx, grabs.Grab{
 		Mode: mode.Series, Title: "Some Show", TMDBID: 555, SeasonNumber: 1, EpisodeNumber: 1, SeasonSpecified: true,
-		Indexer: "I", Protocol: "torrent", DownloadClient: "qbittorrent",
-		ClientRef: "abc123", RootFolderPath: tvRoot,
+		Indexer: "I", Protocol: "torrent", DownloadClient: "aria2",
+		DownloadGID: "abc123", RootFolderPath: tvRoot,
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -145,7 +130,7 @@ func TestPostGrabReview_Series_SingleEpisode_RuntimeMismatchFlags(t *testing.T) 
 
 	// Imported file runs 10 min against a 58-min episode → ratio 0.17 → flagged.
 	prober := fixedProber{durationSeconds: 10 * 60}
-	srv := httptest.NewServer(NewMux(testHTTPClient(), connStore, propStore, allowStore, prober, testPHasher(t), testVideoHasher(t), settingsStore, grabsStore, libStore, slidersStore, traktStore, adultNewestRowStore, adultNewestReleaseStore, rssFeedsStore, nil, nil))
+	srv := httptest.NewServer(NewMux(testHTTPClient(), connStore, propStore, allowStore, prober, testPHasher(t), testVideoHasher(t), settingsStore, grabsStore, libStore, slidersStore, traktStore, adultNewestRowStore, adultNewestReleaseStore, rssFeedsStore, nil, nil, dl))
 	defer srv.Close()
 
 	updated := postCheckImport(t, srv.URL, g.ID)
@@ -181,14 +166,11 @@ func TestPostGrabReview_Series_SeasonPack_Skips(t *testing.T) {
 		t.Fatalf("writing file: %v", err)
 	}
 
-	fakeQB := fakeCompletedQBittorrent(t, downloadDir)
+	dl := fakeCompletedDownloader(t, downloadDir)
 	tmdbSrv := fakeTMDBSeriesRuntime(t, 1, 58) // would be 3480 s if a single episode were checked
 
 	connStore, propStore, allowStore, settingsStore, grabsStore, libStore, slidersStore, traktStore, adultNewestRowStore, adultNewestReleaseStore, rssFeedsStore := testStores(t)
 	ctx := context.Background()
-	if err := connStore.UpsertWithUsername(ctx, "qbittorrent", fakeQB.URL, "wade", "hunter2"); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
 	overrideFixedURL(t, "tmdb", tmdbSrv.URL)
 	if err := connStore.Upsert(ctx, "tmdb", tmdbSrv.URL, "key"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -197,8 +179,8 @@ func TestPostGrabReview_Series_SeasonPack_Skips(t *testing.T) {
 	// EpisodeNumber 0 → whole-season grab.
 	g, err := grabsStore.Create(ctx, grabs.Grab{
 		Mode: mode.Series, Title: "Some Show", TMDBID: 555, SeasonNumber: 1, EpisodeNumber: 0, SeasonSpecified: true,
-		Indexer: "I", Protocol: "torrent", DownloadClient: "qbittorrent",
-		ClientRef: "abc123", RootFolderPath: tvRoot,
+		Indexer: "I", Protocol: "torrent", DownloadClient: "aria2",
+		DownloadGID: "abc123", RootFolderPath: tvRoot,
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -207,7 +189,7 @@ func TestPostGrabReview_Series_SeasonPack_Skips(t *testing.T) {
 	// A duration that WOULD flag if a single-episode runtime were (wrongly)
 	// applied — proving the skip is the EpisodeNumber gate, not a lucky match.
 	prober := fixedProber{durationSeconds: 10 * 60}
-	srv := httptest.NewServer(NewMux(testHTTPClient(), connStore, propStore, allowStore, prober, testPHasher(t), testVideoHasher(t), settingsStore, grabsStore, libStore, slidersStore, traktStore, adultNewestRowStore, adultNewestReleaseStore, rssFeedsStore, nil, nil))
+	srv := httptest.NewServer(NewMux(testHTTPClient(), connStore, propStore, allowStore, prober, testPHasher(t), testVideoHasher(t), settingsStore, grabsStore, libStore, slidersStore, traktStore, adultNewestRowStore, adultNewestReleaseStore, rssFeedsStore, nil, nil, dl))
 	defer srv.Close()
 
 	updated := postCheckImport(t, srv.URL, g.ID)

@@ -67,10 +67,13 @@ func TestConnection(ctx context.Context, httpClient *http.Client, req Connection
 		return testBrave(ctx, httpClient, req)
 	case "prowlarr":
 		return testProwlarr(ctx, httpClient, req)
-	case "qbittorrent":
-		return testQBittorrent(ctx, httpClient, req)
-	case "nzbget":
-		return testNZBGet(ctx, httpClient, req)
+	// No "qbittorrent"/"nzbget" cases: the unified aria2c downloader replaced
+	// both as SAK's download engine (Unified downloader, 2026-07-18), so there
+	// is no external download-client connection to test anymore — same
+	// precedent as the removed radarr/sonarr/whisparr cases. internal/qbittorrent
+	// and internal/nzbget are kept as generic capability (their testQBittorrent/
+	// testNZBGet helpers stay for potential reuse) but no live connection type
+	// reaches them.
 	case "tmdb":
 		return testTMDB(ctx, httpClient, req)
 	case "tvdb":

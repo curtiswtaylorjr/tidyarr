@@ -1,4 +1,4 @@
-// Sidebar tests — the left nav renders all 8 items with icons + labels, the
+// Sidebar tests — the left nav renders all 9 items with icons + labels, the
 // collapse toggle hides labels while keeping icons, and the collapsed choice
 // persists to localStorage across a fresh mount. Also covers the mobile
 // off-canvas drawer: open/closed translate classes and closing on nav-link
@@ -16,6 +16,7 @@ import {
 const NAV_LABELS = [
   "Dashboard",
   "Discover",
+  "Downloads",
   "Grabs",
   "Rename",
   "Purge",
@@ -49,13 +50,13 @@ beforeEach(() => localStorage.clear());
 afterEach(() => localStorage.clear());
 
 describe("Sidebar", () => {
-  it("renders all 8 nav items with icons and labels when expanded", () => {
+  it("renders all 9 nav items with icons and labels when expanded", () => {
     const { container } = renderSidebar();
     for (const label of NAV_LABELS) {
       expect(screen.getByText(label)).toBeInTheDocument();
     }
-    // 8 nav icons + 1 collapse-toggle chevron.
-    expect(container.querySelectorAll("svg").length).toBe(9);
+    // 10 nav icons + 1 collapse-toggle chevron.
+    expect(container.querySelectorAll("svg").length).toBe(11);
   });
 
   it("collapse toggle hides labels but keeps icons", () => {
@@ -66,7 +67,7 @@ describe("Sidebar", () => {
       expect(screen.queryByText(label)).not.toBeInTheDocument();
     }
     // Icons (and the chevron) all remain when collapsed.
-    expect(container.querySelectorAll("svg").length).toBe(9);
+    expect(container.querySelectorAll("svg").length).toBe(11);
     // The labels survive as native tooltips for hover discoverability.
     for (const label of NAV_LABELS) {
       expect(container.querySelector(`a[title="${label}"]`)).toBeTruthy();
@@ -101,7 +102,7 @@ describe("Sidebar", () => {
 
     // Labels hidden on this fresh mount because the persisted flag was read.
     expect(screen.queryByText("Discover")).not.toBeInTheDocument();
-    expect(container.querySelectorAll("svg").length).toBe(9);
+    expect(container.querySelectorAll("svg").length).toBe(11);
     // Toggle shows the expand affordance, confirming it mounted collapsed.
     expect(screen.getByLabelText("Expand sidebar")).toBeInTheDocument();
   });

@@ -207,7 +207,7 @@ func resolveSliderHandler(httpClient *http.Client, connStore *connections.Store,
 		// the one shared "tmdb" connection — same reasoning as
 		// discoverKeywordsHandler; a slider's own Target picks the media
 		// type(s) actually queried, not {mode}.
-		sess, err := mode.Build(ctx, connStore, settingsStore, httpClient, mode.Movies)
+		sess, err := mode.Build(ctx, connStore, settingsStore, httpClient, nil, mode.Movies)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return

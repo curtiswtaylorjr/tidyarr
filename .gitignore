@@ -14,6 +14,13 @@
 # `go build ./cmd/sakms` fails cleanly on the empty dir until it does.
 /internal/web/static/
 
+# Static aria2c binary — a multi-MB platform artifact fetched by
+# `make aria2c` (cmd/download-aria2c), never committed. `//go:embed
+# assets/aria2c` (internal/downloader/embed.go) fails cleanly until it's
+# fetched, same generated-artifact precedent as the frontend bundle above.
+# The Dockerfile fetches it in a build stage before `go build`.
+/internal/downloader/assets/aria2c
+
 /sakms
 /bin/
 

@@ -11,6 +11,7 @@ import (
 	"github.com/curtiswtaylorjr/sakms/internal/connections"
 	"github.com/curtiswtaylorjr/sakms/internal/dedup"
 	"github.com/curtiswtaylorjr/sakms/internal/discoversliders"
+	"github.com/curtiswtaylorjr/sakms/internal/downloader"
 	"github.com/curtiswtaylorjr/sakms/internal/grabs"
 	"github.com/curtiswtaylorjr/sakms/internal/library"
 	"github.com/curtiswtaylorjr/sakms/internal/mode"
@@ -57,7 +58,7 @@ import (
 // feed URL fetched and parsed server-side, a separate concept from
 // slidersStore (TMDB-backed) and adultNewestRowStore (Prowlarr-scan-cache-
 // backed) even though its CRUD+reorder shape mirrors both.
-func NewMux(httpClient *http.Client, connStore *connections.Store, propStore *proposals.Store, allowStore *allowlist.Store, prober dedup.Prober, hasher dedup.PHasher, videoHasher rename.PHasher, settingsStore *settings.Store, grabsStore *grabs.Store, libStore *library.Store, slidersStore *discoversliders.Store, traktStore *trakt.Store, adultNewestRowStore *adultnewest.Store, adultNewestReleaseStore *adultnewest.ReleaseStore, rssFeedsStore *rssfeeds.Store, entityStore parseentity.EntityStore, whStore *webhooks.Store) *http.ServeMux {
+func NewMux(httpClient *http.Client, connStore *connections.Store, propStore *proposals.Store, allowStore *allowlist.Store, prober dedup.Prober, hasher dedup.PHasher, videoHasher rename.PHasher, settingsStore *settings.Store, grabsStore *grabs.Store, libStore *library.Store, slidersStore *discoversliders.Store, traktStore *trakt.Store, adultNewestRowStore *adultnewest.Store, adultNewestReleaseStore *adultnewest.ReleaseStore, rssFeedsStore *rssfeeds.Store, entityStore parseentity.EntityStore, whStore *webhooks.Store, dl *downloader.Manager) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/connections/test", connectionsTestHandler(httpClient))
 	// test-stored tests an ALREADY-SAVED connection using its stored secret,
@@ -236,13 +237,28 @@ func NewMux(httpClient *http.Client, connStore *connections.Store, propStore *pr
 	// library caches no poster path) — see posterHandler.
 	mux.HandleFunc("GET /api/modes/{mode}/poster", posterHandler(httpClient, connStore, settingsStore))
 	mux.HandleFunc("GET /api/modes/{mode}/search", searchHandler(httpClient, connStore, settingsStore))
-	mux.HandleFunc("POST /api/modes/{mode}/search/grab", grabHandler(httpClient, connStore, settingsStore, grabsStore, whStore))
+	mux.HandleFunc("POST /api/modes/{mode}/search/grab", grabHandler(httpClient, connStore, settingsStore, dl, grabsStore, whStore))
 	// Auto-grab is Discover's one-click unattended grab (Stage 2): search +
 	// bitrate-quality-floor scoring, then either grab the top qualifier or
 	// return the ranked manual pick list. Exactly one release per call.
-	mux.HandleFunc("POST /api/modes/{mode}/autograb", autoGrabHandler(httpClient, connStore, settingsStore, grabsStore))
+	mux.HandleFunc("POST /api/modes/{mode}/autograb", autoGrabHandler(httpClient, connStore, settingsStore, dl, grabsStore))
 	mux.HandleFunc("GET /api/modes/{mode}/grabs", listGrabsHandler(grabsStore))
-	mux.HandleFunc("POST /api/grabs/{id}/check-import", checkImportHandler(httpClient, connStore, settingsStore, grabsStore, libStore, prober))
+	mux.HandleFunc("POST /api/grabs/{id}/check-import", checkImportHandler(httpClient, connStore, settingsStore, dl, grabsStore, libStore, prober))
+
+	// Unified downloader queue (aria2c): live list, SSE stream, and per-item
+	// cancel/pause/resume. These read/mutate the aria2 queue directly through
+	// the download Manager, distinct from the grab records above. See
+	// downloads.go.
+	mux.HandleFunc("GET /api/downloads", listDownloadsHandler(dl))
+	mux.HandleFunc("GET /api/downloads/stream", downloadsStreamHandler(dl))
+	mux.HandleFunc("DELETE /api/downloads/{gid}", cancelDownloadHandler(dl))
+	mux.HandleFunc("POST /api/downloads/{gid}/pause", pauseDownloadHandler(dl))
+	mux.HandleFunc("POST /api/downloads/{gid}/resume", resumeDownloadHandler(dl))
+
+	// Unified downloader config (staging dir + concurrency knobs). The RPC
+	// token is auto-generated and stored via internal/secrets, never here.
+	mux.HandleFunc("GET /api/downloader/config", getDownloaderConfigHandler(settingsStore))
+	mux.HandleFunc("PUT /api/downloader/config", putDownloaderConfigHandler(settingsStore))
 
 	mux.HandleFunc("GET /api/modes/{mode}/tags", listTagsHandler(libStore))
 	mux.HandleFunc("POST /api/modes/{mode}/items/{itemId}/tags", addItemTagHandler(libStore))

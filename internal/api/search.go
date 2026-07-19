@@ -6,23 +6,21 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"path/filepath"
 	"sort"
 	"strconv"
-	"strings"
 	"time"
 
+	"github.com/curtiswtaylorjr/sakms/internal/aria2"
 	"github.com/curtiswtaylorjr/sakms/internal/autograb"
 	"github.com/curtiswtaylorjr/sakms/internal/connections"
 	"github.com/curtiswtaylorjr/sakms/internal/dedup"
+	"github.com/curtiswtaylorjr/sakms/internal/downloader"
 	"github.com/curtiswtaylorjr/sakms/internal/grabs"
 	"github.com/curtiswtaylorjr/sakms/internal/library"
 	"github.com/curtiswtaylorjr/sakms/internal/mode"
 	"github.com/curtiswtaylorjr/sakms/internal/prowlarr"
-	"github.com/curtiswtaylorjr/sakms/internal/qbittorrent"
 	"github.com/curtiswtaylorjr/sakms/internal/quality"
 	"github.com/curtiswtaylorjr/sakms/internal/release"
-	"github.com/curtiswtaylorjr/sakms/internal/rename"
 	"github.com/curtiswtaylorjr/sakms/internal/settings"
 	"github.com/curtiswtaylorjr/sakms/internal/webhooks"
 )
@@ -81,7 +79,7 @@ func searchHandler(httpClient *http.Client, connStore *connections.Store, settin
 			return
 		}
 
-		sess, err := mode.Build(ctx, connStore, settingsStore, httpClient, m)
+		sess, err := mode.Build(ctx, connStore, settingsStore, httpClient, nil, m)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -168,7 +166,7 @@ type grabRequest struct {
 // internal/grabs for status tracking. This is the one mutating action in the
 // search workflow — Search itself never does — matching every other
 // workflow's "Scan never mutates, exactly one human-approved action does" rule.
-func grabHandler(httpClient *http.Client, connStore *connections.Store, settingsStore *settings.Store, grabsStore *grabs.Store, whStore *webhooks.Store) http.HandlerFunc {
+func grabHandler(httpClient *http.Client, connStore *connections.Store, settingsStore *settings.Store, dl *downloader.Manager, grabsStore *grabs.Store, whStore *webhooks.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		m := mode.Mode(r.PathValue("mode"))
 		ctx := r.Context()
@@ -183,13 +181,13 @@ func grabHandler(httpClient *http.Client, connStore *connections.Store, settings
 			return
 		}
 
-		sess, err := mode.Build(ctx, connStore, settingsStore, httpClient, m)
+		sess, err := mode.Build(ctx, connStore, settingsStore, httpClient, dl, m)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 
-		downloadClient, clientRef, status, err := dispatchToDownloadClient(ctx, sess, m, req.Protocol, req.DownloadURL, req.Title)
+		downloadClient, gid, status, err := dispatchToDownloadClient(ctx, sess, m, req.Protocol, req.DownloadURL, req.Title)
 		if err != nil {
 			http.Error(w, err.Error(), status)
 			return
@@ -199,11 +197,22 @@ func grabHandler(httpClient *http.Client, connStore *connections.Store, settings
 			Mode: m, Title: req.Title, TMDBID: req.TMDBID, TVDBID: req.TVDBID,
 			SeasonNumber: req.SeasonNumber, EpisodeNumber: req.EpisodeNumber, SeasonSpecified: req.SeasonSpecified,
 			QualityProfileID: req.QualityProfileID, Indexer: req.Indexer, Protocol: req.Protocol,
-			DownloadClient: downloadClient, ClientRef: clientRef, RootFolderPath: req.RootFolderPath,
+			DownloadClient: downloadClient, RootFolderPath: req.RootFolderPath,
 		})
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
+		}
+
+		// Record the aria2 GID so the downloader's onComplete callback can tie
+		// a finished download back to this grab for auto-import. Best-effort:
+		// a store failure here doesn't undo the (already-submitted) download.
+		if gid != "" {
+			if err := grabsStore.SetDownloadGID(ctx, created.ID, gid); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			created.DownloadGID = gid
 		}
 
 		whStore.Dispatch(webhooks.EventGrabCompleted, map[string]any{
@@ -215,37 +224,33 @@ func grabHandler(httpClient *http.Client, connStore *connections.Store, settings
 	}
 }
 
-// dispatchToDownloadClient sends one release to the appropriate download
-// client (qBittorrent for torrent, NZBGet for usenet) and returns the client
-// name plus a pollable client-side reference (a torrent hash, or an NZBGet id;
-// "" when it can't be derived — e.g. a non-magnet .torrent URL, which is still
-// recorded but can't be status-polled later; see qbittorrent.HashFromMagnet).
+// dispatchToDownloadClient sends one release to the unified aria2c downloader
+// and returns the download-client name ("aria2") plus the aria2 GID assigned
+// (used later to tie a completed download back to its grab for auto-import).
 // Shared by the manual grabHandler and the auto-grab handler — auto-grab is
 // the genuine second caller that justifies the extraction. On failure it
-// returns the HTTP status the caller should surface, preserving each path's
-// original code (400 not-configured / unrecognized-protocol, 502 client error).
-func dispatchToDownloadClient(ctx context.Context, sess *mode.Session, m mode.Mode, protocol, downloadURL, title string) (downloadClient, clientRef string, status int, err error) {
+// returns the HTTP status the caller should surface (400 not-configured /
+// usenet-unsupported / unrecognized-protocol, 502 client error).
+//
+// USENET IS NOT SUPPORTED by the aria2 backend (aria2 speaks HTTP/FTP/SFTP/
+// BitTorrent/Metalink, no NNTP) — a usenet-protocol release returns an
+// explicit 400 rather than silently failing. The old qBittorrent/NZBGet
+// dispatch was removed with the unified-downloader cutover; internal/nzbget
+// stays as generic capability for a future usenet engine (see mode.Session's
+// QBittorrent/NZBGet field docs).
+func dispatchToDownloadClient(ctx context.Context, sess *mode.Session, m mode.Mode, protocol, downloadURL, title string) (downloadClient, gid string, status int, err error) {
 	switch prowlarr.Protocol(protocol) {
 	case prowlarr.Torrent:
-		if sess.QBittorrent == nil {
-			return "", "", http.StatusBadRequest, errors.New("qbittorrent isn't configured yet — add it in Settings first")
+		if sess.Downloader == nil {
+			return "", "", http.StatusBadRequest, errors.New("the download engine isn't running — check the server logs (the embedded aria2c binary may be missing)")
 		}
-		if err := sess.QBittorrent.Add(ctx, downloadURL, string(m)); err != nil {
-			return "", "", http.StatusBadGateway, err
-		}
-		if hash, ok := qbittorrent.HashFromMagnet(downloadURL); ok {
-			clientRef = hash
-		}
-		return "qbittorrent", clientRef, http.StatusOK, nil
-	case prowlarr.Usenet:
-		if sess.NZBGet == nil {
-			return "", "", http.StatusBadRequest, errors.New("nzbget isn't configured yet — add it in Settings first")
-		}
-		id, err := sess.NZBGet.Append(ctx, downloadURL, title+".nzb", string(m))
+		gid, err := sess.Downloader.RPC().AddTorrent(ctx, downloadURL, sess.Downloader.StagingDir())
 		if err != nil {
 			return "", "", http.StatusBadGateway, err
 		}
-		return "nzbget", strconv.FormatInt(id, 10), http.StatusOK, nil
+		return "aria2", gid, http.StatusOK, nil
+	case prowlarr.Usenet:
+		return "", "", http.StatusBadRequest, errors.New("usenet/NZB downloads aren't supported by the aria2 backend yet — only torrent releases can be grabbed")
 	default:
 		return "", "", http.StatusBadRequest, fmt.Errorf("unrecognized protocol %q", protocol)
 	}
@@ -264,52 +269,20 @@ func listGrabsHandler(grabsStore *grabs.Store) http.HandlerFunc {
 	}
 }
 
-// classifyQBittorrentState maps qBittorrent's many torrent states down to
-// grabs' simpler lifecycle — "uploading"/stalled-seeding/paused-seeding
-// states all mean the download itself finished, it's just seeding now.
-func classifyQBittorrentState(state string) grabs.Status {
-	switch state {
-	case "error", "missingFiles":
-		return grabs.Failed
-	case "uploading", "stalledUP", "pausedUP", "queuedUP", "forcedUP", "checkingUP":
-		return grabs.Completed
-	default:
-		return grabs.Downloading
-	}
-}
-
-// classifyNZBGetState maps NZBGet's Status values down to grabs' lifecycle.
-// A history-sourced status always looks like "SUCCESS/ALL" or "FAILURE/PAR"
-// (contains a slash); an active-queue status from listgroups is a bare word
-// like "DOWNLOADING" or "PAUSED" — this is a heuristic, not a documented
-// distinction, since (like the rest of this client) it isn't confirmed
-// against a real NZBGet instance yet.
-func classifyNZBGetState(state string) grabs.Status {
-	if strings.Contains(state, "/") {
-		if strings.HasPrefix(state, "SUCCESS") {
-			return grabs.Completed
-		}
-		return grabs.Failed
-	}
-	switch state {
-	case "PAUSED", "QUEUED":
-		return grabs.Queued
-	default:
-		return grabs.Downloading
-	}
-}
-
-// checkImportHandler refreshes one grab's status from its download client,
-// and — the moment it's seen as complete — performs the import: relocates
-// the downloaded content into the grab's target root folder (reusing
-// internal/rename's exact Relocate logic) and records it in SAK's own library
-// (Movies/Series), exactly like Rename's Apply does for a brand-new orphan.
-// Adult records nothing here — it has no scene identity at grab time — and
-// defers tracking to the next Rename scan (see the mode.Adult branch). This is
-// a manual, human-triggered refresh (there is no background poller anywhere
-// in this program) — the user clicks it, same as every other mutating
-// action in SAK.
-func checkImportHandler(httpClient *http.Client, connStore *connections.Store, settingsStore *settings.Store, grabsStore *grabs.Store, libStore *library.Store, prober dedup.Prober) http.HandlerFunc {
+// checkImportHandler refreshes one grab's status from the unified aria2c
+// downloader, and — the moment its download is seen complete — performs the
+// import via the shared importGrabContent core (relocate into the target root
+// folder + record in SAK's own library). This is the manual, human-triggered
+// refresh; the same import also happens automatically via the downloader's
+// onComplete callback (see cmd/sakms's onDownloadComplete), so a grab
+// typically imports itself the moment aria2 finishes — this endpoint is the
+// on-demand "check it now" the Grabs UI can still offer.
+//
+// classifyAria2State maps aria2's status to grabs' lifecycle; a completed,
+// not-yet-imported grab imports here and flips to Imported. A grab with no
+// aria2 GID (e.g. a usenet grab, which the aria2 backend can't take) has
+// nothing to poll and returns a clear conflict.
+func checkImportHandler(httpClient *http.Client, connStore *connections.Store, settingsStore *settings.Store, dl *downloader.Manager, grabsStore *grabs.Store, libStore *library.Store, prober dedup.Prober) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 		id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
@@ -333,171 +306,48 @@ func checkImportHandler(httpClient *http.Client, connStore *connections.Store, s
 			return
 		}
 
-		sess, err := mode.Build(ctx, connStore, settingsStore, httpClient, g.Mode)
+		if dl == nil {
+			http.Error(w, "the download engine isn't running", http.StatusBadRequest)
+			return
+		}
+		if g.DownloadGID == "" {
+			http.Error(w, "this grab has no aria2 download to check (usenet grabs aren't tracked by the aria2 backend)", http.StatusConflict)
+			return
+		}
+
+		// Find the grab's download in aria2's current queue (active + waiting +
+		// stopped) by GID.
+		dlItem, err := findDownloadByGID(ctx, dl, g.DownloadGID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		if dlItem == nil {
+			http.Error(w, "aria2 no longer knows about this download", http.StatusConflict)
+			return
+		}
+
+		sess, err := mode.Build(ctx, connStore, settingsStore, httpClient, dl, g.Mode)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 
-		var newStatus grabs.Status
-		var contentPath string
-		switch g.DownloadClient {
-		case "qbittorrent":
-			if sess.QBittorrent == nil {
-				http.Error(w, "qbittorrent isn't configured", http.StatusBadRequest)
-				return
-			}
-			if g.ClientRef == "" {
-				http.Error(w, "this grab has no tracked hash (it wasn't added via a magnet link) — check qbittorrent directly", http.StatusConflict)
-				return
-			}
-			status, err := sess.QBittorrent.Status(ctx, g.ClientRef)
+		newStatus := classifyAria2State(dlItem.Status)
+		if newStatus == grabs.Completed {
+			contentPath := downloadContentPath(dlItem.Files, dlItem.Dir, dl.StagingDir())
+			changes, err := importGrabContent(ctx, libStore, g, contentPath)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusBadGateway)
 				return
 			}
-			newStatus = classifyQBittorrentState(status.State)
-			contentPath = status.ContentPath
-		case "nzbget":
-			if sess.NZBGet == nil {
-				http.Error(w, "nzbget isn't configured", http.StatusBadRequest)
-				return
-			}
-			refID, err := strconv.ParseInt(g.ClientRef, 10, 64)
-			if err != nil {
-				http.Error(w, "this grab has no valid nzbget id", http.StatusConflict)
-				return
-			}
-			status, err := sess.NZBGet.Status(ctx, refID)
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusBadGateway)
-				return
-			}
-			newStatus = classifyNZBGetState(status.State)
-			contentPath = status.DestDir
-		default:
-			http.Error(w, fmt.Sprintf("unknown download client %q", g.DownloadClient), http.StatusInternalServerError)
-			return
-		}
-
-		if newStatus == grabs.Completed && contentPath != "" {
-			movedPath, err := rename.Relocate(contentPath, g.RootFolderPath)
-			if err != nil {
-				http.Error(w, fmt.Sprintf("download completed but import failed: %v", err), http.StatusBadGateway)
-				return
-			}
-			// changes accumulates the exact file(s) this import created, fed
-			// to sess.NotifyPlayers once below (Jellyfin=Movies/Series,
-			// Stash=Adult — hardcoded scoping via mode.Build's nil-ness,
-			// same as every other call site). movedPath itself can be a
-			// wrapping directory (Relocate moves contentPath's whole tree),
-			// so Movies/Series notify with the resolved video file path(s) —
-			// same "actual path, not the directory" discipline as rename.go's
-			// row 1/2 — while Adult (no per-file resolution here: the scene is
-			// left untracked for the next Rename scan to identify, and Stash's
-			// RescanPaths scans directory trees fine) notifies with movedPath
-			// directly.
-			var changes []mode.PathChange
-			switch g.Mode {
-			case mode.Movies:
-				videoPath, err := library.ResolveVideoFile(movedPath)
-				if err != nil {
-					http.Error(w, fmt.Sprintf("file relocated but resolving the video file failed: %v", err), http.StatusBadGateway)
-					return
-				}
-				if _, err := libStore.Upsert(ctx, library.Item{
-					Mode: mode.Movies, TMDBID: g.TMDBID, Title: g.Title,
-					FilePath: videoPath, RootFolderPath: g.RootFolderPath,
-				}); err != nil {
-					http.Error(w, fmt.Sprintf("file relocated but recording it in the library failed: %v", err), http.StatusBadGateway)
-					return
-				}
-				changes = []mode.PathChange{{Path: videoPath, Kind: mode.Created}}
-			case mode.Series:
-				videoPaths, err := library.ResolveEpisodeVideoFiles(movedPath)
-				if err != nil {
-					http.Error(w, fmt.Sprintf("file relocated but resolving the video file(s) failed: %v", err), http.StatusBadGateway)
-					return
-				}
-				series, err := libStore.UpsertSeries(ctx, library.Series{
-					TMDBID: g.TMDBID, Title: g.Title, RootFolderPath: g.RootFolderPath,
-				})
-				if err != nil {
-					http.Error(w, fmt.Sprintf("file relocated but recording the series failed: %v", err), http.StatusBadGateway)
-					return
-				}
-				for _, videoPath := range videoPaths {
-					season, episodes, ok := library.ParseEpisodeNumbers(filepath.Base(videoPath))
-					if !ok {
-						// A season-pack grab's own request already recorded
-						// which season it targeted; a single-episode grab
-						// whose relocated file name didn't carry its own
-						// SxxExx token falls back to what was requested —
-						// only sound when there's exactly one resolved file
-						// and a season was actually specified at grab time
-						// (SeasonNumber alone can't tell "Season 0/Specials"
-						// apart from "no season was picked at all").
-						if len(videoPaths) != 1 || !g.SeasonSpecified {
-							continue
-						}
-						season, episodes = g.SeasonNumber, []int{g.EpisodeNumber}
-					}
-					// Logical episode-splitting: a bundled multi-episode
-					// filename (e.g. "S01E01-E02") relocates as ONE file but
-					// must record an Episode row for EVERY number it
-					// contains — episodes[1:] were silently dropped before
-					// this fix (a real, confirmed gap: a grabbed multi-
-					// episode file used to leave every episode past the
-					// first untracked forever). One Created PathChange per
-					// physical file still, not per episode row.
-					for _, episode := range episodes {
-						if _, err := libStore.UpsertEpisode(ctx, library.Episode{
-							SeriesID: series.ID, SeasonNumber: season, EpisodeNumber: episode, FilePath: videoPath,
-						}); err != nil {
-							http.Error(w, fmt.Sprintf("file relocated but recording episode s%de%d failed: %v", season, episode, err), http.StatusBadGateway)
-							return
-						}
-					}
-					changes = append(changes, mode.PathChange{Path: videoPath, Kind: mode.Created})
-				}
-			case mode.Adult:
-				// Adult owns its own library now (Whisparr eliminated, Stage 4),
-				// but — unlike Movies/Series — an Adult grab carries NO stable
-				// scene identity at grab time: grabRequest has no box/scene_id,
-				// and TMDBID is always 0 for Adult. library.Scene is keyed on
-				// (box, scene_id), so there is nothing to UpsertScene on yet.
-				//
-				// DELIBERATE DEVIATION from the Stage-4 plan's literal
-				// "resolve the grabbed file and UpsertScene here": recording a
-				// scene with an empty (box, scene_id) would be actively harmful —
-				// (a) every unidentified grab collides onto the single
-				// ON CONFLICT(box, scene_id) = ("","") row, clobbering the prior
-				// one; and (b) a scene recorded at import time is masked from the
-				// next Rename scan, since ScanLibraryAdult builds its `known` set
-				// from scene FilePaths and ScanRootFolder skips known paths — so
-				// the very pass meant to identify it would never see it. Both
-				// defeat the plan's own stated goal ("let the next Rename scan
-				// fully identify/reconcile it later").
-				//
-				// So we relocate the download into the Adult root folder and stop
-				// there, exactly as before but without the Whisparr registration.
-				// The next Adult Rename scan discovers the untracked file,
-				// identifies it, and UpsertScenes it with a real (box, scene_id).
-				// Stash's RescanPaths handles a directory tree fine, so notify
-				// with movedPath directly (no per-file resolution here).
-				changes = []mode.PathChange{{Path: movedPath, Kind: mode.Created}}
-			default:
-				http.Error(w, fmt.Sprintf("unknown mode %q", g.Mode), http.StatusInternalServerError)
-				return
-			}
-			// Post-grab mislabel check (auto-grab safety net): probe the
-			// imported file's real duration and flag the grab for review if it's
-			// wildly inconsistent with the known TMDB runtime. Strictly advisory
-			// — the import already succeeded — so it never fails the handler.
+			// Post-grab mislabel check (auto-grab safety net): advisory only.
 			postGrabRuntimeReview(ctx, prober, grabsStore, sess, g, changes)
-
 			sess.NotifyPlayers(ctx, changes)
+			_ = grabsStore.SetDownloadStatus(ctx, id, dlItem.Status, contentPath)
 			newStatus = grabs.Imported
+		} else {
+			_ = grabsStore.SetDownloadStatus(ctx, id, dlItem.Status, "")
 		}
 
 		if err := grabsStore.UpdateStatus(ctx, id, newStatus); err != nil {
@@ -512,6 +362,44 @@ func checkImportHandler(httpClient *http.Client, connStore *connections.Store, s
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(updated)
+	}
+}
+
+// findDownloadByGID looks up one download by GID across aria2's active,
+// waiting, and stopped lists. Returns (nil, nil) when aria2 has no such GID.
+func findDownloadByGID(ctx context.Context, dl *downloader.Manager, gid string) (*aria2.Download, error) {
+	lists := [](func() ([]aria2.Download, error)){
+		func() ([]aria2.Download, error) { return dl.RPC().TellActive(ctx) },
+		func() ([]aria2.Download, error) { return dl.RPC().TellWaiting(ctx, 0, 1000) },
+		func() ([]aria2.Download, error) { return dl.RPC().TellStopped(ctx, 0, 1000) },
+	}
+	for _, fetch := range lists {
+		items, err := fetch()
+		if err != nil {
+			return nil, err
+		}
+		for i := range items {
+			if items[i].GID == gid {
+				return &items[i], nil
+			}
+		}
+	}
+	return nil, nil
+}
+
+// classifyAria2State maps aria2's status vocabulary to grabs' lifecycle.
+// "complete" is the only status that triggers an import; "error" is Failed;
+// everything else (active/waiting/paused) is still in-flight.
+func classifyAria2State(state string) grabs.Status {
+	switch state {
+	case "complete":
+		return grabs.Completed
+	case "error":
+		return grabs.Failed
+	case "waiting", "paused":
+		return grabs.Queued
+	default: // "active", "removed", or anything unexpected
+		return grabs.Downloading
 	}
 }
 

@@ -70,7 +70,7 @@ func discoverAvailabilityHandler(httpClient *http.Client, connStore *connections
 			return
 		}
 
-		sess, err := mode.Build(ctx, connStore, settingsStore, httpClient, m)
+		sess, err := mode.Build(ctx, connStore, settingsStore, httpClient, nil, m)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return

@@ -45,7 +45,7 @@ func newTestStores(t *testing.T) (*connections.Store, *settings.Store) {
 func TestBuild_Movies_NoServarrConnectionRequired(t *testing.T) {
 	store, settingsStore := newTestStores(t)
 
-	sess, err := Build(context.Background(), store, settingsStore, &http.Client{Timeout: time.Second}, Movies)
+	sess, err := Build(context.Background(), store, settingsStore, &http.Client{Timeout: time.Second}, nil, Movies)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -63,7 +63,7 @@ func TestBuild_Movies_NoServarrConnectionRequired(t *testing.T) {
 func TestBuild_Series_NoServarrConnectionRequired(t *testing.T) {
 	store, settingsStore := newTestStores(t)
 
-	sess, err := Build(context.Background(), store, settingsStore, &http.Client{Timeout: time.Second}, Series)
+	sess, err := Build(context.Background(), store, settingsStore, &http.Client{Timeout: time.Second}, nil, Series)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -85,7 +85,7 @@ func TestBuild_Series_NoServarrConnectionRequired(t *testing.T) {
 func TestBuild_Adult_NoServarrConnectionRequired(t *testing.T) {
 	store, settingsStore := newTestStores(t)
 
-	sess, err := Build(context.Background(), store, settingsStore, &http.Client{Timeout: time.Second}, Adult)
+	sess, err := Build(context.Background(), store, settingsStore, &http.Client{Timeout: time.Second}, nil, Adult)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -108,7 +108,7 @@ func TestBuild_Adult_ServarrAlwaysNil(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	sess, err := Build(ctx, store, settingsStore, &http.Client{Timeout: time.Second}, Adult)
+	sess, err := Build(ctx, store, settingsStore, &http.Client{Timeout: time.Second}, nil, Adult)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -119,7 +119,7 @@ func TestBuild_Adult_ServarrAlwaysNil(t *testing.T) {
 
 func TestBuild_UnknownMode(t *testing.T) {
 	store, settingsStore := newTestStores(t)
-	_, err := Build(context.Background(), store, settingsStore, &http.Client{}, Mode("bogus"))
+	_, err := Build(context.Background(), store, settingsStore, &http.Client{}, nil, Mode("bogus"))
 	if err == nil {
 		t.Fatal("expected an error for an unknown mode")
 	}
@@ -139,7 +139,7 @@ func TestBuild_AdultOnlyWhisparr_IdentifyBuiltWithoutAI(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	sess, err := Build(ctx, store, settingsStore, &http.Client{Timeout: time.Second}, Adult)
+	sess, err := Build(ctx, store, settingsStore, &http.Client{Timeout: time.Second}, nil, Adult)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -162,7 +162,7 @@ func TestBuild_AdultNoStashConnection_SessionStashNil(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	sess, err := Build(ctx, store, settingsStore, &http.Client{Timeout: time.Second}, Adult)
+	sess, err := Build(ctx, store, settingsStore, &http.Client{Timeout: time.Second}, nil, Adult)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -183,7 +183,7 @@ func TestBuild_AdultStashConnectionConfigured_PopulatesSessionStash(t *testing.T
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	sess, err := Build(ctx, store, settingsStore, &http.Client{Timeout: time.Second}, Adult)
+	sess, err := Build(ctx, store, settingsStore, &http.Client{Timeout: time.Second}, nil, Adult)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -225,7 +225,7 @@ func TestBuild_AdultSettingsStoreError_Propagates(t *testing.T) {
 		t.Fatalf("dropping settings table: %v", err)
 	}
 
-	_, err = Build(ctx, store, settingsStore, &http.Client{Timeout: time.Second}, Adult)
+	_, err = Build(ctx, store, settingsStore, &http.Client{Timeout: time.Second}, nil, Adult)
 	if err == nil {
 		t.Fatal("expected a real settings-store error to propagate, got nil")
 	}
@@ -248,7 +248,7 @@ func TestBuild_AdultOllamaConnButNoModelSetting_IdentifyBuiltAINil(t *testing.T)
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	sess, err := Build(ctx, store, settingsStore, &http.Client{Timeout: time.Second}, Adult)
+	sess, err := Build(ctx, store, settingsStore, &http.Client{Timeout: time.Second}, nil, Adult)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -285,7 +285,7 @@ func TestBuild_AdultWithIdentificationConnections_PopulatesIdentify(t *testing.T
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	sess, err := Build(ctx, store, settingsStore, &http.Client{Timeout: time.Second}, Adult)
+	sess, err := Build(ctx, store, settingsStore, &http.Client{Timeout: time.Second}, nil, Adult)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -375,7 +375,7 @@ func TestBuild_AdultIdentifierIsFunctional(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	sess, err := Build(ctx, store, settingsStore, &http.Client{Timeout: 5 * time.Second}, Adult)
+	sess, err := Build(ctx, store, settingsStore, &http.Client{Timeout: 5 * time.Second}, nil, Adult)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -412,7 +412,7 @@ func TestBuild_MainstreamAI_NilWithoutOllamaConnection(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	sess, err := Build(ctx, store, settingsStore, &http.Client{Timeout: time.Second}, Movies)
+	sess, err := Build(ctx, store, settingsStore, &http.Client{Timeout: time.Second}, nil, Movies)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -434,7 +434,7 @@ func TestBuild_MainstreamAI_NilWithoutModelSetting(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	sess, err := Build(ctx, store, settingsStore, &http.Client{Timeout: time.Second}, Movies)
+	sess, err := Build(ctx, store, settingsStore, &http.Client{Timeout: time.Second}, nil, Movies)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -467,7 +467,7 @@ func TestBuild_MainstreamAI_PopulatedWhenConfigured(t *testing.T) {
 				t.Fatalf("unexpected error: %v", err)
 			}
 
-			sess, err := Build(ctx, store, settingsStore, &http.Client{Timeout: time.Second}, m)
+			sess, err := Build(ctx, store, settingsStore, &http.Client{Timeout: time.Second}, nil, m)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -538,7 +538,7 @@ func TestBuild_AIClient_UsesConfiguredProvider(t *testing.T) {
 				t.Fatalf("unexpected error: %v", err)
 			}
 
-			sess, err := Build(ctx, store, settingsStore, &http.Client{Timeout: 5 * time.Second}, Movies)
+			sess, err := Build(ctx, store, settingsStore, &http.Client{Timeout: 5 * time.Second}, nil, Movies)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -580,7 +580,7 @@ func TestBuild_AIClient_UnknownProviderErrors(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	_, err := Build(ctx, store, settingsStore, &http.Client{Timeout: time.Second}, Movies)
+	_, err := Build(ctx, store, settingsStore, &http.Client{Timeout: time.Second}, nil, Movies)
 	if err == nil {
 		t.Fatal("expected an error for an unrecognized ai_provider value")
 	}
@@ -616,7 +616,7 @@ func TestBuild_AIClient_ProviderStoreError_Propagates(t *testing.T) {
 		t.Fatalf("dropping settings table: %v", err)
 	}
 
-	_, err = Build(ctx, store, settingsStore, &http.Client{Timeout: time.Second}, Movies)
+	_, err = Build(ctx, store, settingsStore, &http.Client{Timeout: time.Second}, nil, Movies)
 	if err == nil {
 		t.Fatal("expected a real settings-store error to propagate, got nil")
 	}
@@ -640,7 +640,7 @@ func TestBuild_KidsRootPath_DefaultsEmpty(t *testing.T) {
 				t.Fatalf("unexpected error: %v", err)
 			}
 
-			sess, err := Build(ctx, store, settingsStore, &http.Client{Timeout: time.Second}, m)
+			sess, err := Build(ctx, store, settingsStore, &http.Client{Timeout: time.Second}, nil, m)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -669,7 +669,7 @@ func TestBuild_KidsRootPath_ReadsPerModeSetting(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	moviesSess, err := Build(ctx, store, settingsStore, &http.Client{Timeout: time.Second}, Movies)
+	moviesSess, err := Build(ctx, store, settingsStore, &http.Client{Timeout: time.Second}, nil, Movies)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -677,7 +677,7 @@ func TestBuild_KidsRootPath_ReadsPerModeSetting(t *testing.T) {
 		t.Errorf("got %q", moviesSess.KidsRootPath)
 	}
 
-	seriesSess, err := Build(ctx, store, settingsStore, &http.Client{Timeout: time.Second}, Series)
+	seriesSess, err := Build(ctx, store, settingsStore, &http.Client{Timeout: time.Second}, nil, Series)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -695,7 +695,7 @@ func TestBuild_KidsRootPath_NotApplicableToAdult(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	sess, err := Build(ctx, store, settingsStore, &http.Client{Timeout: time.Second}, Adult)
+	sess, err := Build(ctx, store, settingsStore, &http.Client{Timeout: time.Second}, nil, Adult)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -714,7 +714,7 @@ func TestBuild_DownloadPipeline_NilWhenUnconfigured(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	sess, err := Build(ctx, store, settingsStore, &http.Client{Timeout: time.Second}, Movies)
+	sess, err := Build(ctx, store, settingsStore, &http.Client{Timeout: time.Second}, nil, Movies)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -724,15 +724,15 @@ func TestBuild_DownloadPipeline_NilWhenUnconfigured(t *testing.T) {
 	}
 }
 
-// TestBuild_DownloadPipeline_PopulatedWhenConfigured confirms each client is
-// populated independently — a torrent-only install (Prowlarr+qBittorrent,
-// no NZBGet) and a usenet-only install both work.
-func TestBuild_DownloadPipeline_PopulatedWhenConfigured(t *testing.T) {
+// TestBuild_SearchPipeline_PopulatedWhenConfigured confirms Prowlarr is
+// populated when configured, and — post unified-downloader — that
+// QBittorrent/NZBGet stay nil even when a qbittorrent connection exists,
+// because Build no longer constructs them (the aria2c Downloader replaced
+// them; the fields are retained only as generic capability). The injected
+// Downloader pointer is passed straight through.
+func TestBuild_SearchPipeline_PopulatedWhenConfigured(t *testing.T) {
 	store, settingsStore := newTestStores(t)
 	ctx := context.Background()
-	if err := store.Upsert(ctx, "radarr", "http://radarr.local:7878", "radarr-key"); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
 	if err := store.Upsert(ctx, "prowlarr", "http://prowlarr.local:9696", "prowlarr-key"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -740,18 +740,18 @@ func TestBuild_DownloadPipeline_PopulatedWhenConfigured(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	sess, err := Build(ctx, store, settingsStore, &http.Client{Timeout: time.Second}, Movies)
+	sess, err := Build(ctx, store, settingsStore, &http.Client{Timeout: time.Second}, nil, Movies)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if sess.Prowlarr == nil {
 		t.Error("expected Prowlarr to be populated")
 	}
-	if sess.QBittorrent == nil {
-		t.Error("expected QBittorrent to be populated")
+	if sess.QBittorrent != nil {
+		t.Error("expected QBittorrent to stay nil — Build no longer constructs it (aria2 replaced it)")
 	}
 	if sess.NZBGet != nil {
-		t.Error("expected NZBGet to stay nil — not configured in this test")
+		t.Error("expected NZBGet to stay nil — Build no longer constructs it (aria2 replaced it)")
 	}
 	if sess.TMDB != nil {
 		t.Error("expected TMDB to stay nil — not configured in this test")
@@ -771,7 +771,7 @@ func TestBuild_TMDB_PopulatedWhenConfigured(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	sess, err := Build(ctx, store, settingsStore, &http.Client{Timeout: time.Second}, Movies)
+	sess, err := Build(ctx, store, settingsStore, &http.Client{Timeout: time.Second}, nil, Movies)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

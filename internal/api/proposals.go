@@ -98,7 +98,7 @@ func applyProposalHandler(httpClient *http.Client, connStore *connections.Store,
 		// needed for sess.Identify/sess.Stash (Adult give-back + player-rescan
 		// notify) and sess.Jellyfin (Movies/Series notify); it leaves
 		// sess.Servarr nil for every mode now.
-		sess, err := mode.Build(ctx, connStore, settingsStore, httpClient, p.Mode)
+		sess, err := mode.Build(ctx, connStore, settingsStore, httpClient, nil, p.Mode)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -361,7 +361,7 @@ func applyBatchHandler(httpClient *http.Client, connStore *connections.Store, se
 
 			sess, ok := sessions[p.Mode]
 			if !ok {
-				sess, err = mode.Build(ctx, connStore, settingsStore, httpClient, p.Mode)
+				sess, err = mode.Build(ctx, connStore, settingsStore, httpClient, nil, p.Mode)
 				if err != nil {
 					results = append(results, applyBatchResultItem{ID: item.ID, OK: false, Error: err.Error()})
 					continue
@@ -433,7 +433,7 @@ func submitDraftHandler(httpClient *http.Client, connStore *connections.Store, s
 			return
 		}
 
-		sess, err := mode.Build(ctx, connStore, settingsStore, httpClient, p.Mode)
+		sess, err := mode.Build(ctx, connStore, settingsStore, httpClient, nil, p.Mode)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return

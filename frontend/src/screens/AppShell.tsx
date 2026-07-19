@@ -35,6 +35,7 @@ import {
 } from "../components/ui";
 import { Dashboard } from "./Dashboard";
 import { Discover } from "./Discover";
+import { Downloads } from "./Downloads";
 import { Grabs } from "./Grabs";
 import { Rename } from "./Rename";
 import { Purge } from "./Purge";
@@ -47,7 +48,7 @@ import { Settings } from "./Settings";
 // serves. Guardrail #2 / requirement #7: the router must NEVER claim any
 // /api/* path (the OIDC callback /api/auth/oidc/callback is a real server
 // route). A unit test asserts none of these start with "/api".
-export const APP_ROUTES = ["/dashboard", "/", "/discover", "/grabs", "/rename", "/purge", "/dedup", "/tag", "/collections", "/settings"] as const;
+export const APP_ROUTES = ["/dashboard", "/", "/discover", "/downloads", "/grabs", "/rename", "/purge", "/dedup", "/tag", "/collections", "/settings"] as const;
 
 // SIDEBAR_COLLAPSED_KEY persists the sidebar's collapsed/expanded choice across
 // reloads. A single boolean is enough ("true" = collapsed).
@@ -107,6 +108,13 @@ const IconDiscover: Component = () => (
   <svg {...svgProps}>
     <circle cx="12" cy="12" r="9" />
     <polygon points="15.5 8.5 11 11 8.5 15.5 13 13" />
+  </svg>
+);
+const IconDownloads: Component = () => (
+  <svg {...svgProps}>
+    <path d="M12 3v10" />
+    <path d="m8 11 4 4 4-4" />
+    <path d="M4 17v2a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-2" />
   </svg>
 );
 const IconGrabs: Component = () => (
@@ -172,6 +180,7 @@ type NavItem = { href: string; label: string; icon: Component };
 const NAV_ITEMS: NavItem[] = [
   { href: "/dashboard", label: "Dashboard", icon: IconDashboard },
   { href: "/discover", label: "Discover", icon: IconDiscover },
+  { href: "/downloads", label: "Downloads", icon: IconDownloads },
   { href: "/grabs", label: "Grabs", icon: IconGrabs },
   { href: "/rename", label: "Rename", icon: IconRename },
   { href: "/purge", label: "Purge", icon: IconPurge },
@@ -400,6 +409,7 @@ export const AppShell: Component<{
       <Route path="/" component={Discover} />
       <Route path="/dashboard" component={Dashboard} />
       <Route path="/discover" component={Discover} />
+      <Route path="/downloads" component={Downloads} />
       <Route path="/grabs" component={Grabs} />
       <Route path="/rename" component={Rename} />
       <Route path="/purge" component={Purge} />

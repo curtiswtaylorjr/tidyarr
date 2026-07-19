@@ -62,9 +62,23 @@ type Grab struct {
 	// ClientRef is the download client's own identifier for this
 	// download — qBittorrent's torrent hash, or NZBGet's NZBID (as a
 	// string) — used to poll that client for status.
-	ClientRef      string `json:"clientRef,omitempty"`
-	Status         Status `json:"status"`
-	RootFolderPath string `json:"rootFolderPath"`
+	ClientRef string `json:"clientRef,omitempty"`
+	// DownloadGID is the aria2 GID the unified downloader assigned this
+	// grab (empty for grabs not routed through aria2). It's how the
+	// downloader Manager's onComplete callback finds a grab by the GID that
+	// just finished, to run the auto-import. Distinct from ClientRef, which
+	// held a qBittorrent hash / NZBGet id under the legacy per-client path.
+	DownloadGID string `json:"downloadGid,omitempty"`
+	// DownloadStatus is the last-observed aria2 status for this grab
+	// ("active"/"waiting"/"paused"/"complete"/"error"/"removed"), recorded
+	// so the Grabs list can show download progress state without a live RPC
+	// call. Advisory mirror of aria2's own state, not a lifecycle Status.
+	DownloadStatus string `json:"downloadStatus,omitempty"`
+	// DownloadStagingPath is where aria2 staged this grab's files, captured
+	// at import time for reference.
+	DownloadStagingPath string `json:"downloadStagingPath,omitempty"`
+	Status              Status `json:"status"`
+	RootFolderPath      string `json:"rootFolderPath"`
 	// FlaggedForReview is set by auto-grab's post-grab mislabel check (see
 	// internal/autograb.RuntimeMismatch) when an imported file's actual
 	// duration is wildly inconsistent with the known TMDB/TPDB runtime. The
@@ -91,11 +105,11 @@ func (s *Store) Create(ctx context.Context, g Grab) (Grab, error) {
 	row := s.db.QueryRowContext(ctx, `
 		INSERT INTO grabs (
 			mode, title, tmdb_id, tvdb_id, season_number, episode_number, season_specified, quality_profile_id, indexer, protocol,
-			download_client, client_ref, status, root_folder_path
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			download_client, client_ref, download_gid, download_status, download_staging_path, status, root_folder_path
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		RETURNING id, created_at, updated_at
 	`, string(g.Mode), g.Title, g.TMDBID, g.TVDBID, g.SeasonNumber, g.EpisodeNumber, g.SeasonSpecified, g.QualityProfileID, g.Indexer, g.Protocol,
-		g.DownloadClient, g.ClientRef, string(Queued), g.RootFolderPath)
+		g.DownloadClient, g.ClientRef, g.DownloadGID, g.DownloadStatus, g.DownloadStagingPath, string(Queued), g.RootFolderPath)
 
 	g.Status = Queued
 	if err := row.Scan(&g.ID, &g.CreatedAt, &g.UpdatedAt); err != nil {
@@ -108,7 +122,7 @@ func (s *Store) Create(ctx context.Context, g Grab) (Grab, error) {
 func (s *Store) List(ctx context.Context, m mode.Mode) ([]Grab, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, mode, title, tmdb_id, tvdb_id, season_number, episode_number, season_specified, quality_profile_id, indexer, protocol,
-		       download_client, client_ref, status, root_folder_path, flagged_for_review, flag_reason, created_at, updated_at
+		       download_client, client_ref, download_gid, download_status, download_staging_path, status, root_folder_path, flagged_for_review, flag_reason, created_at, updated_at
 		FROM grabs WHERE mode = ? ORDER BY created_at DESC, id DESC
 	`, string(m))
 	if err != nil {
@@ -134,7 +148,7 @@ func (s *Store) List(ctx context.Context, m mode.Mode) ([]Grab, error) {
 func (s *Store) Get(ctx context.Context, id int64) (*Grab, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT id, mode, title, tmdb_id, tvdb_id, season_number, episode_number, season_specified, quality_profile_id, indexer, protocol,
-		       download_client, client_ref, status, root_folder_path, flagged_for_review, flag_reason, created_at, updated_at
+		       download_client, client_ref, download_gid, download_status, download_staging_path, status, root_folder_path, flagged_for_review, flag_reason, created_at, updated_at
 		FROM grabs WHERE id = ?
 	`, id)
 	g, err := scanGrab(row)
@@ -176,6 +190,54 @@ func (s *Store) Flag(ctx context.Context, id int64, reason string) error {
 	return dbutil.CheckAffected(res, id, ErrNotFound)
 }
 
+// SetDownloadGID records the aria2 GID the unified downloader assigned this
+// grab, so a later completion (looked up by GID via GetByDownloadGID) can be
+// tied back to it for auto-import. Set once, right after the grab is handed
+// to aria2.
+func (s *Store) SetDownloadGID(ctx context.Context, id int64, gid string) error {
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE grabs SET download_gid = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?
+	`, gid, id)
+	if err != nil {
+		return fmt.Errorf("setting grab %d download gid: %w", id, err)
+	}
+	return dbutil.CheckAffected(res, id, ErrNotFound)
+}
+
+// SetDownloadStatus records the last-observed aria2 status (and, when a
+// download completes and imports, its staging path) for the grab's Grabs-list
+// display. Advisory — it mirrors aria2's own state, distinct from the grab's
+// lifecycle Status.
+func (s *Store) SetDownloadStatus(ctx context.Context, id int64, downloadStatus, stagingPath string) error {
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE grabs SET download_status = ?, download_staging_path = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?
+	`, downloadStatus, stagingPath, id)
+	if err != nil {
+		return fmt.Errorf("setting grab %d download status: %w", id, err)
+	}
+	return dbutil.CheckAffected(res, id, ErrNotFound)
+}
+
+// GetByDownloadGID returns the grab the unified downloader assigned gid to.
+// The downloader Manager's onComplete callback uses this to find the grab a
+// finished aria2 download belongs to. Returns ErrNotFound when no grab holds
+// that GID (e.g. a download aria2 knows about that SAK didn't initiate).
+func (s *Store) GetByDownloadGID(ctx context.Context, gid string) (*Grab, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT id, mode, title, tmdb_id, tvdb_id, season_number, episode_number, season_specified, quality_profile_id, indexer, protocol,
+		       download_client, client_ref, download_gid, download_status, download_staging_path, status, root_folder_path, flagged_for_review, flag_reason, created_at, updated_at
+		FROM grabs WHERE download_gid = ?
+	`, gid)
+	g, err := scanGrab(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("loading grab for download gid %q: %w", gid, err)
+	}
+	return &g, nil
+}
+
 // rowScanner is satisfied by both *sql.Row and *sql.Rows, so scanGrab works
 // for List and Get alike.
 type rowScanner interface {
@@ -186,7 +248,7 @@ func scanGrab(row rowScanner) (Grab, error) {
 	var g Grab
 	var m string
 	err := row.Scan(&g.ID, &m, &g.Title, &g.TMDBID, &g.TVDBID, &g.SeasonNumber, &g.EpisodeNumber, &g.SeasonSpecified, &g.QualityProfileID, &g.Indexer, &g.Protocol,
-		&g.DownloadClient, &g.ClientRef, &g.Status, &g.RootFolderPath, &g.FlaggedForReview, &g.FlagReason, &g.CreatedAt, &g.UpdatedAt)
+		&g.DownloadClient, &g.ClientRef, &g.DownloadGID, &g.DownloadStatus, &g.DownloadStagingPath, &g.Status, &g.RootFolderPath, &g.FlaggedForReview, &g.FlagReason, &g.CreatedAt, &g.UpdatedAt)
 	g.Mode = mode.Mode(m)
 	return g, err
 }

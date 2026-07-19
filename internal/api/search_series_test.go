@@ -32,36 +32,23 @@ func TestCheckImportHandler_Series_SingleEpisode_PerformsImport(t *testing.T) {
 		t.Fatalf("writing file: %v", err)
 	}
 
-	fakeQB := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/api/v2/auth/login":
-			http.SetCookie(w, &http.Cookie{Name: "SID", Value: "test-sid"})
-			w.Write([]byte("Ok."))
-		case "/api/v2/torrents/info":
-			w.Header().Set("Content-Type", "application/json")
-			w.Write([]byte(`[{"hash":"abc123","state":"uploading","progress":1,"content_path":"` + downloadDir + `"}]`))
-		default:
-			t.Fatalf("unexpected request: %s", r.URL.Path)
-		}
-	}))
-	defer fakeQB.Close()
+	aria2Srv, fake := newFakeAria2(t, "abc123")
+	dl := newTestDownloader(aria2Srv.URL, t.TempDir())
+	fake.setCompleteDir("abc123", downloadDir)
 
 	connStore, propStore, allowStore, settingsStore, grabsStore, libStore, slidersStore, traktStore, adultNewestRowStore, adultNewestReleaseStore, rssFeedsStore := testStores(t)
 	ctx := context.Background()
-	if err := connStore.UpsertWithUsername(ctx, "qbittorrent", fakeQB.URL, "wade", "hunter2"); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
 
 	g, err := grabsStore.Create(ctx, grabs.Grab{
 		Mode: mode.Series, Title: "Some Show", TMDBID: 555, SeasonNumber: 1, EpisodeNumber: 1, SeasonSpecified: true,
-		Indexer: "I", Protocol: "torrent", DownloadClient: "qbittorrent",
-		ClientRef: "abc123", RootFolderPath: tvRoot,
+		Indexer: "I", Protocol: "torrent", DownloadClient: "aria2",
+		DownloadGID: "abc123", RootFolderPath: tvRoot,
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	srv := httptest.NewServer(NewMux(testHTTPClient(), connStore, propStore, allowStore, testProber(t), testPHasher(t), testVideoHasher(t), settingsStore, grabsStore, libStore, slidersStore, traktStore, adultNewestRowStore, adultNewestReleaseStore, rssFeedsStore, nil, nil))
+	srv := httptest.NewServer(NewMux(testHTTPClient(), connStore, propStore, allowStore, testProber(t), testPHasher(t), testVideoHasher(t), settingsStore, grabsStore, libStore, slidersStore, traktStore, adultNewestRowStore, adultNewestReleaseStore, rssFeedsStore, nil, nil, dl))
 	defer srv.Close()
 
 	resp, err := http.Post(srv.URL+"/api/grabs/"+strconv.FormatInt(g.ID, 10)+"/check-import", "application/json", nil)
@@ -113,36 +100,23 @@ func TestCheckImportHandler_Series_LogicalSplit_RecordsBothEpisodes(t *testing.T
 		t.Fatalf("writing file: %v", err)
 	}
 
-	fakeQB := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/api/v2/auth/login":
-			http.SetCookie(w, &http.Cookie{Name: "SID", Value: "test-sid"})
-			w.Write([]byte("Ok."))
-		case "/api/v2/torrents/info":
-			w.Header().Set("Content-Type", "application/json")
-			w.Write([]byte(`[{"hash":"abc123","state":"uploading","progress":1,"content_path":"` + downloadDir + `"}]`))
-		default:
-			t.Fatalf("unexpected request: %s", r.URL.Path)
-		}
-	}))
-	defer fakeQB.Close()
+	aria2Srv, fake := newFakeAria2(t, "abc123")
+	dl := newTestDownloader(aria2Srv.URL, t.TempDir())
+	fake.setCompleteDir("abc123", downloadDir)
 
 	connStore, propStore, allowStore, settingsStore, grabsStore, libStore, slidersStore, traktStore, adultNewestRowStore, adultNewestReleaseStore, rssFeedsStore := testStores(t)
 	ctx := context.Background()
-	if err := connStore.UpsertWithUsername(ctx, "qbittorrent", fakeQB.URL, "wade", "hunter2"); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
 
 	g, err := grabsStore.Create(ctx, grabs.Grab{
 		Mode: mode.Series, Title: "Some Show", TMDBID: 555, SeasonNumber: 1, EpisodeNumber: 1, SeasonSpecified: true,
-		Indexer: "I", Protocol: "torrent", DownloadClient: "qbittorrent",
-		ClientRef: "abc123", RootFolderPath: tvRoot,
+		Indexer: "I", Protocol: "torrent", DownloadClient: "aria2",
+		DownloadGID: "abc123", RootFolderPath: tvRoot,
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	srv := httptest.NewServer(NewMux(testHTTPClient(), connStore, propStore, allowStore, testProber(t), testPHasher(t), testVideoHasher(t), settingsStore, grabsStore, libStore, slidersStore, traktStore, adultNewestRowStore, adultNewestReleaseStore, rssFeedsStore, nil, nil))
+	srv := httptest.NewServer(NewMux(testHTTPClient(), connStore, propStore, allowStore, testProber(t), testPHasher(t), testVideoHasher(t), settingsStore, grabsStore, libStore, slidersStore, traktStore, adultNewestRowStore, adultNewestReleaseStore, rssFeedsStore, nil, nil, dl))
 	defer srv.Close()
 
 	resp, err := http.Post(srv.URL+"/api/grabs/"+strconv.FormatInt(g.ID, 10)+"/check-import", "application/json", nil)
@@ -202,37 +176,24 @@ func TestCheckImportHandler_Series_SeasonPack_PerformsImport(t *testing.T) {
 		}
 	}
 
-	fakeQB := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/api/v2/auth/login":
-			http.SetCookie(w, &http.Cookie{Name: "SID", Value: "test-sid"})
-			w.Write([]byte("Ok."))
-		case "/api/v2/torrents/info":
-			w.Header().Set("Content-Type", "application/json")
-			w.Write([]byte(`[{"hash":"def456","state":"uploading","progress":1,"content_path":"` + downloadDir + `"}]`))
-		default:
-			t.Fatalf("unexpected request: %s", r.URL.Path)
-		}
-	}))
-	defer fakeQB.Close()
+	aria2Srv, fake := newFakeAria2(t, "def456")
+	dl := newTestDownloader(aria2Srv.URL, t.TempDir())
+	fake.setCompleteDir("def456", downloadDir)
 
 	connStore, propStore, allowStore, settingsStore, grabsStore, libStore, slidersStore, traktStore, adultNewestRowStore, adultNewestReleaseStore, rssFeedsStore := testStores(t)
 	ctx := context.Background()
-	if err := connStore.UpsertWithUsername(ctx, "qbittorrent", fakeQB.URL, "wade", "hunter2"); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
 
 	// Season-pack grab: SeasonNumber set, EpisodeNumber left 0.
 	g, err := grabsStore.Create(ctx, grabs.Grab{
 		Mode: mode.Series, Title: "Some Show", TMDBID: 555, SeasonNumber: 1,
-		Indexer: "I", Protocol: "torrent", DownloadClient: "qbittorrent",
-		ClientRef: "def456", RootFolderPath: tvRoot,
+		Indexer: "I", Protocol: "torrent", DownloadClient: "aria2",
+		DownloadGID: "def456", RootFolderPath: tvRoot,
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	srv := httptest.NewServer(NewMux(testHTTPClient(), connStore, propStore, allowStore, testProber(t), testPHasher(t), testVideoHasher(t), settingsStore, grabsStore, libStore, slidersStore, traktStore, adultNewestRowStore, adultNewestReleaseStore, rssFeedsStore, nil, nil))
+	srv := httptest.NewServer(NewMux(testHTTPClient(), connStore, propStore, allowStore, testProber(t), testPHasher(t), testVideoHasher(t), settingsStore, grabsStore, libStore, slidersStore, traktStore, adultNewestRowStore, adultNewestReleaseStore, rssFeedsStore, nil, nil, dl))
 	defer srv.Close()
 
 	resp, err := http.Post(srv.URL+"/api/grabs/"+strconv.FormatInt(g.ID, 10)+"/check-import", "application/json", nil)
@@ -290,39 +251,26 @@ func TestCheckImportHandler_Series_SeasonSpecifiedZero_RecordsSpecialsEpisode(t 
 		t.Fatalf("writing file: %v", err)
 	}
 
-	fakeQB := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/api/v2/auth/login":
-			http.SetCookie(w, &http.Cookie{Name: "SID", Value: "test-sid"})
-			w.Write([]byte("Ok."))
-		case "/api/v2/torrents/info":
-			w.Header().Set("Content-Type", "application/json")
-			w.Write([]byte(`[{"hash":"special1","state":"uploading","progress":1,"content_path":"` + downloadDir + `"}]`))
-		default:
-			t.Fatalf("unexpected request: %s", r.URL.Path)
-		}
-	}))
-	defer fakeQB.Close()
+	aria2Srv, fake := newFakeAria2(t, "special1")
+	dl := newTestDownloader(aria2Srv.URL, t.TempDir())
+	fake.setCompleteDir("special1", downloadDir)
 
 	connStore, propStore, allowStore, settingsStore, grabsStore, libStore, slidersStore, traktStore, adultNewestRowStore, adultNewestReleaseStore, rssFeedsStore := testStores(t)
 	ctx := context.Background()
-	if err := connStore.UpsertWithUsername(ctx, "qbittorrent", fakeQB.URL, "wade", "hunter2"); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
 
 	// SeasonNumber/EpisodeNumber left at 0/0 — genuine Season 0 (Specials),
 	// episode unspecified within it — but SeasonSpecified is true, since the
 	// user deliberately picked season 0.
 	g, err := grabsStore.Create(ctx, grabs.Grab{
 		Mode: mode.Series, Title: "Some Show", TMDBID: 555, SeasonSpecified: true,
-		Indexer: "I", Protocol: "torrent", DownloadClient: "qbittorrent",
-		ClientRef: "special1", RootFolderPath: tvRoot,
+		Indexer: "I", Protocol: "torrent", DownloadClient: "aria2",
+		DownloadGID: "special1", RootFolderPath: tvRoot,
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	srv := httptest.NewServer(NewMux(testHTTPClient(), connStore, propStore, allowStore, testProber(t), testPHasher(t), testVideoHasher(t), settingsStore, grabsStore, libStore, slidersStore, traktStore, adultNewestRowStore, adultNewestReleaseStore, rssFeedsStore, nil, nil))
+	srv := httptest.NewServer(NewMux(testHTTPClient(), connStore, propStore, allowStore, testProber(t), testPHasher(t), testVideoHasher(t), settingsStore, grabsStore, libStore, slidersStore, traktStore, adultNewestRowStore, adultNewestReleaseStore, rssFeedsStore, nil, nil, dl))
 	defer srv.Close()
 
 	resp, err := http.Post(srv.URL+"/api/grabs/"+strconv.FormatInt(g.ID, 10)+"/check-import", "application/json", nil)
@@ -367,37 +315,24 @@ func TestCheckImportHandler_Series_SeasonNotSpecified_UnparseableFilename_SkipsR
 		t.Fatalf("writing file: %v", err)
 	}
 
-	fakeQB := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/api/v2/auth/login":
-			http.SetCookie(w, &http.Cookie{Name: "SID", Value: "test-sid"})
-			w.Write([]byte("Ok."))
-		case "/api/v2/torrents/info":
-			w.Header().Set("Content-Type", "application/json")
-			w.Write([]byte(`[{"hash":"noseasons","state":"uploading","progress":1,"content_path":"` + downloadDir + `"}]`))
-		default:
-			t.Fatalf("unexpected request: %s", r.URL.Path)
-		}
-	}))
-	defer fakeQB.Close()
+	aria2Srv, fake := newFakeAria2(t, "noseasons")
+	dl := newTestDownloader(aria2Srv.URL, t.TempDir())
+	fake.setCompleteDir("noseasons", downloadDir)
 
 	connStore, propStore, allowStore, settingsStore, grabsStore, libStore, slidersStore, traktStore, adultNewestRowStore, adultNewestReleaseStore, rssFeedsStore := testStores(t)
 	ctx := context.Background()
-	if err := connStore.UpsertWithUsername(ctx, "qbittorrent", fakeQB.URL, "wade", "hunter2"); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
 
 	// A plain series-wide grab: no season ever picked, SeasonSpecified false.
 	g, err := grabsStore.Create(ctx, grabs.Grab{
 		Mode: mode.Series, Title: "Some Show", TMDBID: 555,
-		Indexer: "I", Protocol: "torrent", DownloadClient: "qbittorrent",
-		ClientRef: "noseasons", RootFolderPath: tvRoot,
+		Indexer: "I", Protocol: "torrent", DownloadClient: "aria2",
+		DownloadGID: "noseasons", RootFolderPath: tvRoot,
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	srv := httptest.NewServer(NewMux(testHTTPClient(), connStore, propStore, allowStore, testProber(t), testPHasher(t), testVideoHasher(t), settingsStore, grabsStore, libStore, slidersStore, traktStore, adultNewestRowStore, adultNewestReleaseStore, rssFeedsStore, nil, nil))
+	srv := httptest.NewServer(NewMux(testHTTPClient(), connStore, propStore, allowStore, testProber(t), testPHasher(t), testVideoHasher(t), settingsStore, grabsStore, libStore, slidersStore, traktStore, adultNewestRowStore, adultNewestReleaseStore, rssFeedsStore, nil, nil, dl))
 	defer srv.Close()
 
 	resp, err := http.Post(srv.URL+"/api/grabs/"+strconv.FormatInt(g.ID, 10)+"/check-import", "application/json", nil)

@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync/atomic"
 	"testing"
 
 	"github.com/curtiswtaylorjr/sakms/internal/apidto"
@@ -39,8 +38,8 @@ func fakeTMDBMovieRuntime(t *testing.T, runtimeMinutes int) *httptest.Server {
 // qBittorrent (exactly once — the backend no-bulk proof) and records exactly
 // one grab. No manual release-pick happens; that is the whole point.
 func TestAutoGrabHandler_Movies_QualifiedGrabsExactlyOne(t *testing.T) {
-	var qbAdds int32
-	fakeQB := fakeQBittorrent(t, func(r *http.Request) { atomic.AddInt32(&qbAdds, 1) })
+	aria2Srv, fake := newFakeAria2(t, "gid-auto")
+	dl := newTestDownloader(aria2Srv.URL, t.TempDir())
 	tmdbSrv := fakeTMDBMovieRuntime(t, 100) // 100 min = 6000 s
 	// 8 GB / 6000 s ≈ 10.7 Mbps implied; x265 → ~21 Mbps x264-equiv; clears
 	// every 1080p tier floor even after the 25% non-AV1 padding.
@@ -55,9 +54,6 @@ func TestAutoGrabHandler_Movies_QualifiedGrabsExactlyOne(t *testing.T) {
 	if err := connStore.Upsert(ctx, "prowlarr", prowlarr.URL, "key"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if err := connStore.UpsertWithUsername(ctx, "qbittorrent", fakeQB.URL, "wade", "hunter2"); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
 	if err := settingsStore.Set(ctx, qualityTierKey(mode.Movies), string(quality.Low)); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -65,7 +61,7 @@ func TestAutoGrabHandler_Movies_QualifiedGrabsExactlyOne(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	srv := httptest.NewServer(NewMux(testHTTPClient(), connStore, propStore, allowStore, testProber(t), testPHasher(t), testVideoHasher(t), settingsStore, grabsStore, libStore, slidersStore, traktStore, adultNewestRowStore, adultNewestReleaseStore, rssFeedsStore, nil, nil))
+	srv := httptest.NewServer(NewMux(testHTTPClient(), connStore, propStore, allowStore, testProber(t), testPHasher(t), testVideoHasher(t), settingsStore, grabsStore, libStore, slidersStore, traktStore, adultNewestRowStore, adultNewestReleaseStore, rssFeedsStore, nil, nil, dl))
 	defer srv.Close()
 
 	body, _ := json.Marshal(apidto.AutoGrabRequest{Title: "Some Movie", TMDBID: 42})
@@ -84,10 +80,10 @@ func TestAutoGrabHandler_Movies_QualifiedGrabsExactlyOne(t *testing.T) {
 	if !out.Grabbed || out.Fallback || out.Grab == nil {
 		t.Fatalf("expected a qualified grab, got %+v", out)
 	}
-	if out.Grab.DownloadClient != "qbittorrent" || out.Grab.RootFolderPath != "/movies" {
+	if out.Grab.DownloadClient != "aria2" || out.Grab.RootFolderPath != "/movies" {
 		t.Errorf("unexpected grab: %+v", out.Grab)
 	}
-	if got := atomic.LoadInt32(&qbAdds); got != 1 {
+	if got := len(fake.addedURIs); got != 1 {
 		t.Errorf("expected exactly ONE download-client add (no bulk), got %d", got)
 	}
 	list, err := grabsStore.List(ctx, mode.Movies)
@@ -125,7 +121,7 @@ func TestAutoGrabHandler_Movies_SearchIncludesQueryAlongsideIDs(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	srv := httptest.NewServer(NewMux(testHTTPClient(), connStore, propStore, allowStore, testProber(t), testPHasher(t), testVideoHasher(t), settingsStore, grabsStore, libStore, slidersStore, traktStore, adultNewestRowStore, adultNewestReleaseStore, rssFeedsStore, nil, nil))
+	srv := httptest.NewServer(NewMux(testHTTPClient(), connStore, propStore, allowStore, testProber(t), testPHasher(t), testVideoHasher(t), settingsStore, grabsStore, libStore, slidersStore, traktStore, adultNewestRowStore, adultNewestReleaseStore, rssFeedsStore, nil, nil, nil))
 	defer srv.Close()
 
 	body, _ := json.Marshal(apidto.AutoGrabRequest{Title: "Some Movie", TMDBID: 42})
@@ -151,8 +147,8 @@ func TestAutoGrabHandler_Movies_SearchIncludesQueryAlongsideIDs(t *testing.T) {
 // the download client and must return the ranked manual pick list instead of
 // grabbing the least-bad option.
 func TestAutoGrabHandler_Movies_FallbackGrabsNothing(t *testing.T) {
-	var qbAdds int32
-	fakeQB := fakeQBittorrent(t, func(r *http.Request) { atomic.AddInt32(&qbAdds, 1) })
+	aria2Srv, fake := newFakeAria2(t, "gid-auto")
+	dl := newTestDownloader(aria2Srv.URL, t.TempDir())
 	tmdbSrv := fakeTMDBMovieRuntime(t, 100)
 	// size:1 → an absurdly low implied bitrate for a "1080p" release → the
 	// pre-grab mislabel check excludes it; nothing qualifies.
@@ -167,14 +163,11 @@ func TestAutoGrabHandler_Movies_FallbackGrabsNothing(t *testing.T) {
 	if err := connStore.Upsert(ctx, "prowlarr", prowlarr.URL, "key"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if err := connStore.UpsertWithUsername(ctx, "qbittorrent", fakeQB.URL, "wade", "hunter2"); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
 	if err := settingsStore.Set(ctx, moviesLibraryRootFolderKey, "/movies"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	srv := httptest.NewServer(NewMux(testHTTPClient(), connStore, propStore, allowStore, testProber(t), testPHasher(t), testVideoHasher(t), settingsStore, grabsStore, libStore, slidersStore, traktStore, adultNewestRowStore, adultNewestReleaseStore, rssFeedsStore, nil, nil))
+	srv := httptest.NewServer(NewMux(testHTTPClient(), connStore, propStore, allowStore, testProber(t), testPHasher(t), testVideoHasher(t), settingsStore, grabsStore, libStore, slidersStore, traktStore, adultNewestRowStore, adultNewestReleaseStore, rssFeedsStore, nil, nil, dl))
 	defer srv.Close()
 
 	body, _ := json.Marshal(apidto.AutoGrabRequest{Title: "Some Movie", TMDBID: 42})
@@ -196,7 +189,7 @@ func TestAutoGrabHandler_Movies_FallbackGrabsNothing(t *testing.T) {
 	if len(out.Candidates) != 1 || out.Candidates[0].Qualified {
 		t.Errorf("expected one non-qualified candidate in the pick list, got %+v", out.Candidates)
 	}
-	if got := atomic.LoadInt32(&qbAdds); got != 0 {
+	if got := len(fake.addedURIs); got != 0 {
 		t.Errorf("expected ZERO download-client adds on fallback, got %d", got)
 	}
 	list, err := grabsStore.List(ctx, mode.Movies)
@@ -218,8 +211,8 @@ func TestAutoGrabHandler_Movies_FallbackGrabsNothing(t *testing.T) {
 // to prowlarr's actual wire value — a drift there would flip this to a
 // spurious auto-grab.
 func TestAutoGrabHandler_Movies_LowSeedersTorrentFallsBack(t *testing.T) {
-	var qbAdds int32
-	fakeQB := fakeQBittorrent(t, func(r *http.Request) { atomic.AddInt32(&qbAdds, 1) })
+	aria2Srv, fake := newFakeAria2(t, "gid-auto")
+	dl := newTestDownloader(aria2Srv.URL, t.TempDir())
 	tmdbSrv := fakeTMDBMovieRuntime(t, 100) // 100 min = 6000 s
 	// Same healthy 8 GB / x265 / 1080p release as the qualified test — its
 	// bitrate clears every Low-tier floor — but only 2 seeders (< the default
@@ -235,9 +228,6 @@ func TestAutoGrabHandler_Movies_LowSeedersTorrentFallsBack(t *testing.T) {
 	if err := connStore.Upsert(ctx, "prowlarr", prowlarr.URL, "key"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if err := connStore.UpsertWithUsername(ctx, "qbittorrent", fakeQB.URL, "wade", "hunter2"); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
 	if err := settingsStore.Set(ctx, qualityTierKey(mode.Movies), string(quality.Low)); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -245,7 +235,7 @@ func TestAutoGrabHandler_Movies_LowSeedersTorrentFallsBack(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	srv := httptest.NewServer(NewMux(testHTTPClient(), connStore, propStore, allowStore, testProber(t), testPHasher(t), testVideoHasher(t), settingsStore, grabsStore, libStore, slidersStore, traktStore, adultNewestRowStore, adultNewestReleaseStore, rssFeedsStore, nil, nil))
+	srv := httptest.NewServer(NewMux(testHTTPClient(), connStore, propStore, allowStore, testProber(t), testPHasher(t), testVideoHasher(t), settingsStore, grabsStore, libStore, slidersStore, traktStore, adultNewestRowStore, adultNewestReleaseStore, rssFeedsStore, nil, nil, dl))
 	defer srv.Close()
 
 	body, _ := json.Marshal(apidto.AutoGrabRequest{Title: "Some Movie", TMDBID: 42})
@@ -270,7 +260,7 @@ func TestAutoGrabHandler_Movies_LowSeedersTorrentFallsBack(t *testing.T) {
 	if out.Candidates[0].Status != string(autograb.StatusLowSeeders) {
 		t.Errorf("expected low-seeders status for a 2-seeder torrent, got %q", out.Candidates[0].Status)
 	}
-	if got := atomic.LoadInt32(&qbAdds); got != 0 {
+	if got := len(fake.addedURIs); got != 0 {
 		t.Errorf("expected ZERO download-client adds on a low-seeders fallback, got %d", got)
 	}
 }
@@ -283,8 +273,8 @@ func TestAutoGrabHandler_Movies_LowSeedersTorrentFallsBack(t *testing.T) {
 // still fail Movies' floor (see TestAutoGrabHandler_Movies_LowSeedersTorrentFallsBack,
 // which uses 2 seeders < 5) now qualifies and auto-grabs for Adult at 3.
 func TestAutoGrabHandler_Adult_LowerSeederFloorQualifies(t *testing.T) {
-	var qbAdds int32
-	fakeQB := fakeQBittorrent(t, func(r *http.Request) { atomic.AddInt32(&qbAdds, 1) })
+	aria2Srv, fake := newFakeAria2(t, "gid-auto")
+	dl := newTestDownloader(aria2Srv.URL, t.TempDir())
 	// Same healthy 8 GB / x265 / 1080p release shape as the Movies tests —
 	// its bitrate clears every Low-tier floor — but only 3 seeders. Below
 	// Movies/Series' shared floor of 5, but AT Adult's own floor of 3
@@ -297,9 +287,6 @@ func TestAutoGrabHandler_Adult_LowerSeederFloorQualifies(t *testing.T) {
 	if err := connStore.Upsert(ctx, "prowlarr", prowlarr.URL, "key"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if err := connStore.UpsertWithUsername(ctx, "qbittorrent", fakeQB.URL, "wade", "hunter2"); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
 	if err := settingsStore.Set(ctx, qualityTierKey(mode.Adult), string(quality.Low)); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -307,7 +294,7 @@ func TestAutoGrabHandler_Adult_LowerSeederFloorQualifies(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	srv := httptest.NewServer(NewMux(testHTTPClient(), connStore, propStore, allowStore, testProber(t), testPHasher(t), testVideoHasher(t), settingsStore, grabsStore, libStore, slidersStore, traktStore, adultNewestRowStore, adultNewestReleaseStore, rssFeedsStore, nil, nil))
+	srv := httptest.NewServer(NewMux(testHTTPClient(), connStore, propStore, allowStore, testProber(t), testPHasher(t), testVideoHasher(t), settingsStore, grabsStore, libStore, slidersStore, traktStore, adultNewestRowStore, adultNewestReleaseStore, rssFeedsStore, nil, nil, dl))
 	defer srv.Close()
 
 	// 6000s (100 min) via DurationSeconds — Adult's runtime source, matching
@@ -328,7 +315,7 @@ func TestAutoGrabHandler_Adult_LowerSeederFloorQualifies(t *testing.T) {
 	if out.Fallback || !out.Grabbed || out.Grab == nil {
 		t.Fatalf("expected a real auto-grab at Adult's lower seeder floor, got %+v", out)
 	}
-	if got := atomic.LoadInt32(&qbAdds); got != 1 {
+	if got := len(fake.addedURIs); got != 1 {
 		t.Errorf("expected exactly one download-client add, got %d", got)
 	}
 }
@@ -369,8 +356,8 @@ func fakeTMDBSeriesRuntime(t *testing.T, episodeNumber, runtimeMinutes int) *htt
 // (wrongly) applied to it. Proves both the qualification AND the season-pack
 // neutralization guard.
 func TestAutoGrabHandler_Series_SingleEpisodeQualifies(t *testing.T) {
-	var qbAdds int32
-	fakeQB := fakeQBittorrent(t, func(r *http.Request) { atomic.AddInt32(&qbAdds, 1) })
+	aria2Srv, fake := newFakeAria2(t, "gid-auto")
+	dl := newTestDownloader(aria2Srv.URL, t.TempDir())
 	tmdbSrv := fakeTMDBSeriesRuntime(t, 5, 58) // episode 5, 58 min = 3480 s
 	// Single episode: 900 MB / 3480 s ≈ 2.07 Mbps implied; x265 → ~4.1 Mbps
 	// x264-equiv → ~3.3 after the 25% non-AV1 padding; clears the Low 1080p
@@ -392,9 +379,6 @@ func TestAutoGrabHandler_Series_SingleEpisodeQualifies(t *testing.T) {
 	if err := connStore.Upsert(ctx, "prowlarr", prowlarr.URL, "key"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if err := connStore.UpsertWithUsername(ctx, "qbittorrent", fakeQB.URL, "wade", "hunter2"); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
 	if err := settingsStore.Set(ctx, qualityTierKey(mode.Series), string(quality.Low)); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -402,7 +386,7 @@ func TestAutoGrabHandler_Series_SingleEpisodeQualifies(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	srv := httptest.NewServer(NewMux(testHTTPClient(), connStore, propStore, allowStore, testProber(t), testPHasher(t), testVideoHasher(t), settingsStore, grabsStore, libStore, slidersStore, traktStore, adultNewestRowStore, adultNewestReleaseStore, rssFeedsStore, nil, nil))
+	srv := httptest.NewServer(NewMux(testHTTPClient(), connStore, propStore, allowStore, testProber(t), testPHasher(t), testVideoHasher(t), settingsStore, grabsStore, libStore, slidersStore, traktStore, adultNewestRowStore, adultNewestReleaseStore, rssFeedsStore, nil, nil, dl))
 	defer srv.Close()
 
 	body, _ := json.Marshal(apidto.AutoGrabRequest{Title: "Some Show", TMDBID: 100, SeasonNumber: 3, EpisodeNumber: 5, SeasonSpecified: true})
@@ -427,7 +411,7 @@ func TestAutoGrabHandler_Series_SingleEpisodeQualifies(t *testing.T) {
 	if strings.Contains(out.Message, "S03.1080p") {
 		t.Errorf("season pack was auto-grabbed under the single-episode runtime — neutralization failed: %q", out.Message)
 	}
-	if got := atomic.LoadInt32(&qbAdds); got != 1 {
+	if got := len(fake.addedURIs); got != 1 {
 		t.Errorf("expected exactly ONE download-client add (no bulk), got %d", got)
 	}
 	list, err := grabsStore.List(ctx, mode.Series)
@@ -445,8 +429,8 @@ func TestAutoGrabHandler_Series_SingleEpisodeQualifies(t *testing.T) {
 // unknown-bitrate and the call hands back the manual pick list rather than
 // auto-grabbing.
 func TestAutoGrabHandler_Series_SeasonPackGrabFallsBack(t *testing.T) {
-	var qbAdds int32
-	fakeQB := fakeQBittorrent(t, func(r *http.Request) { atomic.AddInt32(&qbAdds, 1) })
+	aria2Srv, fake := newFakeAria2(t, "gid-auto")
+	dl := newTestDownloader(aria2Srv.URL, t.TempDir())
 	tmdbSrv := fakeTMDBSeriesRuntime(t, 5, 58)
 	prowlarr := fakeProwlarr(t, `[{"guid":"1","title":"Some.Show.S03.1080p.WEB-DL.x265-GROUP","indexer":"I","protocol":"torrent","size":12000000000,"seeders":50,"downloadUrl":"magnet:?xt=urn:btih:AAAAAA1234567890abcdef1234567890abcdef12"}]`)
 
@@ -459,14 +443,11 @@ func TestAutoGrabHandler_Series_SeasonPackGrabFallsBack(t *testing.T) {
 	if err := connStore.Upsert(ctx, "prowlarr", prowlarr.URL, "key"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if err := connStore.UpsertWithUsername(ctx, "qbittorrent", fakeQB.URL, "wade", "hunter2"); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
 	if err := settingsStore.Set(ctx, qualityTierKey(mode.Series), string(quality.Low)); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	srv := httptest.NewServer(NewMux(testHTTPClient(), connStore, propStore, allowStore, testProber(t), testPHasher(t), testVideoHasher(t), settingsStore, grabsStore, libStore, slidersStore, traktStore, adultNewestRowStore, adultNewestReleaseStore, rssFeedsStore, nil, nil))
+	srv := httptest.NewServer(NewMux(testHTTPClient(), connStore, propStore, allowStore, testProber(t), testPHasher(t), testVideoHasher(t), settingsStore, grabsStore, libStore, slidersStore, traktStore, adultNewestRowStore, adultNewestReleaseStore, rssFeedsStore, nil, nil, dl))
 	defer srv.Close()
 
 	// EpisodeNumber omitted → whole-season grab.
@@ -489,7 +470,7 @@ func TestAutoGrabHandler_Series_SeasonPackGrabFallsBack(t *testing.T) {
 	if out.Candidates[0].Status != "unknown-bitrate" {
 		t.Errorf("expected unknown-bitrate for a season-pack grab, got %q", out.Candidates[0].Status)
 	}
-	if got := atomic.LoadInt32(&qbAdds); got != 0 {
+	if got := len(fake.addedURIs); got != 0 {
 		t.Errorf("expected zero download-client adds for a season-pack fallback, got %d", got)
 	}
 }
@@ -573,8 +554,8 @@ func TestIsSeasonPackTitle(t *testing.T) {
 // download-client call. The season/episode selection is still carried on the
 // request.
 func TestAutoGrabHandler_Series_PickerGatedFallback(t *testing.T) {
-	var qbAdds int32
-	fakeQB := fakeQBittorrent(t, func(r *http.Request) { atomic.AddInt32(&qbAdds, 1) })
+	aria2Srv, fake := newFakeAria2(t, "gid-auto")
+	dl := newTestDownloader(aria2Srv.URL, t.TempDir())
 	tmdbSrv := fakeTMDBServer(t) // /tv/{id}/external_ids → tvdb_id
 	prowlarr := fakeProwlarr(t, `[{"guid":"1","title":"Some.Show.S03E05.1080p.WEB-DL.x265-GROUP","indexer":"I","protocol":"torrent","size":900000000,"seeders":50,"downloadUrl":"magnet:?xt=urn:btih:ABCDEF1234567890abcdef1234567890abcdef12"}]`)
 
@@ -587,11 +568,8 @@ func TestAutoGrabHandler_Series_PickerGatedFallback(t *testing.T) {
 	if err := connStore.Upsert(ctx, "prowlarr", prowlarr.URL, "key"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if err := connStore.UpsertWithUsername(ctx, "qbittorrent", fakeQB.URL, "wade", "hunter2"); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
 
-	srv := httptest.NewServer(NewMux(testHTTPClient(), connStore, propStore, allowStore, testProber(t), testPHasher(t), testVideoHasher(t), settingsStore, grabsStore, libStore, slidersStore, traktStore, adultNewestRowStore, adultNewestReleaseStore, rssFeedsStore, nil, nil))
+	srv := httptest.NewServer(NewMux(testHTTPClient(), connStore, propStore, allowStore, testProber(t), testPHasher(t), testVideoHasher(t), settingsStore, grabsStore, libStore, slidersStore, traktStore, adultNewestRowStore, adultNewestReleaseStore, rssFeedsStore, nil, nil, dl))
 	defer srv.Close()
 
 	body, _ := json.Marshal(apidto.AutoGrabRequest{Title: "Some Show", TMDBID: 100, SeasonNumber: 3, EpisodeNumber: 5, SeasonSpecified: true})
@@ -613,7 +591,7 @@ func TestAutoGrabHandler_Series_PickerGatedFallback(t *testing.T) {
 	if out.Candidates[0].Status != "unknown-bitrate" {
 		t.Errorf("expected unknown-bitrate status (no pre-grab runtime), got %q", out.Candidates[0].Status)
 	}
-	if got := atomic.LoadInt32(&qbAdds); got != 0 {
+	if got := len(fake.addedURIs); got != 0 {
 		t.Errorf("expected zero download-client adds for a Series fallback, got %d", got)
 	}
 }

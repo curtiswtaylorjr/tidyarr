@@ -153,7 +153,7 @@ func runCycle(ctx context.Context, httpClient *http.Client, connStore *connectio
 		log.Printf("adultnewest: purged %d stale matched entities (older than %d months)", n, staleAfterMonths)
 	}
 
-	sess, err := mode.Build(ctx, connStore, settingsStore, httpClient, mode.Adult)
+	sess, err := mode.Build(ctx, connStore, settingsStore, httpClient, nil, mode.Adult)
 	if err != nil {
 		log.Printf("adultnewest: building adult session: %v", err)
 		return
