@@ -32,9 +32,8 @@ func TestCheckImportHandler_Series_SingleEpisode_PerformsImport(t *testing.T) {
 		t.Fatalf("writing file: %v", err)
 	}
 
-	aria2Srv, fake := newFakeAria2(t, "abc123")
-	dl := newTestDownloader(aria2Srv.URL, t.TempDir())
-	fake.setCompleteDir("abc123", downloadDir)
+	dl := newTestDownloader("abc123", t.TempDir())
+	seedComplete(dl, "abc123", downloadDir)
 
 	connStore, propStore, allowStore, settingsStore, grabsStore, libStore, slidersStore, traktStore, adultNewestRowStore, adultNewestReleaseStore, rssFeedsStore := testStores(t)
 	ctx := context.Background()
@@ -100,9 +99,8 @@ func TestCheckImportHandler_Series_LogicalSplit_RecordsBothEpisodes(t *testing.T
 		t.Fatalf("writing file: %v", err)
 	}
 
-	aria2Srv, fake := newFakeAria2(t, "abc123")
-	dl := newTestDownloader(aria2Srv.URL, t.TempDir())
-	fake.setCompleteDir("abc123", downloadDir)
+	dl := newTestDownloader("abc123", t.TempDir())
+	seedComplete(dl, "abc123", downloadDir)
 
 	connStore, propStore, allowStore, settingsStore, grabsStore, libStore, slidersStore, traktStore, adultNewestRowStore, adultNewestReleaseStore, rssFeedsStore := testStores(t)
 	ctx := context.Background()
@@ -176,9 +174,8 @@ func TestCheckImportHandler_Series_SeasonPack_PerformsImport(t *testing.T) {
 		}
 	}
 
-	aria2Srv, fake := newFakeAria2(t, "def456")
-	dl := newTestDownloader(aria2Srv.URL, t.TempDir())
-	fake.setCompleteDir("def456", downloadDir)
+	dl := newTestDownloader("def456", t.TempDir())
+	seedComplete(dl, "def456", downloadDir)
 
 	connStore, propStore, allowStore, settingsStore, grabsStore, libStore, slidersStore, traktStore, adultNewestRowStore, adultNewestReleaseStore, rssFeedsStore := testStores(t)
 	ctx := context.Background()
@@ -251,9 +248,8 @@ func TestCheckImportHandler_Series_SeasonSpecifiedZero_RecordsSpecialsEpisode(t 
 		t.Fatalf("writing file: %v", err)
 	}
 
-	aria2Srv, fake := newFakeAria2(t, "special1")
-	dl := newTestDownloader(aria2Srv.URL, t.TempDir())
-	fake.setCompleteDir("special1", downloadDir)
+	dl := newTestDownloader("special1", t.TempDir())
+	seedComplete(dl, "special1", downloadDir)
 
 	connStore, propStore, allowStore, settingsStore, grabsStore, libStore, slidersStore, traktStore, adultNewestRowStore, adultNewestReleaseStore, rssFeedsStore := testStores(t)
 	ctx := context.Background()
@@ -315,9 +311,8 @@ func TestCheckImportHandler_Series_SeasonNotSpecified_UnparseableFilename_SkipsR
 		t.Fatalf("writing file: %v", err)
 	}
 
-	aria2Srv, fake := newFakeAria2(t, "noseasons")
-	dl := newTestDownloader(aria2Srv.URL, t.TempDir())
-	fake.setCompleteDir("noseasons", downloadDir)
+	dl := newTestDownloader("noseasons", t.TempDir())
+	seedComplete(dl, "noseasons", downloadDir)
 
 	connStore, propStore, allowStore, settingsStore, grabsStore, libStore, slidersStore, traktStore, adultNewestRowStore, adultNewestReleaseStore, rssFeedsStore := testStores(t)
 	ctx := context.Background()

@@ -31,9 +31,9 @@ func (f fixedProber) Probe(ctx context.Context, path string) (*mediainfo.Probe, 
 // setup a check-import test needs for an already-finished grab.
 func fakeCompletedDownloader(t *testing.T, contentPath string) *downloader.Manager {
 	t.Helper()
-	aria2Srv, fake := newFakeAria2(t, "abc123")
-	fake.setCompleteDir("abc123", contentPath)
-	return newTestDownloader(aria2Srv.URL, t.TempDir())
+	dl := newTestDownloader("abc123", t.TempDir())
+	seedComplete(dl, "abc123", contentPath)
+	return dl
 }
 
 // TestPostGrabReview_Movies_RuntimeMismatchFlags proves the post-grab mislabel

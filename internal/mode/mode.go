@@ -195,13 +195,11 @@ type Session struct {
 	QBittorrent *qbittorrent.Client
 	NZBGet      *nzbget.Client
 
-	// Downloader is the process-lifetime unified download engine (one aria2c
-	// subprocess managed by SAK — internal/downloader), injected as the same
-	// singleton into every session, not built per-request like the tolerant
-	// clients above. nil only when the downloader failed to start at boot
-	// (e.g. the embedded binary was missing); consumers must nil-check before
-	// use. Its RPC() client is what grab dispatch and the Downloads queue API
-	// call through.
+	// Downloader is the process-lifetime unified download engine
+	// (anacrolix/torrent in-process BitTorrent — internal/downloader),
+	// injected as the same singleton into every session, not built per-request
+	// like the tolerant clients above. nil only when the engine failed to start
+	// at boot; consumers must nil-check before use.
 	Downloader *downloader.Manager
 
 	// TMDB backs the Discover browse view — same "global, tolerant" rule as

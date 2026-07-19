@@ -119,8 +119,7 @@ func TestSearchHandler_ProwlarrNotConfigured(t *testing.T) {
 }
 
 func TestGrabHandler_Torrent_SendsToAria2AndRecordsGrab(t *testing.T) {
-	aria2Srv, fake := newFakeAria2(t, "gid-abc")
-	dl := newTestDownloader(aria2Srv.URL, t.TempDir())
+	dl := newTestDownloader("gid-abc", t.TempDir())
 
 	connStore, propStore, allowStore, settingsStore, grabsStore, libStore, slidersStore, traktStore, adultNewestRowStore, adultNewestReleaseStore, rssFeedsStore := testStores(t)
 
@@ -144,11 +143,8 @@ func TestGrabHandler_Torrent_SendsToAria2AndRecordsGrab(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&g); err != nil {
 		t.Fatalf("decoding response: %v", err)
 	}
-	if g.DownloadClient != "aria2" || g.DownloadGID != "gid-abc" || g.Status != grabs.Queued {
+	if g.DownloadClient != "anacrolix" || g.DownloadGID != "gid-abc" || g.Status != grabs.Queued {
 		t.Errorf("unexpected grab: %+v", g)
-	}
-	if len(fake.addedURIs) != 1 || fake.addedURIs[0] != magnet {
-		t.Errorf("expected aria2 to receive the magnet URI, got %v", fake.addedURIs)
 	}
 }
 
@@ -157,8 +153,7 @@ func TestGrabHandler_Torrent_SendsToAria2AndRecordsGrab(t *testing.T) {
 // checkImportHandler tell a deliberate Season 0 (Specials) grab apart from a
 // plain series-wide grab with no season picked at all (see search_series_test.go).
 func TestGrabHandler_SeasonSpecified_RoundTrips(t *testing.T) {
-	aria2Srv, _ := newFakeAria2(t, "gid-x")
-	dl := newTestDownloader(aria2Srv.URL, t.TempDir())
+	dl := newTestDownloader("gid-x", t.TempDir())
 
 	connStore, propStore, allowStore, settingsStore, grabsStore, libStore, slidersStore, traktStore, adultNewestRowStore, adultNewestReleaseStore, rssFeedsStore := testStores(t)
 
@@ -191,8 +186,7 @@ func TestGrabHandler_SeasonSpecified_RoundTrips(t *testing.T) {
 // so usenet releases can't be grabbed (the honest not-supported path, not a
 // silent failure). See dispatchToDownloadClient's usenet branch.
 func TestGrabHandler_Usenet_NotSupported(t *testing.T) {
-	aria2Srv, _ := newFakeAria2(t, "gid-x")
-	dl := newTestDownloader(aria2Srv.URL, t.TempDir())
+	dl := newTestDownloader("gid-x", t.TempDir())
 
 	connStore, propStore, allowStore, settingsStore, grabsStore, libStore, slidersStore, traktStore, adultNewestRowStore, adultNewestReleaseStore, rssFeedsStore := testStores(t)
 
@@ -278,9 +272,8 @@ func TestCheckImportHandler_QBittorrentCompleted_PerformsImport(t *testing.T) {
 		t.Fatalf("writing file: %v", err)
 	}
 
-	aria2Srv, fake := newFakeAria2(t, "abc123")
-	dl := newTestDownloader(aria2Srv.URL, t.TempDir())
-	fake.setCompleteDir("abc123", downloadDir)
+	dl := newTestDownloader("abc123", t.TempDir())
+	seedComplete(dl, "abc123", downloadDir)
 
 	connStore, propStore, allowStore, settingsStore, grabsStore, libStore, slidersStore, traktStore, adultNewestRowStore, adultNewestReleaseStore, rssFeedsStore := testStores(t)
 	ctx := context.Background()
@@ -349,9 +342,8 @@ func TestCheckImportHandler_MoviesCompleted_NotifiesJellyfin(t *testing.T) {
 		t.Fatalf("writing file: %v", err)
 	}
 
-	aria2Srv, fake := newFakeAria2(t, "abc123")
-	dl := newTestDownloader(aria2Srv.URL, t.TempDir())
-	fake.setCompleteDir("abc123", downloadDir)
+	dl := newTestDownloader("abc123", t.TempDir())
+	seedComplete(dl, "abc123", downloadDir)
 
 	connStore, propStore, allowStore, settingsStore, grabsStore, libStore, slidersStore, traktStore, adultNewestRowStore, adultNewestReleaseStore, rssFeedsStore := testStores(t)
 	ctx := context.Background()
@@ -408,9 +400,8 @@ func TestCheckImportHandler_RelocateFails_NoNotify(t *testing.T) {
 	// missingDownloadDir is deliberately never created, so rename.Relocate's
 	// os.Rename fails (source doesn't exist).
 
-	aria2Srv, fake := newFakeAria2(t, "abc123")
-	dl := newTestDownloader(aria2Srv.URL, t.TempDir())
-	fake.setCompleteDir("abc123", missingDownloadDir)
+	dl := newTestDownloader("abc123", t.TempDir())
+	seedComplete(dl, "abc123", missingDownloadDir)
 
 	connStore, propStore, allowStore, settingsStore, grabsStore, libStore, slidersStore, traktStore, adultNewestRowStore, adultNewestReleaseStore, rssFeedsStore := testStores(t)
 	ctx := context.Background()
@@ -463,9 +454,8 @@ func TestCheckImportHandler_JellyfinBestEffort_ImportStillSucceeds(t *testing.T)
 		t.Fatalf("writing file: %v", err)
 	}
 
-	aria2Srv, fake := newFakeAria2(t, "abc123")
-	dl := newTestDownloader(aria2Srv.URL, t.TempDir())
-	fake.setCompleteDir("abc123", downloadDir)
+	dl := newTestDownloader("abc123", t.TempDir())
+	seedComplete(dl, "abc123", downloadDir)
 
 	connStore, propStore, allowStore, settingsStore, grabsStore, libStore, slidersStore, traktStore, adultNewestRowStore, adultNewestReleaseStore, rssFeedsStore := testStores(t)
 	ctx := context.Background()
@@ -527,9 +517,8 @@ func TestCheckImportHandler_AdultCompleted_NotifiesStash(t *testing.T) {
 		t.Fatalf("writing file: %v", err)
 	}
 
-	aria2Srv, fake := newFakeAria2(t, "abc123")
-	dl := newTestDownloader(aria2Srv.URL, t.TempDir())
-	fake.setCompleteDir("abc123", downloadDir)
+	dl := newTestDownloader("abc123", t.TempDir())
+	seedComplete(dl, "abc123", downloadDir)
 
 	connStore, propStore, allowStore, settingsStore, grabsStore, libStore, slidersStore, traktStore, adultNewestRowStore, adultNewestReleaseStore, rssFeedsStore := testStores(t)
 	ctx := context.Background()
@@ -584,9 +573,8 @@ func TestCheckImportHandler_AdultCompleted_NotifiesStash(t *testing.T) {
 }
 
 func TestCheckImportHandler_StillDownloading_JustUpdatesStatus(t *testing.T) {
-	aria2Srv, fake := newFakeAria2(t, "abc123")
-	fake.setActive("abc123")
-	dl := newTestDownloader(aria2Srv.URL, t.TempDir())
+	dl := newTestDownloader("abc123", t.TempDir())
+	seedActive(dl, "abc123")
 
 	connStore, propStore, allowStore, settingsStore, grabsStore, libStore, slidersStore, traktStore, adultNewestRowStore, adultNewestReleaseStore, rssFeedsStore := testStores(t)
 	ctx := context.Background()

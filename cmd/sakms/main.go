@@ -3,8 +3,6 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"log"
@@ -87,15 +85,12 @@ func run() error {
 	libStore := library.New(sqlDB)
 	slidersStore := discoversliders.New(sqlDB)
 
-	// Unified downloader (internal/downloader): a single aria2c subprocess SAK
-	// owns, replacing the old external qBittorrent/NZBGet dependency for the
-	// torrent path. Constructed ONCE here as a process-lifetime singleton (it
-	// owns a subprocess + a poll goroutine — never per-request like
+	// Unified downloader (internal/downloader): an anacrolix/torrent in-process
+	// BitTorrent engine. Constructed ONCE here as a process-lifetime singleton
+	// (it owns a torrent client + a poll goroutine — never per-request like
 	// mode.Session's cheap clients) and injected as the same pointer into every
-	// mode.Build call that needs it. dlManager stays nil if the embedded binary
-	// is missing (a build that skipped `make aria2c`); every consumer nil-checks
-	// it, so the rest of SAK still runs, only grabbing is unavailable.
-	dlManager, err := buildDownloader(context.Background(), cfg.DataDir, settingsStore, secretStore, &http.Client{Timeout: outboundTimeout})
+	// mode.Build call that needs it.
+	dlManager, err := buildDownloader(context.Background(), cfg.DataDir, settingsStore, &http.Client{Timeout: outboundTimeout})
 	if err != nil {
 		log.Printf("downloader: not starting (%v) — torrent grabbing will be unavailable until fixed", err)
 		dlManager = nil
@@ -241,13 +236,12 @@ func run() error {
 	defer stop()
 
 	// Unified downloader: wire the completion callback (which needs stores
-	// built above) and start the aria2c subprocess + poll loop. Same
-	// deliberate "background loop is a documented exception, not a reversal of
-	// the manual-workflow rule" as recheck/adultnewest below — a download
-	// engine inherently observes its subprocess's progress; there's no
-	// human-triggered equivalent of "the download finished." Reuses the
-	// signal-driven ctx so shutdown cancels the subprocess too. nil when the
-	// embedded binary was missing (logged above).
+	// built above) and start the torrent client + poll loop. Same deliberate
+	// "background loop is a documented exception, not a reversal of the
+	// manual-workflow rule" as recheck/adultnewest below — a download engine
+	// inherently observes its progress; there's no human-triggered equivalent
+	// of "the download finished." Reuses the signal-driven ctx so shutdown
+	// stops the torrent client too.
 	if dlManager != nil {
 		dlManager.SetOnComplete(api.DownloadCompleteImporter(&http.Client{Timeout: outboundTimeout}, connStore, settingsStore, grabsStore, libStore, prober, dlManager))
 		go func() {
@@ -331,30 +325,11 @@ func seedBundledOllamaDefaults(ctx context.Context, connStore *connections.Store
 	return nil
 }
 
-// downloaderRPCTokenKey is the settings key holding the aria2 RPC secret,
-// encrypted at rest via secretStore (same at-rest-encryption approach as the
-// OIDC client secret) — a local secret gating the localhost-only aria2 RPC
-// port, defense-in-depth even though aria2 binds to 127.0.0.1 only.
-const downloaderRPCTokenKey = "downloader_rpc_token_enc"
-
-// buildDownloader extracts the embedded aria2c binary, loads (or generates and
-// persists) the RPC secret, reads the operator-tunable config from settings
-// (staging dir defaulting to <dataDir>/downloads, concurrency knobs to their
-// defaults), and constructs the process-lifetime download Manager. It does NOT
-// start the subprocess — the caller does that with `go m.Start(ctx)`. Returns
-// an error (binary missing, secret store failure) so the caller can log it and
-// degrade gracefully rather than crash.
-func buildDownloader(ctx context.Context, dataDir string, settingsStore *settings.Store, secretStore *secrets.Store, httpClient *http.Client) (*downloader.Manager, error) {
-	binPath, err := downloader.ExtractBinary()
-	if err != nil {
-		return nil, err
-	}
-
-	token, err := loadOrCreateDownloaderToken(ctx, settingsStore, secretStore)
-	if err != nil {
-		return nil, err
-	}
-
+// buildDownloader reads the operator-tunable config from settings (staging dir
+// defaulting to <dataDir>/downloads, concurrency knobs to their defaults) and
+// constructs the process-lifetime download Manager. It does NOT start the
+// engine — the caller does that with `go m.Start(ctx)`.
+func buildDownloader(ctx context.Context, dataDir string, settingsStore *settings.Store, httpClient *http.Client) (*downloader.Manager, error) {
 	staging, err := settingsStore.Get(ctx, api.DownloaderStagingDirKey)
 	if err != nil && !errors.Is(err, settings.ErrNotFound) {
 		return nil, err
@@ -367,43 +342,10 @@ func buildDownloader(ctx context.Context, dataDir string, settingsStore *setting
 	maxConn := settingInt(ctx, settingsStore, api.DownloaderMaxConnectionsKey, 4)
 
 	return downloader.New(downloader.Config{
-		BinaryPath: binPath,
 		StagingDir: staging,
-		RPCPort:    6800,
-		RPCToken:   token,
 		MaxConc:    maxConc,
 		MaxConn:    maxConn,
 	}, httpClient), nil
-}
-
-// loadOrCreateDownloaderToken returns the stored (decrypted) aria2 RPC secret,
-// generating, encrypting, and persisting a fresh one on first run.
-func loadOrCreateDownloaderToken(ctx context.Context, settingsStore *settings.Store, secretStore *secrets.Store) (string, error) {
-	enc, err := settingsStore.Get(ctx, downloaderRPCTokenKey)
-	if err != nil && !errors.Is(err, settings.ErrNotFound) {
-		return "", err
-	}
-	if enc != "" {
-		token, err := secretStore.Decrypt(enc)
-		if err != nil {
-			return "", fmt.Errorf("decrypting downloader rpc token: %w", err)
-		}
-		return token, nil
-	}
-
-	raw := make([]byte, 32)
-	if _, err := rand.Read(raw); err != nil {
-		return "", fmt.Errorf("generating downloader rpc token: %w", err)
-	}
-	token := base64.RawURLEncoding.EncodeToString(raw)
-	sealed, err := secretStore.Encrypt(token)
-	if err != nil {
-		return "", fmt.Errorf("encrypting downloader rpc token: %w", err)
-	}
-	if err := settingsStore.Set(ctx, downloaderRPCTokenKey, sealed); err != nil {
-		return "", fmt.Errorf("storing downloader rpc token: %w", err)
-	}
-	return token, nil
 }
 
 // settingInt reads an int settings scalar, returning def when unset/invalid.

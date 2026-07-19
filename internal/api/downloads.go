@@ -10,14 +10,11 @@ import (
 	"strconv"
 
 	"github.com/curtiswtaylorjr/sakms/internal/apidto"
-	"github.com/curtiswtaylorjr/sakms/internal/aria2"
 	"github.com/curtiswtaylorjr/sakms/internal/downloader"
 	"github.com/curtiswtaylorjr/sakms/internal/settings"
 )
 
-// Settings keys for the unified downloader's operator-tunable knobs. The RPC
-// token is NOT here — it's a secret, auto-generated and stored via
-// internal/secrets (see cmd/sakms's downloader bootstrap).
+// Settings keys for the unified downloader's operator-tunable knobs.
 const (
 	DownloaderStagingDirKey     = "downloader_staging_dir"
 	DownloaderMaxConcurrentKey  = "downloader_max_concurrent"
@@ -30,9 +27,9 @@ const (
 	downloaderDefaultMaxConnections = 4
 )
 
-// toDTODownload maps an aria2.Download to the wire DTO, deriving a display
+// toDTODownload maps a downloader.Download to the wire DTO, deriving a display
 // filename (basename of the first file, GID fallback).
-func toDTODownload(d aria2.Download) apidto.Download {
+func toDTODownload(d downloader.Download) apidto.Download {
 	name := d.Filename
 	if name != "" {
 		name = filepath.Base(name)
@@ -52,48 +49,25 @@ func toDTODownload(d aria2.Download) apidto.Download {
 	}
 }
 
-// mergedDownloads returns aria2's active + waiting + recent-stopped items as
-// one ordered DTO slice (active first). Returns an empty (non-nil) slice when
-// the queue is empty, so JSON encodes [] not null.
-func mergedDownloads(ctx context.Context, dl *downloader.Manager) ([]apidto.Download, error) {
-	active, err := dl.RPC().TellActive(ctx)
-	if err != nil {
-		return nil, err
-	}
-	waiting, err := dl.RPC().TellWaiting(ctx, 0, 100)
-	if err != nil {
-		return nil, err
-	}
-	stopped, err := dl.RPC().TellStopped(ctx, 0, 100)
-	if err != nil {
-		return nil, err
-	}
-	out := []apidto.Download{}
-	for _, d := range active {
+// mergedDownloads returns the full download queue as a DTO slice. Returns an
+// empty (non-nil) slice when the queue is empty so JSON encodes [] not null.
+func mergedDownloads(dl *downloader.Manager) []apidto.Download {
+	list := dl.List()
+	out := make([]apidto.Download, 0, len(list))
+	for _, d := range list {
 		out = append(out, toDTODownload(d))
 	}
-	for _, d := range waiting {
-		out = append(out, toDTODownload(d))
-	}
-	for _, d := range stopped {
-		out = append(out, toDTODownload(d))
-	}
-	return out, nil
+	return out
 }
 
-// listDownloadsHandler returns the merged active+waiting+recent-stopped queue.
+// listDownloadsHandler returns the current download queue.
 func listDownloadsHandler(dl *downloader.Manager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if dl == nil {
 			http.Error(w, "the download engine isn't running", http.StatusServiceUnavailable)
 			return
 		}
-		list, err := mergedDownloads(r.Context(), dl)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadGateway)
-			return
-		}
-		writeJSON(w, list)
+		writeJSON(w, mergedDownloads(dl))
 	}
 }
 
@@ -122,9 +96,7 @@ func downloadsStreamHandler(dl *downloader.Manager) http.HandlerFunc {
 
 		// Paint an initial snapshot immediately so the screen isn't blank until
 		// the queue next changes.
-		if snap, err := mergedDownloads(ctx, dl); err == nil {
-			writeSSEData(w, flusher, snap)
-		}
+		writeSSEData(w, flusher, mergedDownloads(dl))
 
 		ch, cancel := dl.Subscribe()
 		defer cancel()
@@ -157,21 +129,14 @@ func writeSSEData(w http.ResponseWriter, flusher http.Flusher, v any) {
 	flusher.Flush()
 }
 
-// cancelDownloadHandler cancels an active/waiting download and purges its
-// result from the stopped list (a true "remove it entirely" for the queue UI).
+// cancelDownloadHandler cancels and removes a download.
 func cancelDownloadHandler(dl *downloader.Manager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if dl == nil {
 			http.Error(w, "the download engine isn't running", http.StatusServiceUnavailable)
 			return
 		}
-		gid := r.PathValue("gid")
-		ctx := r.Context()
-		// Remove first (moves an active download to stopped as "removed"); then
-		// clear the result. A remove failure on an already-stopped download is
-		// expected, so only the result-purge failure is surfaced.
-		_ = dl.RPC().RemoveDownload(ctx, gid)
-		if err := dl.RPC().RemoveDownloadResult(ctx, gid); err != nil {
+		if err := dl.Cancel(r.PathValue("gid")); err != nil {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
 		}
@@ -186,7 +151,7 @@ func pauseDownloadHandler(dl *downloader.Manager) http.HandlerFunc {
 			http.Error(w, "the download engine isn't running", http.StatusServiceUnavailable)
 			return
 		}
-		if err := dl.RPC().PauseDownload(r.Context(), r.PathValue("gid")); err != nil {
+		if err := dl.Pause(r.PathValue("gid")); err != nil {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
 		}
@@ -201,7 +166,7 @@ func resumeDownloadHandler(dl *downloader.Manager) http.HandlerFunc {
 			http.Error(w, "the download engine isn't running", http.StatusServiceUnavailable)
 			return
 		}
-		if err := dl.RPC().UnpauseDownload(r.Context(), r.PathValue("gid")); err != nil {
+		if err := dl.Resume(r.PathValue("gid")); err != nil {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
 		}
@@ -241,8 +206,7 @@ func getDownloaderConfigHandler(settingsStore *settings.Store) http.HandlerFunc 
 // putDownloaderConfigHandler stores the downloader's staging dir + concurrency
 // knobs. Concurrency values must be positive; staging dir is free-typed (it's
 // validated for existence/writability the next time the engine restarts, same
-// tolerance as a library root folder). A change takes effect on the next
-// aria2c restart — a note the frontend surfaces.
+// tolerance as a library root folder). A change takes effect on restart.
 func putDownloaderConfigHandler(settingsStore *settings.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req apidto.DownloaderConfig

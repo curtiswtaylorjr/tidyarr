@@ -10,7 +10,6 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/curtiswtaylorjr/sakms/internal/aria2"
 	"github.com/curtiswtaylorjr/sakms/internal/autograb"
 	"github.com/curtiswtaylorjr/sakms/internal/connections"
 	"github.com/curtiswtaylorjr/sakms/internal/dedup"
@@ -204,7 +203,7 @@ func grabHandler(httpClient *http.Client, connStore *connections.Store, settings
 			return
 		}
 
-		// Record the aria2 GID so the downloader's onComplete callback can tie
+		// Record the download GID so the downloader's onComplete callback can tie
 		// a finished download back to this grab for auto-import. Best-effort:
 		// a store failure here doesn't undo the (already-submitted) download.
 		if gid != "" {
@@ -224,33 +223,32 @@ func grabHandler(httpClient *http.Client, connStore *connections.Store, settings
 	}
 }
 
-// dispatchToDownloadClient sends one release to the unified aria2c downloader
-// and returns the download-client name ("aria2") plus the aria2 GID assigned
+// dispatchToDownloadClient sends one release to the unified download engine
+// and returns the download-client name ("anacrolix") plus the GID assigned
 // (used later to tie a completed download back to its grab for auto-import).
 // Shared by the manual grabHandler and the auto-grab handler — auto-grab is
 // the genuine second caller that justifies the extraction. On failure it
 // returns the HTTP status the caller should surface (400 not-configured /
 // usenet-unsupported / unrecognized-protocol, 502 client error).
 //
-// USENET IS NOT SUPPORTED by the aria2 backend (aria2 speaks HTTP/FTP/SFTP/
-// BitTorrent/Metalink, no NNTP) — a usenet-protocol release returns an
-// explicit 400 rather than silently failing. The old qBittorrent/NZBGet
-// dispatch was removed with the unified-downloader cutover; internal/nzbget
-// stays as generic capability for a future usenet engine (see mode.Session's
+// USENET IS NOT YET SUPPORTED — a usenet-protocol release returns an explicit
+// 400 rather than silently failing. The old qBittorrent/NZBGet dispatch was
+// removed with the unified-downloader cutover; internal/nzbget stays as
+// generic capability for a future native NNTP engine (see mode.Session's
 // QBittorrent/NZBGet field docs).
 func dispatchToDownloadClient(ctx context.Context, sess *mode.Session, m mode.Mode, protocol, downloadURL, title string) (downloadClient, gid string, status int, err error) {
 	switch prowlarr.Protocol(protocol) {
 	case prowlarr.Torrent:
 		if sess.Downloader == nil {
-			return "", "", http.StatusBadRequest, errors.New("the download engine isn't running — check the server logs (the embedded aria2c binary may be missing)")
+			return "", "", http.StatusBadRequest, errors.New("the download engine isn't running — check the server logs")
 		}
-		gid, err := sess.Downloader.RPC().AddTorrent(ctx, downloadURL, sess.Downloader.StagingDir())
+		gid, err := sess.Downloader.AddTorrent(ctx, downloadURL)
 		if err != nil {
 			return "", "", http.StatusBadGateway, err
 		}
-		return "aria2", gid, http.StatusOK, nil
+		return "anacrolix", gid, http.StatusOK, nil
 	case prowlarr.Usenet:
-		return "", "", http.StatusBadRequest, errors.New("usenet/NZB downloads aren't supported by the aria2 backend yet — only torrent releases can be grabbed")
+		return "", "", http.StatusBadRequest, errors.New("usenet/NZB downloads aren't supported yet — only torrent releases can be grabbed")
 	default:
 		return "", "", http.StatusBadRequest, fmt.Errorf("unrecognized protocol %q", protocol)
 	}
@@ -269,18 +267,18 @@ func listGrabsHandler(grabsStore *grabs.Store) http.HandlerFunc {
 	}
 }
 
-// checkImportHandler refreshes one grab's status from the unified aria2c
-// downloader, and — the moment its download is seen complete — performs the
-// import via the shared importGrabContent core (relocate into the target root
-// folder + record in SAK's own library). This is the manual, human-triggered
-// refresh; the same import also happens automatically via the downloader's
-// onComplete callback (see cmd/sakms's onDownloadComplete), so a grab
-// typically imports itself the moment aria2 finishes — this endpoint is the
-// on-demand "check it now" the Grabs UI can still offer.
+// checkImportHandler refreshes one grab's status from the unified download
+// engine, and — the moment its download is seen complete — performs the import
+// via the shared importGrabContent core (relocate into the target root folder
+// + record in SAK's own library). This is the manual, human-triggered refresh;
+// the same import also happens automatically via the downloader's onComplete
+// callback (see cmd/sakms's onDownloadComplete), so a grab typically imports
+// itself the moment the torrent finishes — this endpoint is the on-demand
+// "check it now" the Grabs UI can still offer.
 //
-// classifyAria2State maps aria2's status to grabs' lifecycle; a completed,
-// not-yet-imported grab imports here and flips to Imported. A grab with no
-// aria2 GID (e.g. a usenet grab, which the aria2 backend can't take) has
+// classifyDownloadState maps the download engine's status to grabs' lifecycle;
+// a completed, not-yet-imported grab imports here and flips to Imported. A
+// grab with no download GID (e.g. a usenet grab, not yet supported) has
 // nothing to poll and returns a clear conflict.
 func checkImportHandler(httpClient *http.Client, connStore *connections.Store, settingsStore *settings.Store, dl *downloader.Manager, grabsStore *grabs.Store, libStore *library.Store, prober dedup.Prober) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -311,19 +309,17 @@ func checkImportHandler(httpClient *http.Client, connStore *connections.Store, s
 			return
 		}
 		if g.DownloadGID == "" {
-			http.Error(w, "this grab has no aria2 download to check (usenet grabs aren't tracked by the aria2 backend)", http.StatusConflict)
+			http.Error(w, "this grab has no download to check (usenet grabs are not yet supported by the download engine)", http.StatusConflict)
 			return
 		}
 
-		// Find the grab's download in aria2's current queue (active + waiting +
-		// stopped) by GID.
 		dlItem, err := findDownloadByGID(ctx, dl, g.DownloadGID)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
 		}
 		if dlItem == nil {
-			http.Error(w, "aria2 no longer knows about this download", http.StatusConflict)
+			http.Error(w, "the download engine no longer knows about this download", http.StatusConflict)
 			return
 		}
 
@@ -333,7 +329,7 @@ func checkImportHandler(httpClient *http.Client, connStore *connections.Store, s
 			return
 		}
 
-		newStatus := classifyAria2State(dlItem.Status)
+		newStatus := classifyDownloadState(dlItem.Status)
 		if newStatus == grabs.Completed {
 			contentPath := downloadContentPath(dlItem.Files, dlItem.Dir, dl.StagingDir())
 			changes, err := importGrabContent(ctx, libStore, g, contentPath)
@@ -365,32 +361,16 @@ func checkImportHandler(httpClient *http.Client, connStore *connections.Store, s
 	}
 }
 
-// findDownloadByGID looks up one download by GID across aria2's active,
-// waiting, and stopped lists. Returns (nil, nil) when aria2 has no such GID.
-func findDownloadByGID(ctx context.Context, dl *downloader.Manager, gid string) (*aria2.Download, error) {
-	lists := [](func() ([]aria2.Download, error)){
-		func() ([]aria2.Download, error) { return dl.RPC().TellActive(ctx) },
-		func() ([]aria2.Download, error) { return dl.RPC().TellWaiting(ctx, 0, 1000) },
-		func() ([]aria2.Download, error) { return dl.RPC().TellStopped(ctx, 0, 1000) },
-	}
-	for _, fetch := range lists {
-		items, err := fetch()
-		if err != nil {
-			return nil, err
-		}
-		for i := range items {
-			if items[i].GID == gid {
-				return &items[i], nil
-			}
-		}
-	}
-	return nil, nil
+// findDownloadByGID looks up one download by GID. Returns (nil, nil) when the
+// engine has no such GID.
+func findDownloadByGID(_ context.Context, dl *downloader.Manager, gid string) (*downloader.Download, error) {
+	return dl.FindByGID(gid)
 }
 
-// classifyAria2State maps aria2's status vocabulary to grabs' lifecycle.
-// "complete" is the only status that triggers an import; "error" is Failed;
-// everything else (active/waiting/paused) is still in-flight.
-func classifyAria2State(state string) grabs.Status {
+// classifyDownloadState maps the download engine's status vocabulary to grabs'
+// lifecycle. "complete" is the only status that triggers an import; "error" is
+// Failed; everything else (active/waiting/paused) is still in-flight.
+func classifyDownloadState(state string) grabs.Status {
 	switch state {
 	case "complete":
 		return grabs.Completed

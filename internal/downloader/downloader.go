@@ -1,24 +1,21 @@
-// Package downloader manages SAK's unified download engine: a single aria2c
-// subprocess plus a JSON-RPC client (internal/aria2) and a subscriber hub
-// that fans out live download-queue snapshots for the Downloads screen's SSE
-// stream.
+// Package downloader manages SAK's unified download engine: an anacrolix/torrent
+// in-process BitTorrent client plus a subscriber hub that fans out live
+// download-queue snapshots for the Downloads screen's SSE stream.
 //
 // DELIBERATE, opt-in exception to this project's "manual by default, no
 // background pollers" convention (CLAUDE.md): the Manager runs one background
-// goroutine that polls aria2 every pollInterval and, on a completed download,
-// fires an onComplete callback that runs the auto-import. This is the same
-// kind of documented exception as internal/recheck / internal/adultnewest /
-// watch-folders — a download engine inherently needs to observe its
-// subprocess's progress; there's no human-triggered equivalent of "the
-// download finished."
+// goroutine that polls torrent progress every pollInterval and, on a completed
+// download, fires an onComplete callback that runs the auto-import. A download
+// engine inherently needs to observe its progress; there's no human-triggered
+// equivalent of "the download finished."
 //
-// Lifetime: a Manager owns a subprocess and long-lived goroutines, so it is a
-// PROCESS-LIFETIME SINGLETON — constructed once in cmd/sakms/main.go and
+// Lifetime: a Manager owns a long-lived torrent client and goroutines, so it is
+// a PROCESS-LIFETIME SINGLETON — constructed once in cmd/sakms/main.go and
 // started with `go m.Start(ctx)` alongside the other background jobs, never
-// per-request (unlike mode.Session's cheap per-request clients). The same
-// pointer is injected wherever a grab needs to reach the RPC client.
+// per-request. The same pointer is injected wherever a grab needs to reach the
+// download engine.
 //
-// Import discipline: this package imports only internal/aria2 + stdlib — NOT
+// Import discipline: this package imports only anacrolix/torrent + stdlib — NOT
 // mode/grabs/library — so it never forms an import cycle with mode.Session
 // (which references *Manager). The onComplete callback is a plain
 // func(gid string, files []string) set at construction, closing over whatever
@@ -26,120 +23,143 @@
 package downloader
 
 import (
-	"bufio"
 	"context"
-	"errors"
-	"io"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
-	"os/exec"
+	"path/filepath"
 	"reflect"
-	"strconv"
+	"strings"
 	"sync"
 	"time"
 
-	"github.com/curtiswtaylorjr/sakms/internal/aria2"
+	torrentlib "github.com/anacrolix/torrent"
+	"github.com/anacrolix/torrent/metainfo"
 )
 
-// pollInterval is how often the Manager's background loop re-reads aria2's
-// active/waiting/stopped lists to detect changes and completions.
-const pollInterval = 750 * time.Millisecond
-
-// maxBackoff caps the exponential restart backoff after aria2c exits.
-const maxBackoff = 30 * time.Second
+// pollInterval is how often the Manager's background loop re-reads torrent
+// progress to detect changes and fan out to SSE subscribers.
+const pollInterval = 500 * time.Millisecond
 
 // Config parameterizes the Manager.
 type Config struct {
-	BinaryPath string // path to the extracted aria2c binary
-	StagingDir string // aria2c's download directory
-	RPCPort    int    // JSON-RPC port (default 6800)
-	RPCToken   string // aria2 --rpc-secret, from internal/secrets
-	MaxConc    int    // --max-concurrent-downloads
-	MaxConn    int    // --max-connection-per-server
+	StagingDir string // torrent download directory (anacrolix DataDir)
+	MaxConc    int    // reserved; all torrents download concurrently today
+	MaxConn    int    // EstablishedConnsPerTorrent in the torrent client config
 }
 
-// Manager owns the aria2c subprocess, its RPC client, and the SSE hub.
-type Manager struct {
-	cfg  Config
-	rpc  *aria2.Client
-	http *http.Client
-
-	// onComplete fires once per GID that transitions into "complete", with
-	// the GID and the resolved file paths aria2 reported. Set at construction
-	// (may be nil in tests that don't exercise import). It closes over the
-	// grabs/library stores in main.go — kept as a plain func so this package
-	// never imports them.
-	onComplete func(gid string, files []string)
-
-	mu          sync.Mutex
-	subscribers map[int]chan []aria2.Download
-	nextSubID   int
-	// lastByGID remembers each GID's last-seen (status, completedLength) so
-	// the loop can diff snapshots and only fan out on a real change, and fire
-	// onComplete exactly once per completion.
-	lastByGID map[string]seen
+// Download is one download's status. Fields are shaped to mirror the old
+// aria2.Download surface so the api/apidto layers need no wire-format changes.
+type Download struct {
+	GID             string
+	Status          string // "active" | "waiting" | "paused" | "error" | "complete" | "removed"
+	Filename        string
+	Dir             string
+	TotalLength     int64
+	CompletedLength int64
+	DownloadSpeed   int64
+	Connections     int64
+	Files           []string
+	ErrorMessage    string
 }
 
-type seen struct {
+type seenKey struct {
 	status    string
 	completed int64
 }
 
-// New builds a Manager. onComplete may be nil (e.g. in tests). The RPC
-// endpoint is derived from cfg.RPCPort; the client is built immediately so
-// RPC() is usable, though calls fail until Start has the subprocess up.
+type entry struct {
+	t        *torrentlib.Torrent // nil in test-mode entries
+	status   string
+	errorMsg string
+	files    []string // full absolute paths, populated after GotInfo
+	dir      string   // per-torrent folder or stagingDir
+	filename string   // display: files[0] when known
+
+	// Speed (delta across poll ticks).
+	prevBytes int64
+	prevTime  time.Time
+	speed     int64
+
+	// Cached for terminal states after the handle may be dropped.
+	cachedCompleted int64
+	cachedTotal     int64
+	cachedConns     int64
+}
+
+// Manager owns the anacrolix torrent client, in-memory download state, and the
+// SSE subscriber hub. It is a process-lifetime singleton — see package doc.
+type Manager struct {
+	cfg        Config
+	tc         *torrentlib.Client // nil before Start or in test mode
+	httpClient *http.Client
+
+	onComplete func(gid string, files []string)
+
+	mu          sync.Mutex
+	entries     map[string]*entry
+	subscribers map[int]chan []Download
+	nextSubID   int
+
+	// testMode is set by NewForTesting; gates AddTorrent's fake-GID path.
+	testMode    bool
+	testNextGID string
+}
+
+// New constructs a Manager. The engine is not started until Start is called.
 func New(cfg Config, httpClient *http.Client) *Manager {
-	port := cfg.RPCPort
-	if port == 0 {
-		port = 6800
-	}
-	endpoint := "http://127.0.0.1:" + strconv.Itoa(port) + "/jsonrpc"
 	return &Manager{
 		cfg:         cfg,
-		rpc:         aria2.New(aria2.Config{Endpoint: endpoint, Token: cfg.RPCToken}, httpClient),
-		http:        httpClient,
-		subscribers: map[int]chan []aria2.Download{},
-		lastByGID:   map[string]seen{},
+		httpClient:  httpClient,
+		entries:     map[string]*entry{},
+		subscribers: map[int]chan []Download{},
 	}
 }
 
-// NewForTesting builds a Manager whose RPC client points at an arbitrary
-// endpoint (a fake aria2 JSON-RPC httptest server) with the given staging dir,
-// WITHOUT deriving the endpoint from a port. It exists so tests in other
-// packages (e.g. internal/api's grab/check-import handlers) can exercise the
-// full download path against a fake aria2 without launching a real subprocess.
-// Start must NOT be called on a Manager built this way — there's no real
-// binary to run.
-func NewForTesting(rpcEndpoint, stagingDir string, httpClient *http.Client) *Manager {
+// NewForTesting builds a Manager with no real torrent client, for use in
+// handler tests. State is pre-seeded via SeedState. AddTorrent returns the GID
+// configured via SetTestNextGID. Start must NOT be called on a test Manager.
+func NewForTesting(stagingDir string) *Manager {
 	return &Manager{
 		cfg:         Config{StagingDir: stagingDir},
-		rpc:         aria2.New(aria2.Config{Endpoint: rpcEndpoint}, httpClient),
-		http:        httpClient,
-		subscribers: map[int]chan []aria2.Download{},
-		lastByGID:   map[string]seen{},
+		entries:     map[string]*entry{},
+		subscribers: map[int]chan []Download{},
+		testMode:    true,
 	}
 }
 
-// SetOnComplete wires the completion callback after construction — used from
-// main.go, where the callback needs stores that are built alongside the
-// Manager. Safe to call before Start.
+// SetTestNextGID configures what GID AddTorrent returns in test mode.
+func (m *Manager) SetTestNextGID(gid string) { m.testNextGID = gid }
+
+// SeedState injects a pre-existing download entry for tests — immediately
+// visible to List, FindByGID, and Subscribe.
+func (m *Manager) SeedState(d Download) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.entries[d.GID] = &entry{
+		status:          d.Status,
+		errorMsg:        d.ErrorMessage,
+		files:           d.Files,
+		dir:             d.Dir,
+		filename:        d.Filename,
+		cachedCompleted: d.CompletedLength,
+		cachedTotal:     d.TotalLength,
+		cachedConns:     d.Connections,
+		speed:           d.DownloadSpeed,
+	}
+}
+
+// SetOnComplete wires the completion callback. Safe to call before Start.
 func (m *Manager) SetOnComplete(fn func(gid string, files []string)) {
 	m.onComplete = fn
 }
 
-// RPC returns the aria2 JSON-RPC client — the grab/download handlers call
-// through this to add/pause/remove downloads.
-func (m *Manager) RPC() *aria2.Client { return m.rpc }
-
-// StagingDir is where aria2c writes downloads — passed as the per-item dir on
-// AddTorrent so every grab stages under one known root the import step reads
-// from.
+// StagingDir returns the directory where torrent files are written.
 func (m *Manager) StagingDir() string { return m.cfg.StagingDir }
 
-// Start launches the aria2c subprocess and the poll loop, restarting the
-// subprocess with exponential backoff on a non-zero exit, until ctx is
-// cancelled. Blocks until then. Intended to run as `go m.Start(ctx)`.
+// Start creates the anacrolix torrent client, starts the poll loop, and blocks
+// until ctx is cancelled. Intended to run as `go m.Start(ctx)`.
 func (m *Manager) Start(ctx context.Context) error {
 	if m.cfg.StagingDir != "" {
 		if err := os.MkdirAll(m.cfg.StagingDir, 0o755); err != nil {
@@ -147,105 +167,164 @@ func (m *Manager) Start(ctx context.Context) error {
 		}
 	}
 
+	cfg := torrentlib.NewDefaultClientConfig()
+	cfg.DataDir = m.cfg.StagingDir
+	cfg.NoUpload = true
+	cfg.Seed = false
+	if m.cfg.MaxConn > 0 {
+		cfg.EstablishedConnsPerTorrent = m.cfg.MaxConn
+	}
+
+	tc, err := torrentlib.NewClient(cfg)
+	if err != nil {
+		return fmt.Errorf("downloader: creating torrent client: %w", err)
+	}
+
+	m.mu.Lock()
+	m.tc = tc
+	m.mu.Unlock()
+
 	go m.pollLoop(ctx)
 
-	backoff := time.Second
-	for {
-		if ctx.Err() != nil {
-			return ctx.Err()
+	<-ctx.Done()
+
+	m.mu.Lock()
+	m.tc = nil
+	m.mu.Unlock()
+	tc.Close()
+	return ctx.Err()
+}
+
+// AddTorrent queues a download by magnet URI or .torrent file URL. Returns the
+// assigned GID (the torrent's info-hash hex string).
+func (m *Manager) AddTorrent(ctx context.Context, uri string) (string, error) {
+	if m.testMode {
+		gid := m.testNextGID
+		if gid == "" {
+			gid = "test-gid"
 		}
-		start := time.Now()
-		err := m.runOnce(ctx)
-		if ctx.Err() != nil {
-			return ctx.Err()
+		m.mu.Lock()
+		if _, exists := m.entries[gid]; !exists {
+			m.entries[gid] = &entry{status: "active"}
 		}
+		m.mu.Unlock()
+		return gid, nil
+	}
+
+	m.mu.Lock()
+	tc := m.tc
+	m.mu.Unlock()
+	if tc == nil {
+		return "", fmt.Errorf("downloader: engine not running")
+	}
+
+	var t *torrentlib.Torrent
+	if strings.HasPrefix(uri, "magnet:") {
+		var err error
+		t, err = tc.AddMagnet(uri)
 		if err != nil {
-			log.Printf("downloader: aria2c exited: %v", err)
-		} else {
-			log.Printf("downloader: aria2c exited cleanly, restarting")
+			return "", fmt.Errorf("downloader: adding magnet: %w", err)
 		}
-		// A process that stayed up a healthy while resets the backoff; a
-		// rapid crash-loop escalates it toward maxBackoff.
-		if time.Since(start) > maxBackoff {
-			backoff = time.Second
+	} else {
+		mi, err := m.fetchMetainfo(ctx, uri)
+		if err != nil {
+			return "", err
 		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(backoff):
-		}
-		if backoff < maxBackoff {
-			backoff *= 2
-			if backoff > maxBackoff {
-				backoff = maxBackoff
-			}
+		var addErr error
+		t, addErr = tc.AddTorrent(mi)
+		if addErr != nil {
+			return "", fmt.Errorf("downloader: adding torrent: %w", addErr)
 		}
 	}
+
+	gid := t.InfoHash().HexString()
+	m.mu.Lock()
+	m.entries[gid] = &entry{
+		t:      t,
+		status: "waiting",
+		dir:    m.cfg.StagingDir,
+	}
+	m.mu.Unlock()
+
+	go m.watchTorrent(t, gid)
+	return gid, nil
 }
 
-// runOnce launches aria2c once and blocks until it exits (or ctx is
-// cancelled, which kills it via CommandContext).
-func (m *Manager) runOnce(ctx context.Context) error {
-	args := []string{
-		"--enable-rpc",
-		"--rpc-listen-all=false",
-		"--rpc-listen-port=" + strconv.Itoa(m.rpcPort()),
-		"--continue=true",
-		"--dir=" + m.cfg.StagingDir,
+// Pause pauses an active download.
+func (m *Manager) Pause(gid string) error {
+	m.mu.Lock()
+	e, ok := m.entries[gid]
+	if !ok {
+		m.mu.Unlock()
+		return fmt.Errorf("download not found: %s", gid)
 	}
-	if m.cfg.RPCToken != "" {
-		args = append(args, "--rpc-secret="+m.cfg.RPCToken)
+	t := e.t
+	e.status = "paused"
+	m.mu.Unlock()
+	if t != nil {
+		t.DisallowDataDownload()
 	}
-	if m.cfg.MaxConc > 0 {
-		args = append(args, "--max-concurrent-downloads="+strconv.Itoa(m.cfg.MaxConc))
-	}
-	if m.cfg.MaxConn > 0 {
-		args = append(args, "--max-connection-per-server="+strconv.Itoa(m.cfg.MaxConn))
-	}
-
-	cmd := exec.CommandContext(ctx, m.cfg.BinaryPath, args...)
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return err
-	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		return err
-	}
-	if err := cmd.Start(); err != nil {
-		return err
-	}
-	go forwardLogs(stdout)
-	go forwardLogs(stderr)
-	return cmd.Wait()
+	return nil
 }
 
-func (m *Manager) rpcPort() int {
-	if m.cfg.RPCPort == 0 {
-		return 6800
+// Resume unpauses a paused download.
+func (m *Manager) Resume(gid string) error {
+	m.mu.Lock()
+	e, ok := m.entries[gid]
+	if !ok {
+		m.mu.Unlock()
+		return fmt.Errorf("download not found: %s", gid)
 	}
-	return m.cfg.RPCPort
+	t := e.t
+	e.status = "active"
+	m.mu.Unlock()
+	if t != nil {
+		t.AllowDataDownload()
+	}
+	return nil
 }
 
-// forwardLogs relays a subprocess pipe to the standard log, line by line.
-func forwardLogs(r io.Reader) {
-	sc := bufio.NewScanner(r)
-	for sc.Scan() {
-		log.Printf("aria2c: %s", sc.Text())
+// Cancel removes a download entirely from both the torrent client and the
+// in-memory state map (it will no longer appear in List).
+func (m *Manager) Cancel(gid string) error {
+	m.mu.Lock()
+	e, ok := m.entries[gid]
+	if !ok {
+		m.mu.Unlock()
+		return fmt.Errorf("download not found: %s", gid)
 	}
+	t := e.t
+	delete(m.entries, gid)
+	m.mu.Unlock()
+	if t != nil {
+		t.Drop()
+	}
+	return nil
 }
 
-// Subscribe registers a new SSE subscriber. It returns a receive channel that
-// gets every subsequent queue snapshot, and a cancel func that unsubscribes
-// and closes the channel. The channel is buffered by 1 and drops the oldest
-// pending snapshot on a slow consumer, so a stalled subscriber never blocks
-// the poll loop.
-func (m *Manager) Subscribe() (<-chan []aria2.Download, func()) {
+// List returns a snapshot of all known downloads.
+func (m *Manager) List() []Download { return m.snapshot() }
+
+// FindByGID looks up one download by GID. Returns (nil, nil) when not found.
+func (m *Manager) FindByGID(gid string) (*Download, error) {
+	for _, d := range m.snapshot() {
+		if d.GID == gid {
+			return &d, nil
+		}
+	}
+	return nil, nil
+}
+
+// Subscribe registers a new SSE subscriber. Returns a channel that receives
+// each subsequent queue snapshot and a cancel func that unsubscribes. The
+// channel is buffered by 1; a slow consumer gets the latest snapshot (stale
+// ones are dropped).
+func (m *Manager) Subscribe() (<-chan []Download, func()) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	id := m.nextSubID
 	m.nextSubID++
-	ch := make(chan []aria2.Download, 1)
+	ch := make(chan []Download, 1)
 	m.subscribers[id] = ch
 	cancel := func() {
 		m.mu.Lock()
@@ -258,25 +337,116 @@ func (m *Manager) Subscribe() (<-chan []aria2.Download, func()) {
 	return ch, cancel
 }
 
-// pollLoop reads aria2's active+waiting+stopped lists every pollInterval,
-// fans out a merged snapshot to subscribers on any change, and fires
-// onComplete once per newly-completed GID.
+// watchTorrent monitors one torrent's lifecycle. It waits for metadata, starts
+// the download, then waits for completion or cancellation. t.Closed() fires on
+// both Cancel() and client shutdown.
+func (m *Manager) watchTorrent(t *torrentlib.Torrent, gid string) {
+	select {
+	case <-t.Closed():
+		m.mu.Lock()
+		if e, ok := m.entries[gid]; ok && e.status != "removed" {
+			e.status = "removed"
+		}
+		m.mu.Unlock()
+		return
+	case <-t.GotInfo():
+	}
+
+	files := m.computeFiles(t)
+	dir := m.computeDir(files)
+	var filename string
+	if len(files) > 0 {
+		filename = files[0]
+	}
+	m.mu.Lock()
+	if e, ok := m.entries[gid]; ok {
+		e.status = "active"
+		e.files = files
+		e.dir = dir
+		e.filename = filename
+		e.cachedTotal = t.Length()
+	}
+	m.mu.Unlock()
+
+	t.DownloadAll()
+
+	select {
+	case <-t.Closed():
+		m.mu.Lock()
+		if e, ok := m.entries[gid]; ok && e.status != "removed" {
+			e.status = "removed"
+		}
+		m.mu.Unlock()
+	case <-t.Complete().On():
+		completed := t.BytesCompleted()
+		total := t.Length()
+		m.mu.Lock()
+		if e, ok := m.entries[gid]; ok {
+			e.status = "complete"
+			e.cachedCompleted = completed
+			e.cachedTotal = total
+			e.speed = 0
+		}
+		m.mu.Unlock()
+		filesCopy := append([]string(nil), files...)
+		if m.onComplete != nil {
+			go m.onComplete(gid, filesCopy)
+		}
+	}
+}
+
+// computeFiles derives absolute file paths from a torrent after GotInfo.
+// f.Path() uses '/' separators and is relative to DataDir (StagingDir).
+func (m *Manager) computeFiles(t *torrentlib.Torrent) []string {
+	tf := t.Files()
+	out := make([]string, 0, len(tf))
+	for _, f := range tf {
+		out = append(out, filepath.Join(m.cfg.StagingDir, filepath.FromSlash(f.Path())))
+	}
+	return out
+}
+
+// computeDir returns the appropriate download directory for a file list: the
+// parent of files[0] when files are in a per-torrent subfolder, or stagingDir
+// when a single file sits directly in staging.
+func (m *Manager) computeDir(files []string) string {
+	if len(files) == 0 {
+		return m.cfg.StagingDir
+	}
+	return filepath.Dir(files[0])
+}
+
+// fetchMetainfo downloads and parses a .torrent file from uri.
+func (m *Manager) fetchMetainfo(ctx context.Context, uri string) (*metainfo.MetaInfo, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, uri, nil)
+	if err != nil {
+		return nil, fmt.Errorf("downloader: building torrent request: %w", err)
+	}
+	resp, err := m.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("downloader: fetching torrent: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("downloader: torrent URL returned %d", resp.StatusCode)
+	}
+	mi, err := metainfo.Load(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("downloader: parsing torrent metainfo: %w", err)
+	}
+	return mi, nil
+}
+
 func (m *Manager) pollLoop(ctx context.Context) {
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
-	var prev []aria2.Download
+	var prev []Download
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			snap, err := m.snapshot(ctx)
-			if err != nil {
-				// aria2 not up yet, or a transient RPC failure — skip this
-				// tick rather than tearing anything down.
-				continue
-			}
-			m.detectCompletions(snap)
+			snap := m.snapshot()
 			if !sameSnapshot(prev, snap) {
 				m.fanout(snap)
 				prev = snap
@@ -285,55 +455,84 @@ func (m *Manager) pollLoop(ctx context.Context) {
 	}
 }
 
-// snapshot merges active + waiting + a bounded recent-stopped window into one
-// ordered list (active first, then waiting, then stopped).
-func (m *Manager) snapshot(ctx context.Context) ([]aria2.Download, error) {
-	active, err := m.rpc.TellActive(ctx)
-	if err != nil {
-		return nil, err
-	}
-	waiting, err := m.rpc.TellWaiting(ctx, 0, 100)
-	if err != nil {
-		return nil, err
-	}
-	stopped, err := m.rpc.TellStopped(ctx, 0, 100)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]aria2.Download, 0, len(active)+len(waiting)+len(stopped))
-	out = append(out, active...)
-	out = append(out, waiting...)
-	out = append(out, stopped...)
-	return out, nil
-}
+// snapshot builds the current Download list from all entries, updating speed
+// for active downloads and using cached values for terminal ones.
+func (m *Manager) snapshot() []Download {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	now := time.Now()
+	out := make([]Download, 0, len(m.entries))
+	for gid, e := range m.entries {
+		var completed, total, conns, speed int64
 
-// detectCompletions fires onComplete once per GID that has newly transitioned
-// into "complete" since the last poll, then records every GID's latest state.
-func (m *Manager) detectCompletions(snap []aria2.Download) {
-	for _, d := range snap {
-		prev, existed := m.lastByGID[d.GID]
-		if d.Status == "complete" && (!existed || prev.status != "complete") {
-			if m.onComplete != nil {
-				// Run in a goroutine so a slow import (relocate + library
-				// upsert + player notify) never stalls the poll loop.
-				gid, files := d.GID, append([]string(nil), d.Files...)
-				go m.onComplete(gid, files)
+		if e.t != nil && (e.status == "active" || e.status == "waiting") {
+			// Guard against a closed torrent handle (race with client shutdown).
+			alive := true
+			select {
+			case <-e.t.Closed():
+				alive = false
+			default:
 			}
+			if alive {
+				completed = e.t.BytesCompleted()
+				if e.t.Info() != nil {
+					total = e.t.Length()
+				}
+				conns = int64(e.t.Stats().ConnectedSeeders)
+				if e.status == "active" && !e.prevTime.IsZero() {
+					if dt := now.Sub(e.prevTime).Seconds(); dt > 0 {
+						if delta := completed - e.prevBytes; delta > 0 {
+							speed = int64(float64(delta) / dt)
+						}
+					}
+				}
+				e.prevBytes = completed
+				e.prevTime = now
+				e.speed = speed
+				e.cachedCompleted = completed
+				e.cachedTotal = total
+				e.cachedConns = conns
+			} else {
+				completed = e.cachedCompleted
+				total = e.cachedTotal
+				conns = e.cachedConns
+			}
+		} else {
+			completed = e.cachedCompleted
+			total = e.cachedTotal
+			conns = e.cachedConns
+			speed = e.speed
 		}
-		m.lastByGID[d.GID] = seen{status: d.Status, completed: d.CompletedLength}
+
+		dir := e.dir
+		if dir == "" {
+			dir = m.cfg.StagingDir
+		}
+		out = append(out, Download{
+			GID:             gid,
+			Status:          e.status,
+			Filename:        e.filename,
+			Dir:             dir,
+			TotalLength:     total,
+			CompletedLength: completed,
+			DownloadSpeed:   speed,
+			Connections:     conns,
+			Files:           e.files,
+			ErrorMessage:    e.errorMsg,
+		})
 	}
+	return out
 }
 
 // fanout delivers snap to every subscriber, dropping a stale pending snapshot
 // for any subscriber whose buffer is full (latest-wins, never blocks).
-func (m *Manager) fanout(snap []aria2.Download) {
+func (m *Manager) fanout(snap []Download) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, ch := range m.subscribers {
 		select {
 		case ch <- snap:
 		default:
-			// Buffer full — drop the oldest and enqueue the newest.
 			select {
 			case <-ch:
 			default:
@@ -347,27 +546,18 @@ func (m *Manager) fanout(snap []aria2.Download) {
 }
 
 // sameSnapshot reports whether two snapshots are equal by (GID, Status,
-// CompletedLength) — the fields whose change the UI cares about — so the loop
-// only fans out on a meaningful diff. DownloadSpeed is intentionally excluded
-// from the diff key (it changes every tick, which would defeat the point), but
-// a snapshot IS re-sent whenever length/status changes, keeping speed fresh.
-func sameSnapshot(a, b []aria2.Download) bool {
+// CompletedLength) — the fields whose change the UI cares about.
+func sameSnapshot(a, b []Download) bool {
 	if len(a) != len(b) {
 		return false
 	}
-	ka := diffKeys(a)
-	kb := diffKeys(b)
-	return reflect.DeepEqual(ka, kb)
+	return reflect.DeepEqual(diffKeys(a), diffKeys(b))
 }
 
-func diffKeys(dls []aria2.Download) map[string]seen {
-	out := make(map[string]seen, len(dls))
+func diffKeys(dls []Download) map[string]seenKey {
+	out := make(map[string]seenKey, len(dls))
 	for _, d := range dls {
-		out[d.GID] = seen{status: d.Status, completed: d.CompletedLength}
+		out[d.GID] = seenKey{status: d.Status, completed: d.CompletedLength}
 	}
 	return out
 }
-
-// ErrNoBinary is returned by ExtractBinary when the embedded aria2c binary is
-// empty (the build wasn't run through `make aria2c`).
-var ErrNoBinary = errors.New("downloader: embedded aria2c binary is empty — run `make aria2c` before building")

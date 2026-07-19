@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -10,6 +9,7 @@ import (
 	"strconv"
 	"testing"
 
+	"github.com/curtiswtaylorjr/sakms/internal/downloader"
 	"github.com/curtiswtaylorjr/sakms/internal/grabs"
 	"github.com/curtiswtaylorjr/sakms/internal/mode"
 )
@@ -95,26 +95,11 @@ func TestCheckImportHandler_MultiFileTorrent_RelocatesWholeFolder(t *testing.T) 
 		}
 	}
 
-	// A fake aria2 whose completed download reports the two real file paths and
-	// the per-torrent dir — exactly aria2's real tellStatus shape.
-	aria2Srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			Method string `json:"method"`
-		}
-		json.NewDecoder(r.Body).Decode(&req)
-		var result interface{} = []interface{}{}
-		if req.Method == "aria2.tellStopped" {
-			result = []map[string]any{{
-				"gid": "packgid", "status": "complete", "totalLength": "200", "completedLength": "200",
-				"dir":   pack,
-				"files": []map[string]any{{"path": e1}, {"path": e2}},
-			}}
-		}
-		raw, _ := json.Marshal(result)
-		json.NewEncoder(w).Encode(map[string]interface{}{"result": json.RawMessage(raw), "id": "sakms"})
-	}))
-	defer aria2Srv.Close()
-	dl := newTestDownloader(aria2Srv.URL, staging)
+	dl := newTestDownloader("packgid", staging)
+	dl.SeedState(downloader.Download{
+		GID: "packgid", Status: "complete", Dir: pack,
+		Files: []string{e1, e2},
+	})
 
 	connStore, propStore, allowStore, settingsStore, grabsStore, libStore, slidersStore, traktStore, adultNewestRowStore, adultNewestReleaseStore, rssFeedsStore := testStores(t)
 	ctx := context.Background()
