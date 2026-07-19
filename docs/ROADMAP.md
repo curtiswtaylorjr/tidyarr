@@ -171,6 +171,20 @@ header. Commit `50dd970`.
   branch, and pinning a deletion-gating signal to untagged upstream was
   rejected. Swap PHash→PDQ once imghash tags a release containing it.
 
+**Shipped 2026-07-19: Vendor-agnostic worker node (`cmd/sakms-node`).** Optional
+installable binary that offloads phash/videophash computation to any machine with
+better GPU hardware (immediate driver: wade-pc RTX 4070 supports AV1 NVDEC;
+server1 Quadro K2200 does not — the entire media library is AV1). The node connects
+over SSE, receives jobs, remaps paths via a configurable prefix table, runs
+`internal/phash`/`internal/videophash` directly (byte-identical hashes), and POSTs
+results back. Server transparently falls back to local execution when no node is
+connected. New: `internal/nodes` (Registry + Dispatcher, circuit breaker, pending-
+channel invariant), `internal/api/nodes.go` (SSE stream, heartbeat, result, list —
+all behind existing X-Api-Key), `cmd/sakms-node` (CGo-free, linux/windows/darwin),
+Settings → Nodes tab (read-only: name, status, capabilities, last heartbeat). The
+`Dispatcher` implements both `PHasher` interfaces — zero downstream signature churn.
+Commit `1843bca`.
+
 **Shipped 2026-07-19: GPU frame decoding.** Concurrent frame extraction
 (errgroup, limit 4) replaces the sequential N-subprocess loop in both
 `internal/phash` and `internal/videophash`. Hardware acceleration (cuda >
