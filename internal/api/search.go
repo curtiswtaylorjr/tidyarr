@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"sort"
 	"strconv"
@@ -210,10 +211,10 @@ func grabHandler(httpClient *http.Client, connStore *connections.Store, settings
 		// a store failure here doesn't undo the (already-submitted) download.
 		if gid != "" {
 			if err := grabsStore.SetDownloadGID(ctx, created.ID, gid); err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
+				log.Printf("grabHandler: failed to persist download GID %s for grab %d: %v", gid, created.ID, err)
+			} else {
+				created.DownloadGID = gid
 			}
-			created.DownloadGID = gid
 		}
 
 		whStore.Dispatch(webhooks.EventGrabCompleted, map[string]any{

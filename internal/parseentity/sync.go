@@ -112,25 +112,29 @@ func SyncFromTPDB(ctx context.Context, store EntityStore, client *tpdbrest.Clien
 // SyncFromStashBox paginates a stash-box endpoint (StashDB or FansDB) and
 // upserts studios and performers. source is the cursor key ("stashdb" or
 // "fansdb"). maxPages works the same as SyncFromTPDB.
+//
+// Performers and studios use separate cursor keys (source+":performers" and
+// source+":studios") so each resumes from the last page it actually fetched,
+// independent of the other — matching SyncFromTPDB's per-page save behaviour.
 func SyncFromStashBox(ctx context.Context, store EntityStore, client *stashbox.Client, source string, maxPages int) error {
 	if maxPages <= 0 {
 		maxPages = defaultSyncPages
 	}
 
-	cursorStr, _, err := store.GetSyncCursor(ctx, source)
+	// Sync performers.
+	perfCursorKey := source + ":performers"
+	perfCursorStr, _, err := store.GetSyncCursor(ctx, perfCursorKey)
 	if err != nil {
 		return err
 	}
-	startPage := 1
-	if cursorStr != "" {
-		if p, err := strconv.Atoi(cursorStr); err == nil && p > 0 {
-			startPage = p + 1
+	perfStartPage := 1
+	if perfCursorStr != "" {
+		if p, err := strconv.Atoi(perfCursorStr); err == nil && p > 0 {
+			perfStartPage = p + 1
 		}
 	}
-
-	// Sync performers.
 	performerCount := 0
-	for page := startPage; page < startPage+maxPages; page++ {
+	for page := perfStartPage; page < perfStartPage+maxPages; page++ {
 		performers, err := client.QueryPerformers(ctx, page, 20)
 		if err != nil {
 			slog.Warn("parseentity: stashbox performer query failed", "source", source, "page", page, "err", err)
@@ -146,14 +150,28 @@ func SyncFromStashBox(ctx context.Context, store EntityStore, client *stashbox.C
 				performerCount++
 			}
 		}
+		if err := store.SetSyncCursor(ctx, perfCursorKey, strconv.Itoa(page)); err != nil {
+			slog.Warn("parseentity: failed to save stashbox performer cursor", "source", source, "page", page, "err", err)
+		}
 		if len(performers) < 20 {
 			break
 		}
 	}
 
-	// Sync studios.
+	// Sync studios — separate cursor so it resumes independently of performers.
+	studioCursorKey := source + ":studios"
+	studioCursorStr, _, err := store.GetSyncCursor(ctx, studioCursorKey)
+	if err != nil {
+		return err
+	}
+	studioStartPage := 1
+	if studioCursorStr != "" {
+		if p, err := strconv.Atoi(studioCursorStr); err == nil && p > 0 {
+			studioStartPage = p + 1
+		}
+	}
 	studioCount := 0
-	for page := 1; page < 1+maxPages; page++ {
+	for page := studioStartPage; page < studioStartPage+maxPages; page++ {
 		studios, err := client.QueryStudios(ctx, page, 20)
 		if err != nil {
 			slog.Warn("parseentity: stashbox studio query failed", "source", source, "page", page, "err", err)
@@ -169,14 +187,14 @@ func SyncFromStashBox(ctx context.Context, store EntityStore, client *stashbox.C
 				studioCount++
 			}
 		}
+		if err := store.SetSyncCursor(ctx, studioCursorKey, strconv.Itoa(page)); err != nil {
+			slog.Warn("parseentity: failed to save stashbox studio cursor", "source", source, "page", page, "err", err)
+		}
 		if len(studios) < 20 {
 			break
 		}
 	}
 
-	if err := store.SetSyncCursor(ctx, source, strconv.Itoa(startPage+maxPages-1)); err != nil {
-		slog.Warn("parseentity: failed to save stashbox cursor", "source", source, "err", err)
-	}
 	slog.Info("parseentity: stashbox sync complete", "source", source,
 		"studios", studioCount, "performers", performerCount)
 	return nil

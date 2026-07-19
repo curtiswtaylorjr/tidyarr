@@ -66,13 +66,15 @@ type Manager struct {
 	httpClient *http.Client
 	stagingDir string
 	onComplete func(gid string, files []string)
+	startCtx   context.Context // set by Start; nil until then
 
 	mu          sync.Mutex
 	downloads   map[string]*dlState
 	subscribers map[int]chan []Download
 	nextSubID   int
 
-	nextGID atomic.Int64 // monotonic counter for "nzb-N" GID strings
+	nextGID   atomic.Int64  // monotonic counter for "nzb-N" GID strings
+	semaphore chan struct{}  // limits concurrent downloads to pool.cfg.MaxConns
 }
 
 // Config parameterises a Manager.
@@ -85,12 +87,17 @@ type Config struct {
 // New constructs a Manager for the given NNTP server configuration.
 // The engine is not started until Start is called.
 func New(cfg Config) *Manager {
+	maxConns := cfg.Server.MaxConns
+	if maxConns < 1 {
+		maxConns = 4
+	}
 	return &Manager{
 		pool:        newPool(cfg.Server),
 		httpClient:  cfg.HTTPClient,
 		stagingDir:  cfg.StagingDir,
 		downloads:   map[string]*dlState{},
 		subscribers: map[int]chan []Download{},
+		semaphore:   make(chan struct{}, maxConns),
 	}
 }
 
@@ -105,6 +112,7 @@ func (m *Manager) StagingDir() string { return m.stagingDir }
 // Start runs the 500 ms progress-poll loop and blocks until ctx is cancelled.
 // Intended to run as `go m.Start(ctx)`.
 func (m *Manager) Start(ctx context.Context) {
+	m.startCtx = ctx
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 	var prev []Download
@@ -153,9 +161,13 @@ func (m *Manager) AddNZB(ctx context.Context, url, name string) (string, error) 
 		}
 	}
 
-	// Use a background context rather than the request context so the download
-	// survives after the HTTP handler returns — same rationale as aria2c/torrent.
-	dlCtx, cancel := context.WithCancel(context.Background())
+	// Derive from startCtx so shutdown cancellation propagates to in-flight
+	// downloads. Fall back to context.Background() if Start hasn't been called.
+	base := m.startCtx
+	if base == nil {
+		base = context.Background()
+	}
+	dlCtx, cancel := context.WithCancel(base)
 	dl := &dlState{
 		gid:        gid,
 		name:       name,
@@ -248,6 +260,11 @@ func (m *Manager) Subscribe() (<-chan []Download, func()) {
 // pipeline: download all segments → assemble files → optional par2 repair →
 // fire onComplete callback.
 func (m *Manager) runDownload(ctx context.Context, gid string, dl *dlState, nzb *NZB) {
+	// Acquire semaphore slot before heavy work so at most MaxConns downloads
+	// fetch segments concurrently, preventing account connection-limit overruns.
+	m.semaphore <- struct{}{}
+	defer func() { <-m.semaphore }()
+
 	files, err := m.downloadAll(ctx, gid, dl, nzb)
 	if err != nil {
 		m.mu.Lock()

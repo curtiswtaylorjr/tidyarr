@@ -24,9 +24,13 @@ func TestImageProxyHandler_StatusMapping(t *testing.T) {
 	}{
 		{"missing url param", "", http.StatusBadRequest},
 		{"empty url param", "url=", http.StatusBadRequest},
-		{"off-allowlist host", "url=" + url.QueryEscape("https://evil.example.com/x.jpg"), http.StatusBadRequest},
+		// Use private IP literals so the SSRF guard rejects immediately without
+		// DNS — domain names in the old allowlist-era tests would time out here
+		// because the IP-range guardrail (2026-07-15) does a real DNS lookup
+		// for unresolvable/non-routable hostnames before rejecting.
+		{"private IP (RFC1918)", "url=" + url.QueryEscape("https://192.168.1.100/x.jpg"), http.StatusBadRequest},
 		{"non-https scheme", "url=" + url.QueryEscape("http://image.tmdb.org/t/p/w342/x.jpg"), http.StatusBadRequest},
-		{"suffix bypass attempt", "url=" + url.QueryEscape("https://image.tmdb.org.evil.com/x.jpg"), http.StatusBadRequest},
+		{"loopback IP", "url=" + url.QueryEscape("https://127.0.0.1/x.jpg"), http.StatusBadRequest},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

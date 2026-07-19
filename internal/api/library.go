@@ -161,6 +161,11 @@ func testLibraryRootFolderHandler() http.HandlerFunc {
 			return
 		}
 
+		// Write probe: creates and immediately removes a temp file to verify
+		// the directory is writable by this process. This is intentionally
+		// unrestricted to any known root list — single-operator trust model.
+		// Under "none" auth this is reachable unauthenticated; acceptable given
+		// the deployment model (internal-only middleware, no multi-tenant use).
 		f, err := os.CreateTemp(req.Path, ".sak-write-test-*")
 		if err != nil {
 			writeJSON(w, pathTestResult{Error: "path is not writable"})

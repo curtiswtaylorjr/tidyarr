@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 
 	"github.com/curtiswtaylorjr/sakms/internal/httpx"
 )
@@ -54,6 +55,11 @@ type rss struct {
 // client in this program reads under, against a misbehaving or malicious
 // feed returning an unbounded payload.
 func FetchItems(ctx context.Context, httpClient *http.Client, feedURL string) ([]Item, error) {
+	parsed, err := url.Parse(feedURL)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return nil, fmt.Errorf("rssfeed: unsupported URL scheme %q (only http/https allowed)", parsed.Scheme)
+	}
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, feedURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("building request for %s: %w", feedURL, err)

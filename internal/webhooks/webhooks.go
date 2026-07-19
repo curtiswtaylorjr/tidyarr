@@ -29,6 +29,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -293,11 +294,12 @@ func (s *Store) listEnabled(ctx context.Context, event string) ([]Webhook, error
 		if w.Secret != "" {
 			decrypted, err := s.secrets.Decrypt(w.Secret)
 			if err != nil {
-				log.Printf("webhooks: failed to decrypt secret for id %d: %v", w.ID, err)
-				w.Secret = ""
-			} else {
-				w.Secret = decrypted
+				// Skip rather than deliver unsigned — a subscriber that opted
+				// into signing must not receive an unsigned payload silently.
+				log.Printf("webhooks: skipping id %d: failed to decrypt secret: %v", w.ID, err)
+				continue
 			}
+			w.Secret = decrypted
 		}
 		out = append(out, w)
 	}
@@ -380,13 +382,19 @@ func (s *Store) SendTest(ctx context.Context, id int64, data any) error {
 	return nil
 }
 
-func deliver(url, secret string, payload []byte) {
+func deliver(urlStr, secret string, payload []byte) {
+	parsed, err := url.Parse(urlStr)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		log.Printf("webhooks: skipping delivery to %s: unsupported scheme", urlStr)
+		return
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, urlStr, bytes.NewReader(payload))
 	if err != nil {
-		log.Printf("webhooks: building request to %s: %v", url, err)
+		log.Printf("webhooks: building request to %s: %v", urlStr, err)
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
@@ -397,12 +405,12 @@ func deliver(url, secret string, payload []byte) {
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		log.Printf("webhooks: delivering to %s: %v", url, err)
+		log.Printf("webhooks: delivering to %s: %v", urlStr, err)
 		return
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
-		log.Printf("webhooks: %s responded %d", url, resp.StatusCode)
+		log.Printf("webhooks: %s responded %d", urlStr, resp.StatusCode)
 	}
 }
 

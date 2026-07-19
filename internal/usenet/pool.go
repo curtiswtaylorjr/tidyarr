@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/url"
 	"strconv"
+	"strings"
+	"sync"
 
 	"github.com/Tensai75/nntp"
 	"github.com/mnightingale/rapidyenc"
@@ -37,8 +39,10 @@ type ServerConfig struct {
 // cap concurrency itself — the Manager limits parallel segment fetches via
 // errgroup.SetLimit(MaxConns).
 type pool struct {
-	cfg  ServerConfig
-	idle chan *nntp.Conn
+	cfg    ServerConfig
+	idle   chan *nntp.Conn
+	mu     sync.Mutex
+	closed bool
 }
 
 func newPool(cfg ServerConfig) *pool {
@@ -50,7 +54,14 @@ func newPool(cfg ServerConfig) *pool {
 }
 
 // get returns an idle authenticated connection or dials a new one.
+// Returns an error immediately if the pool has been closed.
 func (p *pool) get() (*nntp.Conn, error) {
+	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		return nil, errors.New("usenet: pool is closed")
+	}
+	p.mu.Unlock()
 	select {
 	case c := <-p.idle:
 		return c, nil
@@ -74,13 +85,17 @@ func (p *pool) put(c *nntp.Conn, ok bool) {
 	}
 }
 
-// close terminates all idle connections in the pool.
+// close terminates all idle connections in the pool and marks it closed so
+// subsequent get() calls fail fast rather than dialling new connections.
 func (p *pool) close() {
 	for {
 		select {
 		case c := <-p.idle:
 			c.Quit()
 		default:
+			p.mu.Lock()
+			p.closed = true
+			p.mu.Unlock()
 			return
 		}
 	}
@@ -128,6 +143,16 @@ type segmentResult struct {
 // returns the connection to the caller (who then calls pool.put). That
 // invariant is satisfied here: dec.Next() reads to completion before we return.
 func fetchSegment(c *nntp.Conn, msgID string) (segmentResult, error) {
+	// Reject message-IDs containing CRLF or any other control character to
+	// prevent NNTP command injection via NZB segment chardata.
+	if strings.ContainsAny(msgID, "\r\n") {
+		return segmentResult{}, fmt.Errorf("usenet: invalid message-id %q", msgID)
+	}
+	for i := 0; i < len(msgID); i++ {
+		if msgID[i] < 0x20 {
+			return segmentResult{}, fmt.Errorf("usenet: invalid message-id %q", msgID)
+		}
+	}
 	body, err := c.Body("<" + msgID + ">")
 	if err != nil {
 		return segmentResult{}, mapNNTPError(err)

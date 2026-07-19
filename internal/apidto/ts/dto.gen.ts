@@ -1342,8 +1342,7 @@ export interface Download {
 }
 /**
  * DownloaderConfig is the unified downloader's operator-tunable settings
- * (GET/PUT /api/downloader/config). The RPC token is auto-generated and
- * stored via internal/secrets — it is deliberately NOT part of this config.
+ * (GET/PUT /api/downloader/config).
  */
 export interface DownloaderConfig {
   stagingDir: string;

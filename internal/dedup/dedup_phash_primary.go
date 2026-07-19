@@ -73,6 +73,11 @@ func (uf *pHashUnionFind) union(x, y int) {
 }
 
 // pHashGroupComponents returns all connected components with ≥ 2 members.
+// Union-find produces transitive clusters: if A~B and B~C, {A,B,C} are grouped
+// even when A and C don't meet the threshold directly. This is intentional —
+// minPairwiseSimilarity surfaces the worst-case pair similarity so the operator
+// can review before any delete. To get strict pairwise grouping instead, re-check
+// every member against the chosen winner and drop those beyond threshold.
 func pHashGroupComponents(items []pHashFileItem, uf *pHashUnionFind) [][]pHashFileItem {
 	byRoot := make(map[int][]pHashFileItem)
 	for i, item := range items {

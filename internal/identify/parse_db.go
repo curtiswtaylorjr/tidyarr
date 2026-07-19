@@ -24,12 +24,15 @@ import (
 //  5. Performers matched greedily in remaining tokens, window 1–3.
 //  6. Title = unconsumed tokens, title-cased.
 func ParseFilenameDB(ctx context.Context, stem, parentName string, store parseentity.EntityStore) (ParsedFilename, error) {
-	year := ExtractYearFromToken(stem)
-	if year == "" {
-		year = ExtractYearFromToken(parentName)
-	}
-
+	// Extract year from raw split tokens BEFORE noise-stripping: stripNoiseTokens
+	// removes year-shaped tokens (reYear strips ^(19|20)\d{2}$), so scanning
+	// per-token on the raw list avoids both false matches on catalog-number
+	// substrings and premature year removal.
 	tokens := splitTokens(stem)
+	year := extractYearFromTokens(tokens)
+	if year == "" {
+		year = extractYearFromTokens(splitTokens(parentName))
+	}
 	tokens = stripNoiseTokens(tokens)
 
 	// Try parentName as a studio hint first (folder name = studio is reliable).
@@ -106,6 +109,19 @@ func ParseFilenameDB(ctx context.Context, stem, parentName string, store parseen
 		Year:       year,
 		Performers: performers,
 	}, nil
+}
+
+// extractYearFromTokens scans individual tokens for the first date-bearing one
+// and returns its 4-digit year string, or "" if none is found. Operating on
+// discrete tokens (rather than the whole raw stem) prevents catalog numbers
+// like "ep20191" from matching the year pattern as a substring.
+func extractYearFromTokens(tokens []string) string {
+	for _, t := range tokens {
+		if y := ExtractYearFromToken(t); y != "" {
+			return y
+		}
+	}
+	return ""
 }
 
 // splitTokens splits a filename stem on dots, underscores, hyphens, and

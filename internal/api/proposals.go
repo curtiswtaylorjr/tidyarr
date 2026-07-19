@@ -111,7 +111,7 @@ func applyProposalHandler(httpClient *http.Client, connStore *connections.Store,
 		// partial-success rule the old internal defer had: a committed file move
 		// still reaches the players even if a later step (e.g. MarkApplied)
 		// failed. NotifyPlayers no-ops on empty changes.
-		changes, err := applyByWorkflow(ctx, settingsStore, propStore, libStore, sess, *p, req)
+		changes, err := applyByWorkflow(ctx, settingsStore, propStore, libStore, sess, *p, req, true)
 		sess.NotifyPlayers(ctx, changes)
 		if err != nil {
 			if errors.Is(err, errUnknownWorkflow) {
@@ -173,7 +173,7 @@ var errUnknownWorkflow = errors.New("unknown proposal workflow")
 // and fires one combined call after its whole loop. changes is nil on an
 // early error (nothing committed), which makes NotifyPlayers correctly no-op
 // (len(changes) == 0 short-circuit).
-func applyByWorkflow(ctx context.Context, settingsStore *settings.Store, propStore proposalApplyStore, libStore *library.Store, sess *mode.Session, p proposals.Proposal, req applyProposalRequest) ([]mode.PathChange, error) {
+func applyByWorkflow(ctx context.Context, settingsStore *settings.Store, propStore proposalApplyStore, libStore *library.Store, sess *mode.Session, p proposals.Proposal, req applyProposalRequest, singleItem bool) ([]mode.PathChange, error) {
 	switch p.Workflow {
 	case proposals.Rename:
 		switch p.Mode {
@@ -192,7 +192,9 @@ func applyByWorkflow(ctx context.Context, settingsStore *settings.Store, propSto
 				if err != nil {
 					return changes, err
 				}
-				enrichMovieCollection(ctx, sess, libStore, itemID, p.TMDBID)
+				if singleItem {
+					enrichMovieCollection(ctx, sess, libStore, itemID, p.TMDBID)
+				}
 				return changes, propStore.MarkApplied(ctx, p.ID, int(itemID))
 			}
 			episodeID, changes, err := rename.ApplyLibrarySeries(ctx, libStore, p, preset)
@@ -352,6 +354,14 @@ func applyBatchHandler(httpClient *http.Client, connStore *connections.Store, se
 		changesByMode := make(map[mode.Mode][]mode.PathChange)
 		results := make([]applyBatchResultItem, 0, len(req.Items))
 
+		// Concurrency note: no lock prevents a concurrent Scan (from a second
+		// browser tab or background recheck) from calling ReplacePending while
+		// this batch is in flight. If that race lands, a mid-batch item's
+		// MarkApplied call returns ErrNotFound even though the file already
+		// moved. The item is reported ok:false in the response, and the player
+		// notify still fires for any items that did commit — partial success
+		// is preserved. Single-operator, single-tab usage (the normal case)
+		// is not affected.
 		for _, item := range req.Items {
 			p, err := propStore.Get(ctx, item.ID)
 			if err != nil {
@@ -369,7 +379,7 @@ func applyBatchHandler(httpClient *http.Client, connStore *connections.Store, se
 				sessions[p.Mode] = sess
 			}
 
-			changes, err := applyByWorkflow(ctx, settingsStore, propStore, libStore, sess, *p, applyProposalRequest{KeepIndex: item.KeepIndex, KeepAll: item.KeepAll})
+			changes, err := applyByWorkflow(ctx, settingsStore, propStore, libStore, sess, *p, applyProposalRequest{KeepIndex: item.KeepIndex, KeepAll: item.KeepAll}, false)
 			// Accumulate committed changes unconditionally — independent of the
 			// item's ok/error result. applyByWorkflow returns non-nil changes
 			// alongside a non-nil err when the physical move/delete committed

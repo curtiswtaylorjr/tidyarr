@@ -90,8 +90,15 @@ const AIProviderModelCard: Component = () => {
   const save = async () => {
     try {
       await putAIFallbackEnabled(enabled());
-      await putAIProvider(prov());
-      await putAIModel(mdl());
+      // Only write provider/model when the resources have loaded — prevents
+      // overwriting stored values with the unseeded "ollama"/"" defaults on
+      // a pre-resolve Save click.
+      const resolvedProvider = provider();
+      const resolvedModel = model();
+      if (resolvedProvider !== undefined && resolvedModel !== undefined) {
+        await putAIProvider(prov());
+        await putAIModel(mdl());
+      }
       void refetchFallback();
       setDirty(false);
       status.saved();

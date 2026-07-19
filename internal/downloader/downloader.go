@@ -303,11 +303,11 @@ func (m *Manager) Cancel(gid string) error {
 }
 
 // List returns a snapshot of all known downloads.
-func (m *Manager) List() []Download { return m.snapshot() }
+func (m *Manager) List() []Download { return m.readSnapshot() }
 
 // FindByGID looks up one download by GID. Returns (nil, nil) when not found.
 func (m *Manager) FindByGID(gid string) (*Download, error) {
-	for _, d := range m.snapshot() {
+	for _, d := range m.readSnapshot() {
 		if d.GID == gid {
 			return &d, nil
 		}
@@ -446,7 +446,7 @@ func (m *Manager) pollLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			snap := m.snapshot()
+			snap := m.pollSnapshot()
 			if !sameSnapshot(prev, snap) {
 				m.fanout(snap)
 				prev = snap
@@ -455,16 +455,49 @@ func (m *Manager) pollLoop(ctx context.Context) {
 	}
 }
 
-// snapshot builds the current Download list from all entries, updating speed
-// for active downloads and using cached values for terminal ones.
-func (m *Manager) snapshot() []Download {
+// buildEntry assembles a Download from an entry's cached/stable fields without
+// touching prevBytes, prevTime, or speed. Caller must hold m.mu.
+func (m *Manager) buildEntry(gid string, e *entry) Download {
+	dir := e.dir
+	if dir == "" {
+		dir = m.cfg.StagingDir
+	}
+	return Download{
+		GID:             gid,
+		Status:          e.status,
+		Filename:        e.filename,
+		Dir:             dir,
+		TotalLength:     e.cachedTotal,
+		CompletedLength: e.cachedCompleted,
+		DownloadSpeed:   e.speed,
+		Connections:     e.cachedConns,
+		Files:           e.files,
+		ErrorMessage:    e.errorMsg,
+	}
+}
+
+// readSnapshot builds the current Download list from cached entry fields.
+// It never mutates prevBytes, prevTime, or speed — safe to call from HTTP
+// request handlers without corrupting the poll loop's speed calculation.
+func (m *Manager) readSnapshot() []Download {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]Download, 0, len(m.entries))
+	for gid, e := range m.entries {
+		out = append(out, m.buildEntry(gid, e))
+	}
+	return out
+}
+
+// pollSnapshot builds the current Download list from all entries, advancing
+// speed state (prevBytes/prevTime/speed) for active downloads. Only called by
+// pollLoop — HTTP handlers use readSnapshot to avoid corrupting speed state.
+func (m *Manager) pollSnapshot() []Download {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	now := time.Now()
 	out := make([]Download, 0, len(m.entries))
 	for gid, e := range m.entries {
-		var completed, total, conns, speed int64
-
 		if e.t != nil && (e.status == "active" || e.status == "waiting") {
 			// Guard against a closed torrent handle (race with client shutdown).
 			alive := true
@@ -474,11 +507,13 @@ func (m *Manager) snapshot() []Download {
 			default:
 			}
 			if alive {
-				completed = e.t.BytesCompleted()
+				completed := e.t.BytesCompleted()
+				var total int64
 				if e.t.Info() != nil {
 					total = e.t.Length()
 				}
-				conns = int64(e.t.Stats().ConnectedSeeders)
+				conns := int64(e.t.Stats().ConnectedSeeders)
+				var speed int64
 				if e.status == "active" && !e.prevTime.IsZero() {
 					if dt := now.Sub(e.prevTime).Seconds(); dt > 0 {
 						if delta := completed - e.prevBytes; delta > 0 {
@@ -492,34 +527,9 @@ func (m *Manager) snapshot() []Download {
 				e.cachedCompleted = completed
 				e.cachedTotal = total
 				e.cachedConns = conns
-			} else {
-				completed = e.cachedCompleted
-				total = e.cachedTotal
-				conns = e.cachedConns
 			}
-		} else {
-			completed = e.cachedCompleted
-			total = e.cachedTotal
-			conns = e.cachedConns
-			speed = e.speed
 		}
-
-		dir := e.dir
-		if dir == "" {
-			dir = m.cfg.StagingDir
-		}
-		out = append(out, Download{
-			GID:             gid,
-			Status:          e.status,
-			Filename:        e.filename,
-			Dir:             dir,
-			TotalLength:     total,
-			CompletedLength: completed,
-			DownloadSpeed:   speed,
-			Connections:     conns,
-			Files:           e.files,
-			ErrorMessage:    e.errorMsg,
-		})
+		out = append(out, m.buildEntry(gid, e))
 	}
 	return out
 }
