@@ -20,6 +20,7 @@ import (
 	"github.com/curtiswtaylorjr/sakms/internal/quality"
 	"github.com/curtiswtaylorjr/sakms/internal/release"
 	"github.com/curtiswtaylorjr/sakms/internal/settings"
+	"github.com/curtiswtaylorjr/sakms/internal/usenet"
 )
 
 // adultAutoGrabCategory is the XXX (6000-range) Newznab category Adult
@@ -91,7 +92,7 @@ func minSeedersFor(m mode.Mode) int {
 //
 // Exactly one release is ever grabbed per call: no bulk action, the same
 // staged-single-mutation invariant every other SAK workflow keeps.
-func autoGrabHandler(httpClient *http.Client, connStore *connections.Store, settingsStore *settings.Store, dl *downloader.Manager, grabsStore *grabs.Store) http.HandlerFunc {
+func autoGrabHandler(httpClient *http.Client, connStore *connections.Store, settingsStore *settings.Store, dl *downloader.Manager, nzb *usenet.Manager, grabsStore *grabs.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		m := mode.Mode(r.PathValue("mode"))
 		ctx := r.Context()
@@ -155,7 +156,7 @@ func autoGrabHandler(httpClient *http.Client, connStore *connections.Store, sett
 		}
 		picked := releases[sel.PickIndex]
 
-		downloadClient, gid, status, err := dispatchToDownloadClient(ctx, sess, m, string(picked.Protocol), picked.DownloadURL, picked.Title)
+		downloadClient, gid, status, err := dispatchToDownloadClient(ctx, sess, m, nzb, string(picked.Protocol), picked.DownloadURL, picked.Title)
 		if err != nil {
 			http.Error(w, err.Error(), status)
 			return

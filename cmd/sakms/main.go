@@ -35,6 +35,7 @@ import (
 	"github.com/curtiswtaylorjr/sakms/internal/secrets"
 	"github.com/curtiswtaylorjr/sakms/internal/settings"
 	"github.com/curtiswtaylorjr/sakms/internal/trakt"
+	"github.com/curtiswtaylorjr/sakms/internal/usenet"
 	"github.com/curtiswtaylorjr/sakms/internal/videophash"
 	"github.com/curtiswtaylorjr/sakms/internal/web"
 	"github.com/curtiswtaylorjr/sakms/internal/webhooks"
@@ -94,6 +95,14 @@ func run() error {
 	if err != nil {
 		log.Printf("downloader: not starting (%v) — torrent grabbing will be unavailable until fixed", err)
 		dlManager = nil
+	}
+	// Usenet/NNTP downloader (internal/usenet): constructed only when an NNTP
+	// server is configured in Settings → Connections. Nil when unconfigured —
+	// usenet grabs stay unavailable until the operator adds a server.
+	nzbManager, err := buildUsenetManager(context.Background(), cfg.DataDir, connStore, settingsStore, &http.Client{Timeout: outboundTimeout})
+	if err != nil {
+		log.Printf("usenet: not starting (%v) — NZB grabbing will be unavailable until fixed", err)
+		nzbManager = nil
 	}
 	// rssFeedsStore backs admin-defined raw RSS 2.0 feed rows (NZBGeek
 	// saved-search style) — a per-row feed URL fetched and parsed server-side
@@ -164,7 +173,7 @@ func run() error {
 	// internal/api.NewAuthMux's doc comment) — NewMux stays unaware auth
 	// exists either way, so its own large test suite never had to change
 	// for auth specifically.
-	apiMux := api.NewMux(&http.Client{Timeout: outboundTimeout}, connStore, propStore, allowStore, prober, hasher, videoHasher, settingsStore, grabsStore, libStore, slidersStore, traktStore, adultNewestRowStore, adultNewestReleaseStore, rssFeedsStore, entityStore, webhookStore, dlManager)
+	apiMux := api.NewMux(&http.Client{Timeout: outboundTimeout}, connStore, propStore, allowStore, prober, hasher, videoHasher, settingsStore, grabsStore, libStore, slidersStore, traktStore, adultNewestRowStore, adultNewestReleaseStore, rssFeedsStore, entityStore, webhookStore, dlManager, nzbManager)
 	protectedAPI := auth.Middleware(secretStore, authStore, apiMux)
 
 	// API-key management (status + regenerate) is session-protected like
@@ -249,6 +258,10 @@ func run() error {
 				log.Printf("downloader: manager stopped: %v", err)
 			}
 		}()
+	}
+	if nzbManager != nil {
+		nzbManager.SetOnComplete(api.UsenetCompleteImporter(&http.Client{Timeout: outboundTimeout}, connStore, settingsStore, grabsStore, libStore, prober, dlManager, nzbManager))
+		go nzbManager.Start(ctx)
 	}
 
 	// DELIBERATE, opt-in exception to this project's "manual by default, no
@@ -346,6 +359,41 @@ func buildDownloader(ctx context.Context, dataDir string, settingsStore *setting
 		MaxConc:    maxConc,
 		MaxConn:    maxConn,
 	}, httpClient), nil
+}
+
+// buildUsenetManager reads the "nntp" connection from connStore and constructs
+// a usenet.Manager. Returns (nil, nil) when no NNTP server has been configured
+// — usenet grabbing stays unavailable until the operator adds one via
+// PUT /api/connections/nntp. Same lifecycle pattern as buildDownloader.
+func buildUsenetManager(ctx context.Context, dataDir string, connStore *connections.Store, settingsStore *settings.Store, httpClient *http.Client) (*usenet.Manager, error) {
+	c, err := connStore.Get(ctx, "nntp")
+	if err != nil {
+		if errors.Is(err, connections.ErrNotFound) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("usenet: reading nntp connection: %w", err)
+	}
+	cfg, err := usenet.ParseURL(c.URL)
+	if err != nil {
+		return nil, err
+	}
+	cfg.Username = c.Username
+	cfg.Password = c.APIKey
+	cfg.MaxConns = settingInt(ctx, settingsStore, api.DownloaderMaxConnectionsKey, 4)
+
+	staging, err := settingsStore.Get(ctx, api.DownloaderStagingDirKey)
+	if err != nil && !errors.Is(err, settings.ErrNotFound) {
+		return nil, fmt.Errorf("usenet: reading staging dir: %w", err)
+	}
+	if staging == "" {
+		staging = filepath.Join(dataDir, "downloads")
+	}
+
+	return usenet.New(usenet.Config{
+		Server:     cfg,
+		StagingDir: staging,
+		HTTPClient: httpClient,
+	}), nil
 }
 
 // settingInt reads an int settings scalar, returning def when unset/invalid.

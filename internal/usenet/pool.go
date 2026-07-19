@@ -4,6 +4,8 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"net/url"
+	"strconv"
 
 	"github.com/Tensai75/nntp"
 	"github.com/mnightingale/rapidyenc"
@@ -145,6 +147,45 @@ func fetchSegment(c *nntp.Conn, msgID string) (segmentResult, error) {
 		filename: resp.Metadata.FileName,
 		fileSize: resp.Metadata.FileSize,
 	}, nil
+}
+
+// TestConnect dials, authenticates (if credentials are set), and immediately
+// disconnects. Returns nil on success. Used by the Settings "Test connection"
+// button to validate an NNTP server config without starting the full engine.
+func TestConnect(cfg ServerConfig) error {
+	p := newPool(cfg)
+	c, err := p.dial()
+	if err != nil {
+		return err
+	}
+	c.Quit()
+	return nil
+}
+
+// ParseURL parses a "nntp://..." or "nntps://..." URL into a ServerConfig.
+// Missing port defaults to 563 (TLS) or 119 (plain).
+func ParseURL(rawURL string) (ServerConfig, error) {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return ServerConfig{}, fmt.Errorf("usenet: invalid URL %q: %w", rawURL, err)
+	}
+	if u.Scheme != "nntp" && u.Scheme != "nntps" {
+		return ServerConfig{}, fmt.Errorf("usenet: URL scheme must be nntp or nntps, got %q", u.Scheme)
+	}
+	tls := u.Scheme == "nntps"
+	host := u.Hostname()
+	port := 119
+	if tls {
+		port = 563
+	}
+	if portStr := u.Port(); portStr != "" {
+		p, err := strconv.Atoi(portStr)
+		if err != nil {
+			return ServerConfig{}, fmt.Errorf("usenet: invalid port in URL %q: %w", rawURL, err)
+		}
+		port = p
+	}
+	return ServerConfig{Host: host, Port: port, TLS: tls}, nil
 }
 
 // mapNNTPError translates NNTP protocol error codes 430 and 451 to named

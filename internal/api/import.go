@@ -16,6 +16,7 @@ import (
 	"github.com/curtiswtaylorjr/sakms/internal/mode"
 	"github.com/curtiswtaylorjr/sakms/internal/rename"
 	"github.com/curtiswtaylorjr/sakms/internal/settings"
+	"github.com/curtiswtaylorjr/sakms/internal/usenet"
 )
 
 // DownloadCompleteImporter returns the downloader Manager's onComplete
@@ -112,6 +113,53 @@ func clean(p string) string {
 		return ""
 	}
 	return filepath.Clean(p)
+}
+
+// UsenetCompleteImporter returns the usenet Manager's onComplete callback,
+// parallel to DownloadCompleteImporter. Uses nzb.StagingDir() as the staging
+// root. dl is the torrent manager (may be nil) — passed only so mode.Build
+// can construct a session for player notification.
+func UsenetCompleteImporter(httpClient *http.Client, connStore *connections.Store, settingsStore *settings.Store, grabsStore *grabs.Store, libStore *library.Store, prober dedup.Prober, dl *downloader.Manager, nzb *usenet.Manager) func(gid string, files []string) {
+	return func(gid string, files []string) {
+		ctx := context.Background()
+		g, err := grabsStore.GetByDownloadGID(ctx, gid)
+		if err != nil {
+			if !errors.Is(err, grabs.ErrNotFound) {
+				log.Printf("usenet import: looking up grab for gid %s: %v", gid, err)
+			}
+			return
+		}
+		if g.Status == grabs.Imported {
+			return
+		}
+
+		contentPath := downloadContentPath(files, nzb.StagingDir(), nzb.StagingDir())
+		if contentPath == "" {
+			log.Printf("usenet import: grab %d (gid %s) completed but has no content path", g.ID, gid)
+			return
+		}
+
+		changes, err := importGrabContent(ctx, libStore, g, contentPath)
+		if err != nil {
+			log.Printf("usenet import: grab %d (gid %s): %v", g.ID, gid, err)
+			return
+		}
+
+		sess, err := mode.Build(ctx, connStore, settingsStore, httpClient, dl, g.Mode)
+		if err != nil {
+			log.Printf("usenet import: grab %d building session: %v", g.ID, err)
+		} else {
+			postGrabRuntimeReview(ctx, prober, grabsStore, sess, g, changes)
+			sess.NotifyPlayers(ctx, changes)
+		}
+
+		if err := grabsStore.SetDownloadStatus(ctx, g.ID, "complete", contentPath); err != nil {
+			log.Printf("usenet import: grab %d recording download status: %v", g.ID, err)
+		}
+		if err := grabsStore.UpdateStatus(ctx, g.ID, grabs.Imported); err != nil {
+			log.Printf("usenet import: grab %d marking imported: %v", g.ID, err)
+		}
+	}
 }
 
 // importGrabContent is the shared import core: it relocates a completed

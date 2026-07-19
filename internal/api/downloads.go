@@ -8,10 +8,12 @@ import (
 	"net/http"
 	"path/filepath"
 	"strconv"
+	"strings"
 
 	"github.com/curtiswtaylorjr/sakms/internal/apidto"
 	"github.com/curtiswtaylorjr/sakms/internal/downloader"
 	"github.com/curtiswtaylorjr/sakms/internal/settings"
+	"github.com/curtiswtaylorjr/sakms/internal/usenet"
 )
 
 // Settings keys for the unified downloader's operator-tunable knobs.
@@ -49,37 +51,65 @@ func toDTODownload(d downloader.Download) apidto.Download {
 	}
 }
 
-// mergedDownloads returns the full download queue as a DTO slice. Returns an
-// empty (non-nil) slice when the queue is empty so JSON encodes [] not null.
-func mergedDownloads(dl *downloader.Manager) []apidto.Download {
-	list := dl.List()
-	out := make([]apidto.Download, 0, len(list))
-	for _, d := range list {
-		out = append(out, toDTODownload(d))
+// toUsenetDTODownload maps a usenet.Download to the wire DTO. Mirrors
+// toDTODownload — both types carry the same logical fields even though they
+// are distinct Go types.
+func toUsenetDTODownload(d usenet.Download) apidto.Download {
+	name := d.Filename
+	if name != "" {
+		name = filepath.Base(name)
+	}
+	if name == "" {
+		name = d.GID
+	}
+	return apidto.Download{
+		GID:             d.GID,
+		Status:          d.Status,
+		Filename:        name,
+		TotalLength:     d.TotalLength,
+		CompletedLength: d.CompletedLength,
+		DownloadSpeed:   d.DownloadSpeed,
+		Connections:     d.Connections,
+		ErrorMessage:    d.ErrorMessage,
+	}
+}
+
+// mergedDownloads returns the combined torrent + usenet download queue as a
+// DTO slice. Returns a non-nil empty slice so JSON encodes [] not null.
+func mergedDownloads(dl *downloader.Manager, nzb *usenet.Manager) []apidto.Download {
+	out := make([]apidto.Download, 0)
+	if dl != nil {
+		for _, d := range dl.List() {
+			out = append(out, toDTODownload(d))
+		}
+	}
+	if nzb != nil {
+		for _, d := range nzb.List() {
+			out = append(out, toUsenetDTODownload(d))
+		}
 	}
 	return out
 }
 
 // listDownloadsHandler returns the current download queue.
-func listDownloadsHandler(dl *downloader.Manager) http.HandlerFunc {
+func listDownloadsHandler(dl *downloader.Manager, nzb *usenet.Manager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if dl == nil {
+		if dl == nil && nzb == nil {
 			http.Error(w, "the download engine isn't running", http.StatusServiceUnavailable)
 			return
 		}
-		writeJSON(w, mergedDownloads(dl))
+		writeJSON(w, mergedDownloads(dl, nzb))
 	}
 }
 
-// downloadsStreamHandler streams the download queue as server-sent events,
-// the same SSE shape the System Dashboard uses (see sysinfoStreamHandler):
-// each event's data is a JSON array of the current downloads. It subscribes
-// to the Manager's hub, so an event fires whenever the queue changes (a new
-// download, progress, a completion), plus one immediately on connect so the
-// UI paints without waiting for the first change.
-func downloadsStreamHandler(dl *downloader.Manager) http.HandlerFunc {
+// downloadsStreamHandler streams the combined torrent + usenet download queue
+// as server-sent events. It subscribes to both managers; an event from either
+// triggers a full re-snapshot so the UI always sees the merged queue.
+// Nil channels (unconfigured engine) simply never fire in the select, so the
+// handler works correctly when only one engine is running.
+func downloadsStreamHandler(dl *downloader.Manager, nzb *usenet.Manager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if dl == nil {
+		if dl == nil && nzb == nil {
 			http.Error(w, "the download engine isn't running", http.StatusServiceUnavailable)
 			return
 		}
@@ -96,24 +126,37 @@ func downloadsStreamHandler(dl *downloader.Manager) http.HandlerFunc {
 
 		// Paint an initial snapshot immediately so the screen isn't blank until
 		// the queue next changes.
-		writeSSEData(w, flusher, mergedDownloads(dl))
+		writeSSEData(w, flusher, mergedDownloads(dl, nzb))
 
-		ch, cancel := dl.Subscribe()
-		defer cancel()
+		// Subscribe to both managers. A nil channel blocks forever in a select,
+		// so the unconfigured engine's case simply never fires — correct behavior.
+		var dlCh <-chan []downloader.Download
+		var dlCancel func()
+		if dl != nil {
+			dlCh, dlCancel = dl.Subscribe()
+			defer dlCancel()
+		}
+		var nzbCh <-chan []usenet.Download
+		var nzbCancel func()
+		if nzb != nil {
+			nzbCh, nzbCancel = nzb.Subscribe()
+			defer nzbCancel()
+		}
 
 		for {
 			select {
 			case <-ctx.Done():
 				return
-			case raw, ok := <-ch:
+			case _, ok := <-dlCh:
 				if !ok {
 					return
 				}
-				out := make([]apidto.Download, 0, len(raw))
-				for _, d := range raw {
-					out = append(out, toDTODownload(d))
+				writeSSEData(w, flusher, mergedDownloads(dl, nzb))
+			case _, ok := <-nzbCh:
+				if !ok {
+					return
 				}
-				writeSSEData(w, flusher, out)
+				writeSSEData(w, flusher, mergedDownloads(dl, nzb))
 			}
 		}
 	}
@@ -129,14 +172,26 @@ func writeSSEData(w http.ResponseWriter, flusher http.Flusher, v any) {
 	flusher.Flush()
 }
 
-// cancelDownloadHandler cancels and removes a download.
-func cancelDownloadHandler(dl *downloader.Manager) http.HandlerFunc {
+// cancelDownloadHandler cancels and removes a download. Routes usenet GIDs
+// (prefix "nzb-") to the usenet engine; all others to the torrent engine.
+func cancelDownloadHandler(dl *downloader.Manager, nzb *usenet.Manager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if dl == nil {
-			http.Error(w, "the download engine isn't running", http.StatusServiceUnavailable)
-			return
+		gid := r.PathValue("gid")
+		var err error
+		if strings.HasPrefix(gid, "nzb-") {
+			if nzb == nil {
+				http.Error(w, "the usenet engine isn't running", http.StatusServiceUnavailable)
+				return
+			}
+			err = nzb.Cancel(gid)
+		} else {
+			if dl == nil {
+				http.Error(w, "the download engine isn't running", http.StatusServiceUnavailable)
+				return
+			}
+			err = dl.Cancel(gid)
 		}
-		if err := dl.Cancel(r.PathValue("gid")); err != nil {
+		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
 		}
@@ -144,14 +199,25 @@ func cancelDownloadHandler(dl *downloader.Manager) http.HandlerFunc {
 	}
 }
 
-// pauseDownloadHandler pauses an active download.
-func pauseDownloadHandler(dl *downloader.Manager) http.HandlerFunc {
+// pauseDownloadHandler pauses an active download. Routes by GID prefix.
+func pauseDownloadHandler(dl *downloader.Manager, nzb *usenet.Manager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if dl == nil {
-			http.Error(w, "the download engine isn't running", http.StatusServiceUnavailable)
-			return
+		gid := r.PathValue("gid")
+		var err error
+		if strings.HasPrefix(gid, "nzb-") {
+			if nzb == nil {
+				http.Error(w, "the usenet engine isn't running", http.StatusServiceUnavailable)
+				return
+			}
+			err = nzb.Pause(gid)
+		} else {
+			if dl == nil {
+				http.Error(w, "the download engine isn't running", http.StatusServiceUnavailable)
+				return
+			}
+			err = dl.Pause(gid)
 		}
-		if err := dl.Pause(r.PathValue("gid")); err != nil {
+		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
 		}
@@ -159,14 +225,25 @@ func pauseDownloadHandler(dl *downloader.Manager) http.HandlerFunc {
 	}
 }
 
-// resumeDownloadHandler unpauses a paused download.
-func resumeDownloadHandler(dl *downloader.Manager) http.HandlerFunc {
+// resumeDownloadHandler unpauses a paused download. Routes by GID prefix.
+func resumeDownloadHandler(dl *downloader.Manager, nzb *usenet.Manager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if dl == nil {
-			http.Error(w, "the download engine isn't running", http.StatusServiceUnavailable)
-			return
+		gid := r.PathValue("gid")
+		var err error
+		if strings.HasPrefix(gid, "nzb-") {
+			if nzb == nil {
+				http.Error(w, "the usenet engine isn't running", http.StatusServiceUnavailable)
+				return
+			}
+			err = nzb.Resume(gid)
+		} else {
+			if dl == nil {
+				http.Error(w, "the download engine isn't running", http.StatusServiceUnavailable)
+				return
+			}
+			err = dl.Resume(gid)
 		}
-		if err := dl.Resume(r.PathValue("gid")); err != nil {
+		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
 		}

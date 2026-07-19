@@ -57,6 +57,15 @@ import {
   useSectionSaveItem,
 } from "./shared";
 
+// serviceLabel maps a connection service id to its display name.
+const serviceLabel = (service: string): string => {
+  const labels: Record<string, string> = {
+    jellyfin: "Jellyfin/Emby",
+    nntp: "Usenet (NNTP)",
+  };
+  return labels[service] ?? service;
+};
+
 // ConnectionRow is one service's controls: URL / Username (if needed) / key or
 // password, plus Test / Save / Delete and, when a netscan finding exists, the
 // LAN-discovery hint buttons. keyTouched tracks whether the operator (or the
@@ -222,13 +231,13 @@ export const ConnectionRow: Component<{
 
   return (
     <tr class="border-b border-border/60 align-top">
-      <td class="px-2 py-2 text-fg">{props.service === "jellyfin" ? "Jellyfin/Emby" : props.service}</td>
+      <td class="px-2 py-2 text-fg">{serviceLabel(props.service)}</td>
       <td class="px-2 py-2">
         <Show when={!needsFixedUrl}>
         <input
           type="text"
           class={`${inputClass} !w-72 ${isFailing() ? "border-danger bg-danger/10" : ""}`}
-          placeholder="https://..."
+          placeholder={props.service === "nntp" ? "nntps://news.example.com:563" : "https://..."}
           aria-label={`${props.service} URL`}
           value={url()}
           onInput={(e) => {

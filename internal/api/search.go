@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/curtiswtaylorjr/sakms/internal/autograb"
@@ -21,6 +22,7 @@ import (
 	"github.com/curtiswtaylorjr/sakms/internal/quality"
 	"github.com/curtiswtaylorjr/sakms/internal/release"
 	"github.com/curtiswtaylorjr/sakms/internal/settings"
+	"github.com/curtiswtaylorjr/sakms/internal/usenet"
 	"github.com/curtiswtaylorjr/sakms/internal/webhooks"
 )
 
@@ -161,11 +163,11 @@ type grabRequest struct {
 }
 
 // grabHandler sends one chosen search result to the appropriate download
-// client (qBittorrent for torrent, NZBGet for usenet) and records it in
-// internal/grabs for status tracking. This is the one mutating action in the
-// search workflow — Search itself never does — matching every other
-// workflow's "Scan never mutates, exactly one human-approved action does" rule.
-func grabHandler(httpClient *http.Client, connStore *connections.Store, settingsStore *settings.Store, dl *downloader.Manager, grabsStore *grabs.Store, whStore *webhooks.Store) http.HandlerFunc {
+// engine and records it in internal/grabs for status tracking. This is the
+// one mutating action in the search workflow — Search itself never does —
+// matching every other workflow's "Scan never mutates, exactly one
+// human-approved action does" rule.
+func grabHandler(httpClient *http.Client, connStore *connections.Store, settingsStore *settings.Store, dl *downloader.Manager, nzb *usenet.Manager, grabsStore *grabs.Store, whStore *webhooks.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		m := mode.Mode(r.PathValue("mode"))
 		ctx := r.Context()
@@ -186,7 +188,7 @@ func grabHandler(httpClient *http.Client, connStore *connections.Store, settings
 			return
 		}
 
-		downloadClient, gid, status, err := dispatchToDownloadClient(ctx, sess, m, req.Protocol, req.DownloadURL, req.Title)
+		downloadClient, gid, status, err := dispatchToDownloadClient(ctx, sess, m, nzb, req.Protocol, req.DownloadURL, req.Title)
 		if err != nil {
 			http.Error(w, err.Error(), status)
 			return
@@ -223,20 +225,14 @@ func grabHandler(httpClient *http.Client, connStore *connections.Store, settings
 	}
 }
 
-// dispatchToDownloadClient sends one release to the unified download engine
-// and returns the download-client name ("anacrolix") plus the GID assigned
-// (used later to tie a completed download back to its grab for auto-import).
-// Shared by the manual grabHandler and the auto-grab handler — auto-grab is
-// the genuine second caller that justifies the extraction. On failure it
-// returns the HTTP status the caller should surface (400 not-configured /
-// usenet-unsupported / unrecognized-protocol, 502 client error).
-//
-// USENET IS NOT YET SUPPORTED — a usenet-protocol release returns an explicit
-// 400 rather than silently failing. The old qBittorrent/NZBGet dispatch was
-// removed with the unified-downloader cutover; internal/nzbget stays as
-// generic capability for a future native NNTP engine (see mode.Session's
-// QBittorrent/NZBGet field docs).
-func dispatchToDownloadClient(ctx context.Context, sess *mode.Session, m mode.Mode, protocol, downloadURL, title string) (downloadClient, gid string, status int, err error) {
+// dispatchToDownloadClient sends one release to the appropriate download
+// engine and returns the download-client name plus the GID assigned (used
+// later to tie a completed download back to its grab for auto-import).
+// Torrent releases go to the in-process anacrolix engine (internal/downloader);
+// usenet/NZB releases go to the native NNTP engine (internal/usenet).
+// Shared by the manual grabHandler and the auto-grab handler.
+// On failure it returns the HTTP status the caller should surface.
+func dispatchToDownloadClient(ctx context.Context, sess *mode.Session, m mode.Mode, nzb *usenet.Manager, protocol, downloadURL, title string) (downloadClient, gid string, status int, err error) {
 	switch prowlarr.Protocol(protocol) {
 	case prowlarr.Torrent:
 		if sess.Downloader == nil {
@@ -248,7 +244,14 @@ func dispatchToDownloadClient(ctx context.Context, sess *mode.Session, m mode.Mo
 		}
 		return "anacrolix", gid, http.StatusOK, nil
 	case prowlarr.Usenet:
-		return "", "", http.StatusBadRequest, errors.New("usenet/NZB downloads aren't supported yet — only torrent releases can be grabbed")
+		if nzb == nil {
+			return "", "", http.StatusBadRequest, errors.New("configure an NNTP server in Settings → Connections to grab usenet releases")
+		}
+		gid, err := nzb.AddNZB(ctx, downloadURL, title)
+		if err != nil {
+			return "", "", http.StatusBadGateway, err
+		}
+		return "nntp", gid, http.StatusOK, nil
 	default:
 		return "", "", http.StatusBadRequest, fmt.Errorf("unrecognized protocol %q", protocol)
 	}
@@ -267,20 +270,16 @@ func listGrabsHandler(grabsStore *grabs.Store) http.HandlerFunc {
 	}
 }
 
-// checkImportHandler refreshes one grab's status from the unified download
+// checkImportHandler refreshes one grab's status from the appropriate download
 // engine, and — the moment its download is seen complete — performs the import
 // via the shared importGrabContent core (relocate into the target root folder
 // + record in SAK's own library). This is the manual, human-triggered refresh;
-// the same import also happens automatically via the downloader's onComplete
-// callback (see cmd/sakms's onDownloadComplete), so a grab typically imports
-// itself the moment the torrent finishes — this endpoint is the on-demand
-// "check it now" the Grabs UI can still offer.
+// the same import also happens automatically via each engine's onComplete
+// callback, so a grab typically imports itself the moment the download
+// finishes — this endpoint is the on-demand "check it now" the Grabs UI offers.
 //
-// classifyDownloadState maps the download engine's status to grabs' lifecycle;
-// a completed, not-yet-imported grab imports here and flips to Imported. A
-// grab with no download GID (e.g. a usenet grab, not yet supported) has
-// nothing to poll and returns a clear conflict.
-func checkImportHandler(httpClient *http.Client, connStore *connections.Store, settingsStore *settings.Store, dl *downloader.Manager, grabsStore *grabs.Store, libStore *library.Store, prober dedup.Prober) http.HandlerFunc {
+// GID routing: "nzb-" prefix → usenet engine; everything else → torrent engine.
+func checkImportHandler(httpClient *http.Client, connStore *connections.Store, settingsStore *settings.Store, dl *downloader.Manager, nzb *usenet.Manager, grabsStore *grabs.Store, libStore *library.Store, prober dedup.Prober) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 		id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
@@ -304,12 +303,57 @@ func checkImportHandler(httpClient *http.Client, connStore *connections.Store, s
 			return
 		}
 
-		if dl == nil {
-			http.Error(w, "the download engine isn't running", http.StatusBadRequest)
+		if g.DownloadGID == "" {
+			http.Error(w, "this grab has no download GID — try re-grabbing", http.StatusConflict)
 			return
 		}
-		if g.DownloadGID == "" {
-			http.Error(w, "this grab has no download to check (usenet grabs are not yet supported by the download engine)", http.StatusConflict)
+
+		// Route usenet GIDs to the usenet engine.
+		if strings.HasPrefix(g.DownloadGID, "nzb-") {
+			if nzb == nil {
+				http.Error(w, "the usenet engine isn't running", http.StatusServiceUnavailable)
+				return
+			}
+			nzbItem, err := nzb.FindByGID(g.DownloadGID)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadGateway)
+				return
+			}
+			if nzbItem == nil {
+				http.Error(w, "the usenet engine no longer knows about this download", http.StatusConflict)
+				return
+			}
+			newStatus := classifyDownloadState(nzbItem.Status)
+			if newStatus == grabs.Completed {
+				contentPath := downloadContentPath(nzbItem.Files, nzbItem.Dir, nzb.StagingDir())
+				changes, err := importGrabContent(ctx, libStore, g, contentPath)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadGateway)
+					return
+				}
+				sess, err := mode.Build(ctx, connStore, settingsStore, httpClient, dl, g.Mode)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				postGrabRuntimeReview(ctx, prober, grabsStore, sess, g, changes)
+				sess.NotifyPlayers(ctx, changes)
+				_ = grabsStore.SetDownloadStatus(ctx, id, nzbItem.Status, contentPath)
+				newStatus = grabs.Imported
+			}
+			_ = grabsStore.UpdateStatus(ctx, id, newStatus)
+			updated, err := grabsStore.Get(ctx, id)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(updated)
+			return
+		}
+
+		if dl == nil {
+			http.Error(w, "the download engine isn't running", http.StatusBadRequest)
 			return
 		}
 

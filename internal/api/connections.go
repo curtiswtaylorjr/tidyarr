@@ -18,13 +18,14 @@ import (
 	"github.com/curtiswtaylorjr/sakms/internal/tpdbrest"
 	"github.com/curtiswtaylorjr/sakms/internal/trakt"
 	"github.com/curtiswtaylorjr/sakms/internal/tvdb"
+	"github.com/curtiswtaylorjr/sakms/internal/usenet"
 )
 
 // ConnectionTestRequest is enough to construct a client and make one real,
 // read-only call against it — the same thing Settings' "Test connection"
 // button does. Nothing here is persisted.
 type ConnectionTestRequest struct {
-	Service  string `json:"service"` // "ollama" | "stash" | "jellyfin" | "stashdb" | "fansdb" | "tpdb" | "brave" | "prowlarr" | "qbittorrent" | "nzbget" | "tmdb" | "tvdb" | "trakt"
+	Service  string `json:"service"` // "ollama" | "stash" | "jellyfin" | "stashdb" | "fansdb" | "tpdb" | "brave" | "prowlarr" | "nntp" | "tmdb" | "tvdb" | "trakt"
 	URL      string `json:"url"`
 	Username string `json:"username,omitempty"` // only qbittorrent/nzbget use this
 	APIKey   string `json:"apiKey,omitempty"`
@@ -78,6 +79,8 @@ func TestConnection(ctx context.Context, httpClient *http.Client, req Connection
 		return testTMDB(ctx, httpClient, req)
 	case "tvdb":
 		return testTVDB(ctx, httpClient, req)
+	case "nntp":
+		return testNNTP(ctx, req)
 	case "trakt":
 		// Trakt has no dedicated client_id field on ConnectionTestRequest, so
 		// by convention (see trakt.go's testTrakt doc comment) the generic
@@ -193,6 +196,21 @@ func testTVDB(ctx context.Context, httpClient *http.Client, req ConnectionTestRe
 	// Fixed public base URL — hardcoded, never req.URL (no URL collected).
 	c := tvdb.New(tvdb.Config{BaseURL: tvdb.DefaultBaseURL, APIKey: req.APIKey}, httpClient)
 	if err := c.Ping(ctx); err != nil {
+		return ConnectionTestResult{Error: err.Error()}
+	}
+	return ConnectionTestResult{OK: true}
+}
+
+// testNNTP dials the NNTP server, authenticates, and disconnects. ctx is unused
+// (nntp.Dial does not accept a context) but is kept for signature symmetry.
+func testNNTP(_ context.Context, req ConnectionTestRequest) ConnectionTestResult {
+	cfg, err := usenet.ParseURL(req.URL)
+	if err != nil {
+		return ConnectionTestResult{Error: err.Error()}
+	}
+	cfg.Username = req.Username
+	cfg.Password = req.APIKey
+	if err := usenet.TestConnect(cfg); err != nil {
 		return ConnectionTestResult{Error: err.Error()}
 	}
 	return ConnectionTestResult{OK: true}

@@ -70,10 +70,7 @@ export type {
 
 // SERVICES_WITH_USERNAME authenticate with username+password rather than a bare
 // API key — their key field is a password, and they surface a Username input.
-// Empty now that qbittorrent/nzbget (the only two username+password services)
-// were removed with the unified-downloader cutover; kept as the extension point
-// for any future username+password service rather than deleting the mechanism.
-export const SERVICES_WITH_USERNAME: string[] = [];
+export const SERVICES_WITH_USERNAME: string[] = ["nntp"];
 
 // SERVICES_WITH_FIXED_URL are fixed public APIs with one canonical address each,
 // hardcoded server-side as package constants (internal/tmdb, internal/stashbox,
@@ -98,6 +95,7 @@ export const SERVICES_WITH_HOST_LOOKUP = ["prowlarr", "jellyfin", "stash"];
 // scoped to the currently-selected provider plus the always-visible Brave row.
 export const CONNECTION_SERVICES = [
   "prowlarr",
+  "nntp",
   "tmdb",
   "tvdb",
   "stashdb",
