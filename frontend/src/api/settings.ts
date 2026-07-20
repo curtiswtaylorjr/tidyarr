@@ -170,7 +170,7 @@ export const API_KEY_HELP_URLS: Record<string, string> = {
   openai: "https://platform.openai.com/api-keys",
   gemini: "https://aistudio.google.com/app/apikey",
   anthropic: "https://console.anthropic.com/settings/keys",
-  brave: "https://api.search.brave.com/app/keys",
+  brave: "https://brave.com/search/api/",
 };
 
 // --- Connections -----------------------------------------------------------
