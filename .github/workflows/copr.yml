@@ -33,7 +33,8 @@ jobs:
       - name: Install copr-cli + rpmbuild
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y rpm copr-cli
+          sudo apt-get install -y rpm python3-pip
+          pip3 install copr-cli
 
       - name: Write copr-cli config
         # COPR_TOKEN secret must be set in the repo: Settings → Secrets.
