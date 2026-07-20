@@ -239,7 +239,8 @@ func run() error {
 	top.Handle("/api/apikey/", protectedAPIKey)                       // subtree: POST .../regenerate
 	top.Handle("/api/admin/recheck/trigger", protectedRecheckTrigger)             // exact match: manual "Refresh now"
 	top.Handle("GET /api/nodes/pair", api.PairStreamHandler(pairingReg))          // no auth: pre-pairing SSE
-	top.Handle("/api/nodes/", nodesMux)                                            // per-handler auth inside
+	top.Handle("/api/nodes", nodesMux)                                             // exact match: GET list (per-handler auth inside)
+	top.Handle("/api/nodes/", nodesMux)                                            // subtree: {id}/approve, /pending, /settings, etc.
 	top.Handle("/api/", protectedAPI)                                              // more general; still wins for everything else
 	// The frontend is mounted last and matches only what no /api/... route
 	// already claimed — Go's ServeMux picks the most specific pattern, so
