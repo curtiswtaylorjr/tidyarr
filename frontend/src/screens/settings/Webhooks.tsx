@@ -370,15 +370,17 @@ export const WebhooksSection: Component = () => {
   const [hooks, { refetch }] = createResource(fetchWebhooks);
 
   return (
-    <Card title="Outbound Webhooks">
+    <Card title="Notifications">
       <p class="mb-3 text-sm text-muted">
-        SAK fires a signed HTTP POST to each enabled endpoint after Rename,
-        Purge, Dedup apply events and successful grabs. The payload is JSON;
-        the optional{" "}
+        Get pinged in other apps — Discord, Home Assistant, anything that can
+        receive a webhook — whenever SAK finishes a Rename, Purge, or Dedup,
+        or completes a grab. If you set a signing secret below, each
+        notification includes an{" "}
         <code class="rounded bg-surface-2 px-1 py-0.5 text-xs">
           X-SAK-Signature
         </code>{" "}
-        header carries an HMAC-SHA256 hex digest when a signing secret is set.
+        header (HMAC-SHA256) so the receiving app can verify it really came
+        from SAK.
       </p>
 
       <Show when={hooks.error}>
