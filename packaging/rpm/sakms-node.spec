@@ -1,3 +1,6 @@
+# Binaries are stripped (-s -w); suppress the empty debugsource subpackage.
+%global debug_package %{nil}
+
 Name:           sakms-node
 Version:        %{version}
 Release:        1%{?dist}
