@@ -8,20 +8,36 @@ Summary:        sakms worker node daemon for GPU-accelerated media processing
 License:        MIT
 URL:            https://github.com/curtiswtaylorjr/sakms
 Source0:        sakms-%{version}.tar.gz
+Source1:        sakms-node.sysusers.conf
 
 # sakms-node and sakms-node-tray are pure Go (CGO_ENABLED=0);
 # no GL or C build requirements needed.
 BuildRequires:  golang >= 1.22
-# Provides %{_unitdir} for the systemd unit file in %files below — COPR's
-# minimal mock buildroot doesn't pull this in unless explicitly required.
+# Provides %{_unitdir} for the systemd unit file in %files below, and the
+# %%sysusers_create_package macro used in %pre — COPR's minimal mock
+# buildroot doesn't pull either in unless explicitly required.
 BuildRequires:  systemd-rpm-macros
 
-Requires(pre): shadow-utils
 Requires(post): systemd
 Requires(preun): systemd
 Requires(postun): systemd
 Requires:       python3
 Requires:       curl
+
+# rpm's file-ownership dependency generator adds Requires(pre): user(sakms-node)
+# group(sakms-node) because %files below owns a directory as that user (see
+# %attr(700,sakms-node,sakms-node) on %{_sysconfdir}/sakms-node). The
+# sysusers.attr fileattrs generator is SUPPOSED to auto-emit a matching
+# Provides from the Source1 sysusers.d fragment (see %pre), but empirically
+# does not fire in this build environment (confirmed: `rpm -qp --provides`
+# on a built RPM lists no user()/group() entry despite the fragment being
+# correctly installed to %{_sysusersdir}). Declaring these explicitly makes
+# the package self-resolvable under both dnf and plain `rpm -Uvh` regardless
+# of whether that generator ever starts working here — %pre's
+# %%sysusers_create_package still does the actual, idempotent user creation;
+# this is belt-and-suspenders for the dependency solver only.
+Provides:       user(sakms-node) = 1
+Provides:       group(sakms-node) = 1
 
 %description
 sakms-node is the worker node daemon for the sakms self-hosted media
@@ -79,6 +95,15 @@ install -Dm644 frontend/public/favicon.svg \
 install -Dm755 packaging/rpm/post-install.sh \
     %{buildroot}%{_datadir}/sakms-node/post-install.sh
 
+# sysusers.d fragment declaring the sakms-node system user/group (see %pre).
+# Shipping this via the standard %_sysusersdir convention -- rather than a raw
+# useradd shell call -- is what lets rpm's automatic file-ownership dependency
+# generator resolve the user()/group() capability against THIS package's own
+# sysusers.d entry instead of demanding an external provider that can never
+# exist (the exact "conflicting requests: nothing provides user(sakms-node)"
+# failure a raw useradd produces under both dnf and plain rpm -Uvh).
+install -Dm0644 %SOURCE1 %{buildroot}%{_sysusersdir}/sakms-node.conf
+
 # Phase 2 (OS-level namespace containment) activator. Root-run ONLY (0700
 # root:root) — tighter than post-install.sh's 0755 because this helper reads
 # mediaRoots (writable by the non-root daemon it contains) and writes a
@@ -94,10 +119,14 @@ install -dm700 %{buildroot}%{_sysconfdir}/sakms-node
 # Security-hardening addendum: sakms-node runs as a dedicated, non-root
 # system user (not User=root — see sakms-node.service) so a compromised or
 # buggy daemon has only this user's own permissions, not full filesystem
-# access. getent-guarded for idempotency on upgrade/reinstall, since a bare
-# useradd fails (and this spec deliberately never swallows scriptlet
-# failures) if the user already exists from a prior install.
-getent passwd sakms-node >/dev/null || useradd -r -s /sbin/nologin sakms-node
+# access. Uses the systemd-sysusers convention (Source1 fragment installed to
+# %_sysusersdir/sakms-node.conf, see %install) via %%sysusers_create_package
+# rather than a raw useradd shell call -- idempotent by design (safe on
+# upgrade/reinstall, unlike a bare useradd) and, critically, this is what
+# resolves rpm's automatic user()/group() file-ownership dependency against
+# the package's own sysusers.d entry instead of an unsatisfiable external
+# Requires (see the %install comment for the exact failure this replaces).
+%sysusers_create_package %{name} %SOURCE1
 
 %post
 # NOTE: apply-mediaroots (Phase 2 OS-level namespace containment) is
@@ -143,6 +172,7 @@ fi
 %{_datadir}/sakms-node/post-install.sh
 %attr(0700,root,root) %{_libexecdir}/sakms-node/apply-mediaroots
 %dir %attr(700,sakms-node,sakms-node) %{_sysconfdir}/sakms-node
+%{_sysusersdir}/sakms-node.conf
 
 %posttrans tray
 # Refresh the icon-theme cache once per transaction so the freshly installed
@@ -161,3 +191,9 @@ gtk-update-icon-cache -q %{_datadir}/icons/hicolor &>/dev/null || :
 - Initial packaging
 - Add apply-mediaroots (Phase 2 OS-level namespace containment activator) as a
   root-only helper under %{_libexecdir}/sakms-node; not auto-invoked on install
+- Switch sakms-node user/group creation from a raw %pre useradd to the
+  systemd-sysusers convention (Source1 sysusers.d fragment +
+  %%sysusers_create_package), fixing a real install-time failure: rpm's
+  automatic file-ownership dependency generator added an unsatisfiable
+  Requires(postun) on user(sakms-node)/group(sakms-node) that no package
+  could ever provide under the old raw-useradd approach
