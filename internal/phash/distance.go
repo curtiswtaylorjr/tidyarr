@@ -23,7 +23,7 @@ const DefaultThreshold = 10
 const DefaultMoviesThreshold = 25
 
 // encode returns the DB/candidate-JSON storage form of a composite hash:
-// "<scheme>:<hex>", e.g. "phash64/5f:1a2b...". The scheme tag makes a hash
+// "<scheme>:<hex>", e.g. "pdq256/5f:1a2b...". The scheme tag makes a hash
 // self-describing, so a value cached under an OLD algorithm or frame count is
 // detectably incomparable to a freshly computed one.
 func encode(scheme string, composite []byte) string {
@@ -77,7 +77,8 @@ func SimilarityScore(a, b string, frames int) (float64, error) {
 // hashes have different schemes or unequal lengths, so a stale-scheme cache
 // entry can never wrongly assert similarity; it returns an error only when a
 // value is structurally undecodable. Expressing the threshold as a per-frame
-// average keeps the tunable a clean 0–64 number independent of frame count.
+// average keeps the tunable a clean 0–PerFrameBits number (0–256 for PDQ)
+// independent of frame count.
 func SimilarityWithin(a, b string, frames, perFrameThreshold int) (bool, error) {
 	schemeA, compositeA, err := decode(a)
 	if err != nil {

@@ -830,8 +830,9 @@ export interface KidsRootPathRequest {
 /**
  * PHashThresholdResponse / PHashThresholdRequest back
  * GET/PUT /api/modes/{mode}/phash-threshold — the Dedup perceptual-hash
- * similarity cut (per-frame average Hamming bits). Valid range 0–64; the
- * frontend mirrors that bound before submitting (backend re-validates).
+ * similarity cut (per-frame average Hamming bits). Valid range 0 to the active
+ * algorithm's per-frame bit width (0–256 for PDQ); the frontend mirrors that
+ * bound before submitting (backend re-validates).
  */
 export interface PHashThresholdResponse {
   threshold: number /* int */;

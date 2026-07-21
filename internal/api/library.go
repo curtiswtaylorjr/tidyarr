@@ -4,9 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 
 	"github.com/labbersanon/sakms/internal/mode"
 	"github.com/labbersanon/sakms/internal/naming"
@@ -363,8 +366,10 @@ func putNamingPresetHandler(settingsStore *settings.Store) http.HandlerFunc {
 
 // phashThresholdKey is per-mode — the Dedup perceptual-hash similarity cut is
 // configured independently per mode (only Movies reads it today, but the
-// endpoint is per-mode-generic like naming-preset). Stored as the string form
-// of an int (per-frame average Hamming bits).
+// endpoint is per-mode-generic like naming-preset). Stored scale-tagged as
+// "<PerFrameBits>:<value>" (e.g. "256:100") so a value tuned under one
+// per-frame bit scale is never silently reinterpreted after an algorithm/width
+// swap — see resolvePHashThreshold's version gate.
 func phashThresholdKey(m mode.Mode) string { return string(m) + "_phash_dedup_threshold" }
 
 // phashModeDefault returns the factory-default per-frame Hamming threshold for
@@ -380,22 +385,83 @@ func phashModeDefault(m mode.Mode) int {
 
 // resolvePHashThreshold loads m's Dedup phash similarity threshold, defaulting
 // to phashModeDefault(m) when unset — the same fallback getPHashThresholdHandler
-// reports, reused by dedup.go's Scan handler. A stored value is always a
-// validated int (putPHashThresholdHandler rejects otherwise), so a parse
-// failure falls back to the mode default rather than failing a Scan.
+// reports, reused by dedup.go's Scan handler.
+//
+// The stored value is scale-tagged "<scale>:<value>" (putPHashThresholdHandler
+// writes "<PerFrameBits>:<v>"). This function version-gates on that scale so an
+// operator's threshold tuned on one per-frame bit scale is never silently
+// reinterpreted on a different one after an algorithm/width swap (PHash 64-bit
+// -> PDQ 256-bit): a value whose scale token != the current phash.PerFrameBits
+// — including a legacy bare int with no colon at all — is treated as
+// stale-scale and falls back to phashModeDefault(m), exactly as the prior
+// default-on-unparseable tolerance did, just extended from "not an int" to
+// "not the current scale". Only a current-scale value is parsed and honored.
 func resolvePHashThreshold(ctx context.Context, settingsStore *settings.Store, m mode.Mode) (int, error) {
 	raw, err := settingsStore.Get(ctx, phashThresholdKey(m))
 	if err != nil && !errors.Is(err, settings.ErrNotFound) {
 		return 0, err
 	}
-	if raw == "" {
-		return phashModeDefault(m), nil
+	if v, ok := parseScaledThreshold(raw); ok {
+		return v, nil
 	}
-	v, err := strconv.Atoi(raw)
+	return phashModeDefault(m), nil
+}
+
+// parseScaledThreshold decodes a scale-tagged stored threshold
+// "<scale>:<value>" and reports whether it is usable on the CURRENT
+// phash.PerFrameBits scale. It returns (value, true) only when the string has a
+// colon, the scale token parses and equals phash.PerFrameBits, and the value
+// token parses; every other shape (unset/empty, legacy bare int, wrong scale,
+// non-numeric) returns (0, false) so callers fall back to the mode default.
+func parseScaledThreshold(raw string) (int, bool) {
+	scaleTok, valTok, ok := strings.Cut(raw, ":")
+	if !ok {
+		return 0, false
+	}
+	scale, err := strconv.Atoi(scaleTok)
+	if err != nil || scale != phash.PerFrameBits {
+		return 0, false
+	}
+	v, err := strconv.Atoi(valTok)
 	if err != nil {
-		return phashModeDefault(m), nil
+		return 0, false
 	}
-	return v, nil
+	return v, true
+}
+
+// SweepStalePHashThresholds is a one-time-per-boot startup detection pass that
+// finds per-mode Dedup phash thresholds stored on a stale bit scale (a legacy
+// bare int, or a "<scale>:<v>" whose scale != the current phash.PerFrameBits)
+// and resets them, logging ONE operator-visible line per affected mode. It is
+// the notice half of the version gate: resolvePHashThreshold already refuses to
+// reinterpret a stale-scale value on every read, but that read path fires on
+// every Scan/GET and so cannot be "one-time" — this boot sweep is where the
+// operator learns their previously-tuned value was dropped and why. Clearing
+// the key (to unset, so it falls back to phashModeDefault) means the sweep does
+// not re-fire on the next boot. A current-scale or unset value is left
+// untouched and silent. Never fatal: a settings read/write hiccup is logged and
+// the boot continues, same tolerance the rest of the threshold path has.
+func SweepStalePHashThresholds(ctx context.Context, settingsStore *settings.Store) {
+	for _, m := range []mode.Mode{mode.Movies, mode.Series, mode.Adult} {
+		key := phashThresholdKey(m)
+		raw, err := settingsStore.Get(ctx, key)
+		if err != nil && !errors.Is(err, settings.ErrNotFound) {
+			log.Printf("phash threshold sweep: reading %s: %v", key, err)
+			continue
+		}
+		if raw == "" {
+			continue // unset — nothing tuned, nothing to reset
+		}
+		if _, ok := parseScaledThreshold(raw); ok {
+			continue // already on the current scale — honored as-is
+		}
+		def := phashModeDefault(m)
+		log.Printf("phash threshold for %s reset to PDQ default %d — previously-stored value %q was set on a different per-frame bit scale and is not comparable on the current %d-bit PDQ scale; re-tune against the new default if desired",
+			m, def, raw, phash.PerFrameBits)
+		if err := settingsStore.Set(ctx, key, ""); err != nil {
+			log.Printf("phash threshold sweep: clearing stale %s: %v", key, err)
+		}
+	}
 }
 
 type phashThresholdResponse struct {
@@ -535,7 +601,7 @@ func getIdentifyEnabledHandler(settingsStore *settings.Store) http.HandlerFunc {
 
 // putIdentifyEnabledHandler stores Adult's phash-first identify toggle. 400s
 // for any non-Adult mode. A bool needs no range validation (unlike the
-// threshold's 0-64).
+// threshold's 0–PerFrameBits range).
 func putIdentifyEnabledHandler(settingsStore *settings.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if mode.Mode(r.PathValue("mode")) != mode.Adult {
@@ -571,9 +637,13 @@ func getPHashThresholdHandler(settingsStore *settings.Store) http.HandlerFunc {
 }
 
 // putPHashThresholdHandler stores {mode}'s Dedup perceptual-hash similarity
-// threshold. Rejects a value outside 0–64 (a per-frame Hamming distance over a
-// 64-bit-per-frame hash), mirroring putNamingPresetHandler's invalid-input
-// rejection.
+// threshold. Rejects a value outside 0–phash.PerFrameBits (a per-frame Hamming
+// distance over the active algorithm's per-frame hash width — 0–256 for PDQ),
+// mirroring putNamingPresetHandler's invalid-input rejection. The bound is
+// derived from PerFrameBits, not a fixed literal, so it tracks the active
+// algorithm's width automatically. The value is stored scale-tagged
+// ("<PerFrameBits>:<v>") so resolvePHashThreshold's version gate can reject a
+// value tuned under a different scale — see phashThresholdKey.
 func putPHashThresholdHandler(settingsStore *settings.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		m := mode.Mode(r.PathValue("mode"))
@@ -582,11 +652,12 @@ func putPHashThresholdHandler(settingsStore *settings.Store) http.HandlerFunc {
 			http.Error(w, "invalid request body", http.StatusBadRequest)
 			return
 		}
-		if req.Threshold < 0 || req.Threshold > 64 {
-			http.Error(w, "threshold must be between 0 and 64", http.StatusBadRequest)
+		if req.Threshold < 0 || req.Threshold > phash.PerFrameBits {
+			http.Error(w, fmt.Sprintf("threshold must be between 0 and %d", phash.PerFrameBits), http.StatusBadRequest)
 			return
 		}
-		if err := settingsStore.Set(r.Context(), phashThresholdKey(m), strconv.Itoa(req.Threshold)); err != nil {
+		stored := fmt.Sprintf("%d:%d", phash.PerFrameBits, req.Threshold)
+		if err := settingsStore.Set(r.Context(), phashThresholdKey(m), stored); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}

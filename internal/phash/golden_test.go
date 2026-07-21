@@ -5,42 +5,30 @@ import (
 	"testing"
 )
 
-// TestGolden_PHashOutputStable pins the exact per-frame PHash bytes this package
+// TestGolden_PDQOutputStable pins the exact per-frame PDQ bytes this package
 // produces for a fixed set of deterministic synthetic inputs (broadbandImage
 // seeds 0..7 at size 128 — the same generator calibrate_test uses). It is the
 // self-enforcing guard for this package's #1 rule: a hash whose bytes change
-// meaning must never be compared as if equivalent, so ANY change to PHash's byte
-// output (a library bump, a parameter change, a decode-path change) must fail
-// here and force a deliberate Scheme bump.
+// meaning must never be compared as if equivalent, so ANY change to the active
+// algorithm's byte output (a library bump, a parameter change, a decode-path
+// change) must fail here and force a deliberate Scheme bump.
 //
-// Provenance / drift record: the pinned values below are imghash v2.5.2's PHash
-// output. The imghash v1.1.0 -> v2.5.2 upgrade (Stage 0 of the phash-pdq
-// migration) DID move PHash's output — a proven, real drift, not an assumed one.
-// Captured bit-for-bit at the pre-Stage-0 commit (6b573ac~1, imghash v1.1.0)
-// against the identical broadbandImage inputs, v1 differed from v2 on 3 of the 8
-// seeds by exactly 1 bit each (seeds 2, 4, 7; seeds 0/1/3/5/6 identical):
-//
-//	seed  v1 (imghash 1.1.0)  v2 (imghash 2.5.2)   delta
-//	 2    ...e7e2a3b8          ...e7eaa3b8          1 bit
-//	 4    f18ef54f...          f18ff54f...          1 bit
-//	 7    ...d494c095          ...d094c095          1 bit
-//
-// That real drift is why Scheme moved from "phash64/5f" to "phash64v2/5f": under
-// the no-silent-mis-compare rule, even a 1-bit same-algorithm change forces the
-// tag to change so stale cached values self-invalidate. The drift did NOT erode
-// class separation — calibrate_test measured an identical dupMax=6 / diffMin=25
-// under both v1 and v2 — so the per-mode thresholds were not retuned.
-func TestGolden_PHashOutputStable(t *testing.T) {
-	// imghash v2.5.2 PHash of broadbandImage(seed, 128), seeds 0..7.
+// The pinned values below are imghash v2.5.2's PDQ output (256 bits / 32 bytes
+// / 64 hex chars per frame), captured after the PHash->PDQ swap. Any diff here
+// is either an unintended regression to investigate or an intended algorithm
+// change that must be paired with a Scheme bump (so stale cached values
+// self-invalidate) and a re-pin of these goldens.
+func TestGolden_PDQOutputStable(t *testing.T) {
+	// imghash v2.5.2 PDQ of broadbandImage(seed, 128), seeds 0..7.
 	want := []string{
-		"35a2b5e1b55abf93",
-		"95dae7f29ac96aef",
-		"3b485a4fe7eaa3b8",
-		"d8e1545ec06b2a90",
-		"f18ff54f602fb72f",
-		"18d8bd880c7f0fc5",
-		"c352da0282f25aaf",
-		"d0b9d791d094c095",
+		"bf02b1d391f8f12eb1ac9b8e9f0791fcd807cf026259ee0162d14e4a42f76ec8",
+		"b702c9bbc1fbf1b99a51c9f86a1def04e045bf04ae55fe0054aa3e0734163e07",
+		"bf006f0ffb01ef0da707e153b2eff903ad0180fc5856f6a100fc14fb00fc14fa",
+		"ff00b1a27f0c1f06c9f37f0128f1d15a7a59bf0806eec05f844f80fb00fe80ff",
+		"ff02af0bf70a670b635bbf0f90a405f290ebd8f5e05dfa000e54c0f44cf4c4f4",
+		"ff00ff01edaca95cfd0d7f000f6de5ad10fde70710f1c8b56e5230f262560072",
+		"ff0053fa5b5103f8eb5ad30e5a078f0840ff644130fefe07b4e5ac07a4e58c87",
+		"ff00ff0b7fa999a87d039da9f90295a9c0b47f007a5438fb84fd4616007f4256",
 	}
 	algo, err := newAlgo()
 	if err != nil {
@@ -52,7 +40,7 @@ func TestGolden_PHashOutputStable(t *testing.T) {
 			t.Fatalf("seed %d: hashing: %v", seed, err)
 		}
 		if got := hex.EncodeToString(h); got != wantHex {
-			t.Errorf("seed %d: PHash output changed: got %s, want %s — if this is an "+
+			t.Errorf("seed %d: PDQ output changed: got %s, want %s — if this is an "+
 				"intentional algorithm/library change, bump Scheme and re-pin these goldens",
 				seed, got, wantHex)
 		}

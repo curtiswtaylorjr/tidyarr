@@ -33,7 +33,7 @@
 //
 // This package is a fully independent sibling of internal/phash and shares ZERO
 // code with it: internal/phash is a different, unrelated algorithm (ajdnik/imghash,
-// 5 frames hashed separately, 320-bit scheme-tagged composite) for Movies/Series
+// 5 frames hashed separately, 1280-bit scheme-tagged composite) for Movies/Series
 // Dedup, and stays exactly as-is. No shared types, no shared distance machine, no
 // shared Scheme tag — carrying any of that over would break byte-identity with
 // Stash. The only thing reused is the shape of the injected-runner test seam.

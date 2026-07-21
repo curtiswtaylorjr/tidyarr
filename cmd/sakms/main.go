@@ -91,6 +91,11 @@ func run() error {
 	phashDispatcher := nodes.NewDispatcher(nodeReg, nodes.JobTypePhash, hasher, 3*time.Minute)
 	videoDispatcher := nodes.NewDispatcher(nodeReg, nodes.JobTypeVideoPhash, videoHasher, 3*time.Minute)
 	settingsStore := settings.New(sqlDB)
+	// One-shot boot step (same shape as the API-key/ollama blocks below,
+	// context.Background() for the same reason): reset any per-mode Dedup phash
+	// threshold stored on a stale bit scale (a pre-PDQ 64-bit value) to its PDQ
+	// default, logging one operator-visible notice per affected mode. Non-fatal.
+	api.SweepStalePHashThresholds(context.Background(), settingsStore)
 	grabsStore := grabs.New(sqlDB)
 	libStore := library.New(sqlDB)
 	slidersStore := discoversliders.New(sqlDB)

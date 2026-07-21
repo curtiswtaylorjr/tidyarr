@@ -616,11 +616,11 @@ export const AdvancedSection: Component<{ mode: () => Mode }> = (props) => {
         <RecheckTriggerButton />
         <NumberSetting
           id="phash-threshold"
-          label="Dedup phash similarity threshold (0–64)"
+          label="Dedup phash similarity threshold (0–256)"
           help="Per-frame average Hamming bits below which two files are treated as perceptual duplicates by Dedup. Lower is stricter."
           value={() => phash()}
           min={0}
-          max={64}
+          max={256}
           onSave={(v) => putPHashThreshold(props.mode(), v)}
         />
         <Show when={props.mode() !== "adult"}>

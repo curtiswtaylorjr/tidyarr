@@ -12,11 +12,11 @@ import (
 	"github.com/labbersanon/sakms/internal/searchterm"
 )
 
-// seededHash builds a scheme-tagged 40-byte (5-frame) composite whose leading
-// bytes are hexPrefix, zero-padded — so a test controls the exact Hamming
-// distance between two candidates. "" is the all-zero reference.
+// seededHash builds a scheme-tagged 160-byte (5-frame PDQ) composite whose
+// leading bytes are hexPrefix, zero-padded — so a test controls the exact
+// Hamming distance between two candidates. "" is the all-zero reference.
 func seededHash(hexPrefix string) string {
-	return "phash64v2/5f:" + hexPrefix + strings.Repeat("0", 80-len(hexPrefix))
+	return "pdq256/5f:" + hexPrefix + strings.Repeat("0", 320-len(hexPrefix))
 }
 
 // tmdbTo42 maps each name's TMDB search term to the same movie id, so a set of
@@ -31,11 +31,11 @@ func tmdbTo42(names ...string) map[string]string {
 
 // refHash is the all-zero reference; nearHash differs by 4 bits (0x0f), well
 // within a per-frame threshold of 2 (budget 2×5 = 10); farHash sets every bit
-// (320 differing), far outside it.
+// (1280 differing), far outside it.
 var (
 	refHash  = seededHash("")
 	nearHash = seededHash("0f")
-	farHash  = seededHash(strings.Repeat("f", 80))
+	farHash  = seededHash(strings.Repeat("f", 320))
 )
 
 func TestScanLibrary_PHashKeepsNearIdenticalGroup(t *testing.T) {

@@ -448,7 +448,7 @@ export function putKidsRootPath(mode: Mode, path: string): Promise<void> {
 
 // --- Advanced Settings (new UI over existing routes) ------------------------
 
-// Per-mode Dedup perceptual-hash similarity threshold (0–64, backend-validated).
+// Per-mode Dedup perceptual-hash similarity threshold (0–256, backend-validated).
 export function fetchPHashThreshold(mode: Mode): Promise<number> {
   return api<PHashThresholdResponse>(`/api/modes/${mode}/phash-threshold`).then(
     (r) => r.threshold,

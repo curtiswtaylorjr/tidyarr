@@ -1570,17 +1570,17 @@ describe("Advanced Settings", () => {
     ).toBeInTheDocument();
   });
 
-  it("phash-threshold above 64 disables the section Save button (blocked before clicking, not after)", async () => {
+  it("phash-threshold above 256 disables the section Save button (blocked before clicking, not after)", async () => {
     const calls = stubFetch();
     renderSettings();
     goToSection("Advanced");
     const input = (await screen.findByLabelText(
-      "Dedup phash similarity threshold (0–64)",
+      "Dedup phash similarity threshold (0–256)",
     )) as HTMLInputElement;
     const saveButton = screen.getByRole("button", {
       name: "Save",
     }) as HTMLButtonElement;
-    fireEvent.input(input, { target: { value: "99" } });
+    fireEvent.input(input, { target: { value: "300" } });
     await waitFor(() => expect(saveButton.disabled).toBe(true));
     // A disabled button ignores clicks at the DOM level — confirms this
     // isn't just visually greyed out, nothing fires even if clicked.
@@ -1612,7 +1612,7 @@ describe("Advanced Settings", () => {
     renderSettings();
     goToSection("Advanced");
     const input = (await screen.findByLabelText(
-      "Dedup phash similarity threshold (0–64)",
+      "Dedup phash similarity threshold (0–256)",
     )) as HTMLInputElement;
     await waitFor(() => expect(input.value).toBe("8"));
     fireEvent.input(input, { target: { value: "12" } });
