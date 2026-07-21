@@ -63,10 +63,13 @@ func (h *Hasher) Hash(ctx context.Context, path string) (string, error) {
 		return "", fmt.Errorf("phash: expected %d frames from %s, got %d", h.frames, path, len(imgs))
 	}
 
-	// Construct the algorithm here, not in New — a future PDQ swap uses an
-	// error-returning constructor, and Hash already returns an error, so the
-	// swap stays isolated to algo.go (see its doc comment).
-	algo := newAlgo()
+	// Construct the algorithm here, not in New — v2's constructor returns an
+	// error, and Hash already returns an error, so the swap stays isolated to
+	// algo.go (see its doc comment).
+	algo, err := newAlgo()
+	if err != nil {
+		return "", fmt.Errorf("phash: constructing algorithm: %w", err)
+	}
 	var composite []byte
 	for i, raw := range imgs {
 		img, _, err := image.Decode(bytes.NewReader(raw))

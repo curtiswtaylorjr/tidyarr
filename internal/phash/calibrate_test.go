@@ -33,7 +33,10 @@ func TestCalibration_DefaultThresholdSeparatesPerturbedFromDistinct(t *testing.T
 		size  = 128
 		bases = 8
 	)
-	algo := newAlgo()
+	algo, err := newAlgo()
+	if err != nil {
+		t.Fatalf("constructing algo: %v", err)
+	}
 	hash := func(img image.Image) []byte {
 		h, _ := hashFrame(algo, img)
 		return h

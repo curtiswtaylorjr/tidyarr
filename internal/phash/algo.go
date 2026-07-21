@@ -1,9 +1,11 @@
 package phash
 
 import (
+	"fmt"
 	"image"
 
-	"github.com/ajdnik/imghash"
+	"github.com/ajdnik/imghash/v2"
+	"github.com/ajdnik/imghash/v2/hashtype"
 )
 
 // Scheme tags every hash this package produces with the algorithm and frame
@@ -15,12 +17,11 @@ import (
 // the dedup cache layer can cheaply reject a stale-scheme cached hash by prefix
 // before trusting a size+mtime identity match.
 //
-// This file is the SINGLE algorithm swap point. It ships imghash's released
-// v1.1.0 PHash (64 bits/frame) per the confirmed Option B decision; swapping
-// to PDQ once imghash tags a release containing it changes only newAlgo,
-// hashFrame, and this Scheme constant — nothing downstream, which is
-// algorithm-agnostic (hashes are compared as scheme-tagged byte composites by
-// Hamming distance regardless of which algorithm produced them).
+// This file is the SINGLE algorithm swap point. It ships imghash/v2's PHash
+// (64 bits/frame); swapping to PDQ changes only newAlgo, hashFrame, and this
+// Scheme constant — nothing downstream, which is algorithm-agnostic (hashes
+// are compared as scheme-tagged byte composites by Hamming distance regardless
+// of which algorithm produced them).
 const Scheme = "phash64/5f"
 
 // Frames is the fixed number of evenly-spaced interior frames sampled per
@@ -29,20 +30,29 @@ const Scheme = "phash64/5f"
 const Frames = 5
 
 // newAlgo constructs the perceptual-hash algorithm. Called from Hash (not
-// New) deliberately: a future PDQ swap uses an error-returning constructor
-// (NewPDQ() (PDQ, error)), and Hash already returns an error, so the swap
-// stays isolated to this file instead of rippling into New's signature.
-func newAlgo() *imghash.PHash {
-	h := imghash.NewPHash()
-	return &h
+// New) deliberately: v2's constructor returns an error (NewPHash() (PHash,
+// error)), and Hash already returns an error, so the swap stays isolated to
+// this file instead of rippling into New's signature. Constructed with zero
+// options, which yields imghash/v2's default PHash (32x32 downscale, 8x8 DCT
+// block → 64-bit hash).
+func newAlgo() (imghash.PHash, error) {
+	return imghash.NewPHash()
 }
 
 // hashFrame returns the per-frame perceptual hash bytes for one decoded image.
-// imghash's PHash.Calculate returns a hashtype.Binary (a []byte-underlying
-// type); the explicit conversion keeps this correct even if a future
-// algorithm returns a differently-named []byte type.
-func hashFrame(a *imghash.PHash, img image.Image) ([]byte, error) {
-	return []byte(a.Calculate(img)), nil
+// v2's PHash.Calculate returns a hashtype.Hash interface plus an error; for
+// PHash the concrete value is a hashtype.Binary (type Binary []byte), so the
+// result is type-asserted to it before extracting the raw bytes.
+func hashFrame(a imghash.PHash, img image.Image) ([]byte, error) {
+	h, err := a.Calculate(img)
+	if err != nil {
+		return nil, err
+	}
+	b, ok := h.(hashtype.Binary)
+	if !ok {
+		return nil, fmt.Errorf("phash: expected hashtype.Binary, got %T", h)
+	}
+	return []byte(b), nil
 }
 
 // hammingBits is a plain popcount over the XOR of two equal-length byte
