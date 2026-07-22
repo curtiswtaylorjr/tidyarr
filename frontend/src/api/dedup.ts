@@ -44,11 +44,36 @@ export type { Candidate, Proposal };
 // ever produces pending, then applied/dismissed.
 export type { ProposalStatus };
 
-// scanDedup runs Dedup's propose-phase for one mode: the backend scans the
-// mode's library root, groups duplicates, and replaces the mode's pending queue
-// with what it finds. One POST, no body; the caller re-fetches.
+// scanDedup KICKS OFF Dedup's propose-phase for one mode: the backend validates
+// synchronously, then runs the scan (root walk → group duplicates → replace the
+// mode's pending queue) in a background goroutine. One POST, no body.
+//
+// The POST now resolves with 202 Accepted — meaning the scan was ACCEPTED and
+// started, NOT that it finished. The proposal list is fetched separately (this
+// client already discards the POST body and refetches via fetchDedupProposals),
+// so no call-signature change is forced. Live progress and the terminal
+// done/error signal ride the SSE stream at GET /api/modes/{mode}/dedup/scan/stream
+// (see useDedupScanStream); the refetch that repopulates the queue happens in
+// that stream's `done` handler, never right after this POST. A 4xx (400 bad
+// root, 409 already scanning, 401 auth) still rejects synchronously here.
 export function scanDedup(mode: Mode): Promise<void> {
   return api<void>(`/api/modes/${mode}/dedup/scan`, { method: "POST" });
+}
+
+// DedupScanStatus is the shape of GET /api/modes/{mode}/dedup/scan/status. There
+// is no generated DTO for it (the backend type lives in internal/dedupscan, not
+// internal/apidto), so it is declared locally here.
+export interface DedupScanStatus {
+  inflight: boolean;
+}
+
+// fetchDedupScanStatus reports whether a scan for one mode is currently running.
+// It backs useDedupScanStream's liveness backstop: if the SSE stream goes quiet
+// while the UI still thinks it is scanning, this reconciles "still running" vs.
+// "finished (terminal frame missed/dropped)" — a proposals-count poll cannot,
+// since a legitimately empty result and a still-running scan both read as zero.
+export function fetchDedupScanStatus(mode: Mode): Promise<DedupScanStatus> {
+  return api<DedupScanStatus>(`/api/modes/${mode}/dedup/scan/status`);
 }
 
 // fetchDedupProposals lists the Dedup review queue for one mode (every status;

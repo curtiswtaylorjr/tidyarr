@@ -28,10 +28,39 @@
 // keepIndex-only-on-override, one batch call, selection clears), and Adult
 // per-mode endpoint wiring.
 
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@solidjs/testing-library";
 import type { Candidate, Proposal } from "@dto";
 import { Dedup } from "./Dedup";
+
+// MockEventSource mirrors Dashboard.test.tsx / BrowserNotifications.test.tsx:
+// jsdom has no EventSource, and Dedup now opens one on mount (the scan-progress
+// stream), so it MUST be stubbed for every test in this file — not just the new
+// streaming ones. The most recently constructed instance is captured so a test
+// can fire scan frames at the active mode's stream.
+class MockEventSource {
+  static last: MockEventSource | null = null;
+  onmessage: ((ev: MessageEvent) => void) | null = null;
+  onerror: ((ev: Event) => void) | null = null;
+  url: string;
+  closed = false;
+
+  constructor(url: string) {
+    this.url = url;
+    MockEventSource.last = this;
+  }
+
+  close() {
+    this.closed = true;
+  }
+
+  // emit fires a scan frame the way the real SSE onmessage path does: the server
+  // sends `data: {"type":...}`, so the frame's `data` string is the JSON-encoded
+  // dedupscan.Event.
+  emit(frame: unknown) {
+    this.onmessage?.({ data: JSON.stringify(frame) } as MessageEvent);
+  }
+}
 
 const jsonResponse = (obj: unknown): Response =>
   new Response(JSON.stringify(obj), {
@@ -40,6 +69,14 @@ const jsonResponse = (obj: unknown): Response =>
   });
 
 const noContent = (): Response => new Response(null, { status: 204 });
+
+// accepted mirrors the scan POST's new 202 (no body) contract.
+const accepted = (): Response => new Response(null, { status: 202 });
+
+beforeEach(() => {
+  MockEventSource.last = null;
+  vi.stubGlobal("EventSource", MockEventSource);
+});
 
 const candidate = (over: Partial<Candidate>): Candidate => ({
   label: "file.mkv",
@@ -131,30 +168,45 @@ describe("Dedup — Movies (scan → propose → apply the pre-selected winner)"
     expect(call.body).toEqual({ keepIndex: 0 });
   });
 
-  it("triggers a scan then re-fetches the queue on the Scan button", async () => {
-    let scanned = false;
+  it("kicks off a scan (202 POST) then re-fetches the queue on the done frame", async () => {
+    // The scan is now async: the POST returns 202 and the queue only refetches
+    // when the SSE `done` frame arrives — NOT right after the POST resolves.
+    let done = false;
     const calls = stubFetch((url, init) => {
       if (
         url.includes("/api/modes/movies/dedup/scan") &&
         (init?.method ?? "").toUpperCase() === "POST"
-      ) {
-        scanned = true;
-        return noContent();
-      }
+      )
+        return accepted();
       if (url.includes("/api/modes/movies/dedup/proposals"))
         return jsonResponse(
-          scanned ? [dedupProposal({ id: 1, title: "Found After Scan" })] : [],
+          done ? [dedupProposal({ id: 1, title: "Found After Scan" })] : [],
         );
       throw new Error("unexpected fetch: " + url);
     });
 
     render(() => <Dedup />);
-    expect(await screen.findByText(/No duplicate groups yet/)).toBeInTheDocument();
+    expect(
+      await screen.findByText(/No duplicate groups yet/),
+    ).toBeInTheDocument();
+
     fireEvent.click(screen.getByText("Scan"));
-    expect(await screen.findByText("Found After Scan")).toBeInTheDocument();
+    // The POST fired, the button flips to Scanning…, and the stale empty-state
+    // text is gone — but the queue has NOT refetched yet (no done frame).
     expect(
       calls.some((c) => c.url.includes("/dedup/scan") && c.method === "POST"),
     ).toBe(true);
+    await waitFor(() =>
+      expect(screen.queryByText(/No duplicate groups yet/)).toBeNull(),
+    );
+    expect(screen.getByText("Scanning…")).toBeInTheDocument();
+
+    // The done frame drives the refetch that repopulates the queue.
+    done = true;
+    MockEventSource.last!.emit({ type: "done", mode: "movies", count: 1, total: 0 });
+    expect(await screen.findByText("Found After Scan")).toBeInTheDocument();
+    // Scanning cleared: the button returns to its idle label.
+    expect(screen.getByText("Scan")).toBeInTheDocument();
   });
 });
 
@@ -442,5 +494,164 @@ describe("Dedup — Adult (per-mode endpoint wiring)", () => {
     expect(
       calls.some((c) => c.url.includes("/api/modes/adult/dedup/proposals")),
     ).toBe(true);
+  });
+});
+
+describe("Dedup — live scan progress stream", () => {
+  it("populates the log box on progress and clears + refetches on done, empty-state hidden while scanning", async () => {
+    let done = false;
+    stubFetch((url, init) => {
+      if (
+        url.includes("/api/modes/movies/dedup/scan") &&
+        (init?.method ?? "").toUpperCase() === "POST"
+      )
+        return accepted();
+      if (url.includes("/api/modes/movies/dedup/proposals"))
+        return jsonResponse(
+          done ? [dedupProposal({ id: 1, title: "Resolved Dupe" })] : [],
+        );
+      throw new Error("unexpected fetch: " + url);
+    });
+
+    render(() => <Dedup />);
+    await screen.findByText(/No duplicate groups yet/);
+
+    fireEvent.click(screen.getByText("Scan"));
+    const es = MockEventSource.last!;
+
+    // A progress frame appears as a "current/total · name · phase" log line, and
+    // the stale "No duplicate groups yet" text is gone while scanning.
+    es.emit({
+      type: "progress",
+      mode: "movies",
+      current: 1,
+      total: 3,
+      name: "a.mkv",
+      phase: "hashing",
+    });
+    expect(await screen.findByText(/1\/3 · a\.mkv · hashing/)).toBeInTheDocument();
+    expect(screen.queryByText(/No duplicate groups yet/)).toBeNull();
+
+    es.emit({
+      type: "progress",
+      mode: "movies",
+      current: 2,
+      total: 3,
+      name: "b.mkv",
+      phase: "hashing",
+    });
+    expect(await screen.findByText(/2\/3 · b\.mkv · hashing/)).toBeInTheDocument();
+
+    // The done frame clears scanning, clears the log box, and refetches the
+    // resolved proposal list.
+    done = true;
+    es.emit({ type: "done", mode: "movies", count: 1, total: 3 });
+    expect(await screen.findByText("Resolved Dupe")).toBeInTheDocument();
+    // Log lines are gone (box cleared) and the button is idle again.
+    expect(screen.queryByText(/2\/3 · b\.mkv/)).toBeNull();
+    expect(screen.getByText("Scan")).toBeInTheDocument();
+  });
+
+  it("renders a neutral 'Starting scan…' state for the synthetic starting seed (no 0/0 log row)", async () => {
+    stubFetch((url, init) => {
+      if (
+        url.includes("/api/modes/movies/dedup/scan") &&
+        (init?.method ?? "").toUpperCase() === "POST"
+      )
+        return accepted();
+      if (url.includes("/api/modes/movies/dedup/proposals")) return jsonResponse([]);
+      throw new Error("unexpected fetch: " + url);
+    });
+
+    render(() => <Dedup />);
+    await screen.findByText(/No duplicate groups yet/);
+    fireEvent.click(screen.getByText("Scan"));
+
+    // The reconnect-priming seed carries phase:"starting" with current/total
+    // ABSENT (omitempty) — it must show "Starting scan…", never a "0/0" row.
+    MockEventSource.last!.emit({ type: "progress", mode: "movies", phase: "starting" });
+    expect(await screen.findByText(/Starting scan/)).toBeInTheDocument();
+    expect(screen.queryByText(/0\/0/)).toBeNull();
+  });
+
+  it("surfaces an error frame and clears scanning — the UI is not left stuck", async () => {
+    stubFetch((url, init) => {
+      if (
+        url.includes("/api/modes/movies/dedup/scan") &&
+        (init?.method ?? "").toUpperCase() === "POST"
+      )
+        return accepted();
+      if (url.includes("/api/modes/movies/dedup/proposals")) return jsonResponse([]);
+      throw new Error("unexpected fetch: " + url);
+    });
+
+    render(() => <Dedup />);
+    await screen.findByText(/No duplicate groups yet/);
+    fireEvent.click(screen.getByText("Scan"));
+    expect(screen.getByText("Scanning…")).toBeInTheDocument();
+
+    MockEventSource.last!.emit({
+      type: "error",
+      mode: "movies",
+      error: "root folder unreadable",
+    });
+    expect(
+      await screen.findByText(/root folder unreadable/),
+    ).toBeInTheDocument();
+    // Scanning cleared — button is idle, not stuck on "Scanning…".
+    expect(screen.getByText("Scan")).toBeInTheDocument();
+  });
+
+  it("recovers a stuck scan via the liveness backstop when the terminal frame is DROPPED", async () => {
+    // The scan runs but NO terminal frame is ever delivered on the stream (it was
+    // dropped/delayed). The quiet-window timer must fire, reconcile against the
+    // status endpoint (inflight:false ⇒ the scan really finished), and clear
+    // scanning + refetch — proving the terminal state is recoverable without a
+    // page reload even when the terminal SSE frame itself is lost.
+    let recovered = false;
+    let statusChecks = 0;
+    stubFetch((url, init) => {
+      if (url.includes("/api/modes/movies/dedup/scan/status")) {
+        statusChecks++;
+        return jsonResponse({ inflight: false });
+      }
+      if (
+        url.includes("/api/modes/movies/dedup/scan") &&
+        (init?.method ?? "").toUpperCase() === "POST"
+      )
+        return accepted();
+      if (url.includes("/api/modes/movies/dedup/proposals"))
+        return jsonResponse(
+          recovered ? [dedupProposal({ id: 9, title: "Recovered Group" })] : [],
+        );
+      throw new Error("unexpected fetch: " + url);
+    });
+
+    // Real timers for the initial mount/resource; fake timers only for the
+    // 15s quiet window (armed inside initiate below).
+    render(() => <Dedup />);
+    await screen.findByText(/No duplicate groups yet/);
+
+    vi.useFakeTimers();
+    try {
+      // The proposals refetch that the backstop triggers must now return groups.
+      recovered = true;
+      fireEvent.click(screen.getByText("Scan"));
+      expect(screen.getByText("Scanning…")).toBeInTheDocument();
+
+      // No progress and no done/error frame is ever emitted. Advancing past the
+      // quiet window fires the backstop, which reconciles via the status endpoint
+      // and recovers. advanceTimersByTimeAsync also flushes the reconcile's async
+      // status-fetch + refetch microtasks.
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(statusChecks).toBeGreaterThan(0);
+    } finally {
+      vi.useRealTimers();
+    }
+
+    // Scanning cleared and the queue repopulated purely from the status reconcile
+    // — the terminal frame was never delivered.
+    expect(await screen.findByText("Recovered Group")).toBeInTheDocument();
+    expect(screen.getByText("Scan")).toBeInTheDocument();
   });
 });

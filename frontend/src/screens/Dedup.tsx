@@ -43,6 +43,7 @@
 
 import {
   type Component,
+  createEffect,
   createResource,
   createSignal,
   For,
@@ -59,7 +60,6 @@ import {
   applyKeepAll,
   dismissProposal,
   fetchDedupProposals,
-  scanDedup,
 } from "../api/dedup";
 import {
   BatchResultSummary,
@@ -69,6 +69,7 @@ import {
   Muted,
   StatusPill,
 } from "../components/ui";
+import { type LogLine, useDedupScanStream } from "./dedupScanStream";
 import { useBulkSelection, useWorkflowActions } from "./workflowHooks";
 
 // winnerIndex returns the index of the group's flagged keeper, defaulting to 0
@@ -95,6 +96,53 @@ const similarityLabel = (s: number): string => {
   return "possible duplicate — review carefully";
 };
 
+// ScanLogBox is the live per-file scan log: a header showing the neutral
+// "Starting scan…" state (before the first real progress) or a clamped ≤100%
+// percentage, over a fixed-height, auto-scrolling list of one line per analyzed
+// file. Rendered only while a scan is live (see DedupView) — it replaces the
+// old spinner-only feedback and the stale "click Scan" empty-state text.
+const ScanLogBox: Component<{
+  lines: LogLine[];
+  progress: { current: number; total: number } | null;
+}> = (props) => {
+  let box: HTMLDivElement | undefined;
+  // Auto-scroll to the newest line as entries arrive (read length to track).
+  createEffect(() => {
+    props.lines.length;
+    if (box) box.scrollTop = box.scrollHeight;
+  });
+  // pct clamps current/total to ≤100% as a defensive guard against a best-effort
+  // live denominator briefly reading over (the done event carries the exact
+  // final total).
+  const pct = (): number => {
+    const p = props.progress;
+    if (!p || p.total <= 0) return 0;
+    return Math.min(p.current / p.total, 1);
+  };
+  return (
+    <div class="mt-4">
+      <div class="mb-1 text-sm text-muted">
+        <Show when={props.progress} fallback={<span>Starting scan…</span>}>
+          Scanning… {Math.round(pct() * 100)}%
+        </Show>
+      </div>
+      <div
+        ref={box}
+        class="max-h-60 overflow-y-auto rounded-xl border border-border bg-surface p-3 font-mono text-xs text-muted"
+      >
+        <For each={props.lines}>
+          {(line) => (
+            <div>
+              {line.current}/{line.total} · {line.name}
+              {line.phase ? ` · ${line.phase}` : ""}
+            </div>
+          )}
+        </For>
+      </div>
+    </div>
+  );
+};
+
 // DedupView is one mode's duplicate-group review queue. Keyed on props.mode so
 // the resource refetches when the shell switches tabs.
 const DedupView: Component<{ mode: Mode }> = (props) => {
@@ -115,31 +163,40 @@ const DedupView: Component<{ mode: Mode }> = (props) => {
     null,
   );
 
-  // Both scan and act clear keepSel and the selection on success — stale radio
-  // selections or checkbox picks must not survive a queue refresh or mode switch
-  // in either direction. act clears the selection but NOT batchResult, so a
-  // batch's own summary survives the act that produced it.
-  const { actionError, scanning, scan, act } = useWorkflowActions(
-    () => props.mode,
-    {
-      resetOnModeChange: () => {
-        setKeepSel({});
-        selection.clear();
-        setBatchResult(null);
-      },
-      scanFn: scanDedup,
-      resetAfterScan: () => {
-        setKeepSel({});
-        selection.clear();
-        setBatchResult(null);
-      },
-      resetAfterAct: () => {
-        setKeepSel({});
-        selection.clear();
-      },
-      refetch,
+  // resetQueueState drops every stale per-scan selection so it never survives a
+  // queue refresh or mode switch: the keep-radio overrides, the bulk selection,
+  // and the last batch summary.
+  const resetQueueState = (): void => {
+    setKeepSel({});
+    selection.clear();
+    setBatchResult(null);
+  };
+
+  // useWorkflowActions still owns the Apply/Keep All/Dismiss/batch mutations
+  // (`act`) and the shared actionError — unchanged. The SCAN path no longer runs
+  // through it: with a 202 the POST resolves before the background scan finishes,
+  // so `scanning` and the proposals refetch are driven by the SSE stream instead
+  // (see useDedupScanStream below). act clears the selection but NOT batchResult,
+  // so a batch's own summary survives the act that produced it.
+  const { actionError, act } = useWorkflowActions(() => props.mode, {
+    resetOnModeChange: resetQueueState,
+    resetAfterAct: () => {
+      setKeepSel({});
+      selection.clear();
     },
-  );
+    refetch,
+  });
+
+  // useDedupScanStream drives the scan: `scanning` and the log come from the live
+  // SSE stream, and the proposals refetch fires in its `done` handler (never
+  // right after the 202 POST). Its refetch wrapper also clears stale per-scan
+  // selections, since a completed scan replaces the whole queue.
+  const scanStream = useDedupScanStream(() => props.mode, {
+    refetch: async () => {
+      resetQueueState();
+      await refetch();
+    },
+  });
 
   // selectedKeep is the effective keep index for a group: the operator's radio
   // choice if made, else the group's flagged winner. Always a real number
@@ -185,8 +242,12 @@ const DedupView: Component<{ mode: Mode }> = (props) => {
   return (
     <div>
       <div class="flex items-center gap-3">
-        <Button variant="primary" onClick={() => void scan(props.mode)} disabled={scanning()}>
-          {scanning() ? "Scanning…" : "Scan"}
+        <Button
+          variant="primary"
+          onClick={() => scanStream.initiate(props.mode)}
+          disabled={scanStream.scanning()}
+        >
+          {scanStream.scanning() ? "Scanning…" : "Scan"}
         </Button>
         <Show when={pendingIds().length > 0}>
           <label class="flex items-center gap-2 text-sm text-muted">
@@ -209,6 +270,26 @@ const DedupView: Component<{ mode: Mode }> = (props) => {
       <Show when={actionError()}>
         <ErrorText>{actionError()}</ErrorText>
       </Show>
+
+      {/* Live scan feedback: the per-file log box while a scan runs, or a
+          terminal scan error rendered in its place. Both replace the stale
+          "click Scan" empty-state text, which is suppressed while scanning. */}
+      <Show
+        when={scanStream.scanError()}
+        fallback={
+          <Show
+            when={scanStream.scanning() || scanStream.logLines().length > 0}
+          >
+            <ScanLogBox
+              lines={scanStream.logLines()}
+              progress={scanStream.progress()}
+            />
+          </Show>
+        }
+      >
+        <ErrorText>{scanStream.scanError()}</ErrorText>
+      </Show>
+
       <Show when={batchResult()}>
         {(res) => <BatchResultSummary result={res()} titleOf={titleOf} />}
       </Show>
@@ -223,9 +304,11 @@ const DedupView: Component<{ mode: Mode }> = (props) => {
         <Show
           when={proposals() && proposals()!.length > 0}
           fallback={
-            <Muted class="mt-4">
-              No duplicate groups yet — click Scan.
-            </Muted>
+            <Show when={!scanStream.scanning()}>
+              <Muted class="mt-4">
+                No duplicate groups yet — click Scan.
+              </Muted>
+            </Show>
           }
         >
           <div class="mt-4 flex flex-col gap-4">
