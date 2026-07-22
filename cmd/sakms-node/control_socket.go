@@ -218,6 +218,11 @@ func controlMux(cfg *NodeConfig, configPath string, pusher *pathmapPusher, sess 
 	})
 	// Stage 2 node-authored path-mapping routes (control_pathmap.go).
 	registerPathMapRoutes(mux, cfg, configPath, pusher, sess)
+	// node-pause-dispatch Stage 3 routes (control_pause.go). No signature churn:
+	// the pause push client is constructed inside registerPauseRoutes (a single
+	// synchronous toggle holds no cross-reconnect state, unlike the debounced
+	// pathmap pusher that must live in main()).
+	registerPauseRoutes(mux, cfg, configPath, sess)
 	return mux
 }
 

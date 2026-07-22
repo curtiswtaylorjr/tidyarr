@@ -306,6 +306,20 @@ func connect(
 // never re-pushed. Only the control-socket edit path schedules an outbound push,
 // so a server echo can never ping-pong back into another push.
 func applyServerSettings(cfg *NodeConfig, configPath string, statusSrv *statusServer, s nodes.NodeSettings) {
+	// P8: apply the display-only pause echo in its OWN small write, BEFORE the
+	// pathMap-validation early-return below. A pause echo bundled in a frame
+	// whose pathMap fails node-side validation must still update the node's
+	// cached pause display — pause accuracy must not hinge on pathMap validity.
+	// This write touches ONLY DispatchPaused; the later pathMap/MaxJobs write
+	// never carries pause, so neither can clobber the other (Principle 3 / P2).
+	// Like the pathMap apply, this schedules NO outbound push (P5/D5): a server
+	// echo is applied, never re-pushed — only the control-socket toggle pushes.
+	if saveErr := cfg.mutateAndSave(configPath, func() {
+		cfg.DispatchPaused = s.PauseDispatch
+	}); saveErr != nil {
+		log.Printf("sakms-node: saving pause display state: %v", saveErr)
+	}
+
 	_, mediaRoots := cfg.snapshot()
 	if len(mediaRoots) == 0 {
 		warning := "mediaRoots is not configured -- settings pushes are applied unrestricted (grace period). Set mediaRoots in this node's config to enable containment."

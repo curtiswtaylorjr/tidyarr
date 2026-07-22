@@ -49,6 +49,17 @@ type NodeConfig struct {
 	StatusPort int            `json:"statusPort"` // port for GET /status; 0 → defaultStatusPort
 	MaxJobs    int            `json:"maxJobs"`    // 0 = unlimited
 
+	// DispatchPaused is a DISPLAY-ONLY cache of the server-owned dispatch-pause
+	// bit (node-pause-dispatch plan, Option A). The server is the sole authority
+	// on dispatch exclusion (registry.Dispatch checks its own connectedNode.paused,
+	// never this field); this value exists purely so the tray can show the node's
+	// pause state at a glance. It is written by two paths, both under mu: the SSE
+	// settings echo (applyServerSettings, authoritative) and the control-socket
+	// toggle (optimistic flip + rollback-on-failed-push). Like MaxJobs it is a
+	// scalar with a per-field write discipline — a pause write touches only this
+	// field, never PathMap/MaxJobs, and vice versa (Principle 3 / P2).
+	DispatchPaused bool `json:"dispatchPaused,omitempty"`
+
 	// MediaRoots is the security-hardening addendum's node-side allowlist
 	// (Safeguard 2): the top-level directory tree(s) on this machine that
 	// legitimately contain media. Every browse request and every hash job's
@@ -143,6 +154,24 @@ func (cfg *NodeConfig) authoredSnapshot() []AuthoredPathMapping {
 	cfg.mu.RLock()
 	defer cfg.mu.RUnlock()
 	return append([]AuthoredPathMapping(nil), cfg.AuthoredPaths...)
+}
+
+// pauseSnapshot returns the current display-only dispatch-pause bit under the
+// read lock, mirroring snapshot()'s non-torn-view contract for the control
+// socket's GET /dispatch/pause read path.
+func (cfg *NodeConfig) pauseSnapshot() bool {
+	cfg.mu.RLock()
+	defer cfg.mu.RUnlock()
+	return cfg.DispatchPaused
+}
+
+// transport returns the node's current server URL + bearer key under the read
+// lock. APIKey is mutated (cleared on 401 re-pair, set on pairing) under the
+// same lock, so a pause push must read it fresh rather than capture it once.
+func (cfg *NodeConfig) transport() (serverURL, apiKey string) {
+	cfg.mu.RLock()
+	defer cfg.mu.RUnlock()
+	return cfg.ServerURL, cfg.APIKey
 }
 
 // pushInputs reads, under a single read-lock acquisition, everything the
