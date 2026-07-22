@@ -154,3 +154,17 @@ func (s *Store) Set(ctx context.Context, nodeID string, settings Settings) error
 
 	return tx.Commit()
 }
+
+// Delete removes the single (nodeID, key) path-mapping row. Unlike Set — which
+// upserts and treats a blank NodePath as "skip", so it can never express a
+// deletion — this is a real row delete (D7): it is how a node authors the
+// removal of a now-stale mapping (e.g. after a reimage), so the old row cannot
+// survive and re-push to the node on its next reconnect. Deleting a key that
+// has no row is a no-op, not an error. MaxJobs (node_max_jobs) is untouched.
+func (s *Store) Delete(ctx context.Context, nodeID, key string) error {
+	_, err := s.db.ExecContext(ctx,
+		`DELETE FROM node_path_mappings WHERE node_id = ? AND library_path_key = ?`,
+		nodeID, key,
+	)
+	return err
+}

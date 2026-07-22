@@ -147,6 +147,53 @@ func TestNodePathMappings_FixedFiveRows_ConfiguredAndPersistedValues(t *testing.
 	}
 }
 
+// TestListNodes_ReportsStoredMaxJobs is a regression test for a real bug:
+// GET /api/nodes previously never returned a node's stored MaxJobs, so
+// frontend/src/screens/settings/Nodes.tsx's EditSettingsModal had no value
+// to preload its maxJobs input from and always started it at a hardcoded 0.
+// Since updateNodeSettingsOperatorAuth applies whatever maxJobs the modal
+// submits unconditionally (that field IS the one thing operator auth is
+// meant to write), an operator opening the modal for any other reason (e.g.
+// to look at the now-read-only path mappings) and clicking "Save settings"
+// without touching the field would silently reset the node's real
+// concurrency cap to 0. This locks in that GET /api/nodes now surfaces the
+// stored value so the frontend can preload it correctly.
+func TestListNodes_ReportsStoredMaxJobs(t *testing.T) {
+	mux, reg, _, _, nodeSettingsStore, _, apiKey := testNodesMux(t)
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	_, _, _, disconnect := reg.Connect("node-a", "render-box", []string{"cuda"})
+	defer disconnect()
+
+	ctx := context.Background()
+	if err := nodeSettingsStore.Set(ctx, "node-a", nodesettings.Settings{MaxJobs: 7}); err != nil {
+		t.Fatalf("nodeSettingsStore.Set: %v", err)
+	}
+
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/nodes", nil)
+	req.Header.Set("X-Api-Key", apiKey)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	var got apidto.NodesResponse
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decoding response: %v", err)
+	}
+	if len(got.Nodes) != 1 {
+		t.Fatalf("expected 1 node, got %d", len(got.Nodes))
+	}
+	if got.Nodes[0].MaxJobs != 7 {
+		t.Errorf("expected MaxJobs 7 (the stored value), got %d", got.Nodes[0].MaxJobs)
+	}
+}
+
 // TestResolvePathMap_BlankNodePathSkipped locks in the fix for a real
 // divergence bug found during review: resolvePathMap (the live-save push) and
 // pushPersistedNodeSettings (the reconnect push, internal/nodesettings) must

@@ -13,6 +13,7 @@ import (
 	"github.com/labbersanon/sakms/internal/apidto"
 	"github.com/labbersanon/sakms/internal/auth"
 	"github.com/labbersanon/sakms/internal/nodekeys"
+	"github.com/labbersanon/sakms/internal/nodepath"
 	"github.com/labbersanon/sakms/internal/nodes"
 	"github.com/labbersanon/sakms/internal/nodesettings"
 	"github.com/labbersanon/sakms/internal/settings"
@@ -239,11 +240,17 @@ func nodeStreamHandler(reg *nodes.Registry, settingsStore *settings.Store, nodeS
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("X-Accel-Buffering", "no")
 
-		// First event: ConnectAck so the node learns its server-assigned id.
-		// ConnectAck contains only a string field so Marshal cannot fail in
-		// practice, but a silent drop would leave the node with no id and
-		// permanently broken heartbeats, so fail loudly instead.
-		ackData, err := json.Marshal(nodes.ConnectAck{NodeID: id})
+		// First event: ConnectAck so the node learns its durable id AND the
+		// bounded library-path-key catalog it may author mappings for (D4 —
+		// piggybacked here rather than on a separate node-auth endpoint, since
+		// the catalog is a compile-time constant, static per node). Marshal
+		// cannot fail in practice, but a silent drop would leave the node with
+		// no id and permanently broken heartbeats, so fail loudly instead.
+		catalog := make([]string, len(libraryPathKeys))
+		for i, k := range libraryPathKeys {
+			catalog[i] = string(k)
+		}
+		ackData, err := json.Marshal(nodes.ConnectAck{NodeID: id, LibraryPathKeys: catalog})
 		if err != nil {
 			log.Printf("nodes: marshal ConnectAck: %v", err)
 			http.Error(w, "internal error", http.StatusInternalServerError)
@@ -422,8 +429,12 @@ func nodeBrowseHandler(reg *nodes.Registry) http.HandlerFunc {
 }
 
 // listNodesHandler handles GET /api/nodes. Returns connected nodes plus any
-// pending-pairing nodes, all mapped to the apidto shape.
-func listNodesHandler(reg *nodes.Registry, pairingReg *nodes.PairingRegistry) http.HandlerFunc {
+// pending-pairing nodes, all mapped to the apidto shape. Each node's MaxJobs
+// is looked up from nodeSettingsStore (the same operator-owned value
+// updateNodeSettingsOperatorAuth writes) so the frontend can preload the
+// real stored concurrency cap into EditSettingsModal instead of defaulting
+// to 0 — see apidto.NodeInfo's doc comment for why that default was a bug.
+func listNodesHandler(reg *nodes.Registry, pairingReg *nodes.PairingRegistry, nodeSettingsStore *nodesettings.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		raw := reg.ListNodes()
 		dtoNodes := make([]apidto.NodeInfo, 0, len(raw))
@@ -436,12 +447,17 @@ func listNodesHandler(reg *nodes.Registry, pairingReg *nodes.PairingRegistry) ht
 			if caps == nil {
 				caps = []string{}
 			}
+			stored, _, err := nodeSettingsStore.Get(r.Context(), n.ID)
+			if err != nil {
+				log.Printf("nodes: get stored settings for %s: %v", n.ID, err)
+			}
 			dtoNodes = append(dtoNodes, apidto.NodeInfo{
 				ID:            n.ID,
 				Name:          n.Name,
 				Status:        status,
 				Capabilities:  caps,
 				LastHeartbeat: n.LastHeartbeat.Format(time.RFC3339),
+				MaxJobs:       stored.MaxJobs,
 			})
 		}
 
@@ -534,23 +550,127 @@ func rejectPendingHandler(pairingReg *nodes.PairingRegistry) http.HandlerFunc {
 	}
 }
 
-// updateNodeSettingsHandler handles PUT /api/nodes/{id}/settings. Pushes
-// updated path mappings and concurrency cap to an already-connected node over
-// its existing authenticated SSE stream.
+// updateNodeSettingsHandler handles PUT /api/nodes/{id}/settings under DUAL
+// auth (D1): the route accepts EITHER operator credentials OR a node bearer
+// key, and the write is partitioned by which authenticated it —
+//
+//   - node bearer  → the node authors its OWN PathMap (single-key delta or
+//     Clear), keyed by the bearer identity (NOT the URL {id}, D2), always
+//     preserving the operator-owned MaxJobs (D3).
+//   - operator     → writes ONLY MaxJobs, preserving the now-node-owned
+//     PathMap (D3); any PathMap in the body is ignored.
+//
+// The presence of a node identity in the request context (injected only by
+// NodeKeyMiddleware) is what distinguishes the two — an operator request never
+// carries one.
 func updateNodeSettingsHandler(reg *nodes.Registry, settingsStore *settings.Store, nodeSettingsStore *nodesettings.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		nodeID := r.PathValue("id")
 		var body apidto.NodeSettingsRequest
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			http.Error(w, "invalid request body", http.StatusBadRequest)
 			return
 		}
 
-		// Safeguard 1 (hard gate, per explicit user directive): every
-		// non-blank row must pass live mapping verification BEFORE anything
-		// is persisted. On any mismatch, nothing from this save is
-		// persisted or pushed — the store is left exactly as it was.
-		toPersist, err := verifyAndBuildPersistedSettings(r.Context(), reg, settingsStore, nodeID, body.PathMap, body.MaxJobs)
+		if nodeID, _, ok := auth.NodeIdentityFromContext(r.Context()); ok {
+			// D2 (security-critical): key by the authenticated bearer identity,
+			// IGNORING r.PathValue("id"), so node A cannot write node B's row by
+			// putting B's id in the URL.
+			updateNodeSettingsNodeAuth(w, r, reg, settingsStore, nodeSettingsStore, nodeID, body)
+			return
+		}
+		updateNodeSettingsOperatorAuth(w, r, reg, settingsStore, nodeSettingsStore, r.PathValue("id"), body)
+	}
+}
+
+// updateNodeSettingsNodeAuth is the node-bearer write path: the node authors
+// its own path mappings as single-key deltas (or clears, D7), verified against
+// the server's own listing before persistence, always preserving the
+// operator-owned MaxJobs (D3).
+func updateNodeSettingsNodeAuth(w http.ResponseWriter, r *http.Request, reg *nodes.Registry, settingsStore *settings.Store, nodeSettingsStore *nodesettings.Store, nodeID string, body apidto.NodeSettingsRequest) {
+	ctx := r.Context()
+
+	// Stage 4 / (g) hard reject: a mapping may only be authored once the node
+	// has at least one real, locally-asserted mediaRoot — the independent
+	// containment boundary that offsets the reduced verification independence
+	// under node authorship (§3a). mediaRoots is node-local, so the node
+	// reports it on its own push; a missing OR trivial list means reject
+	// BEFORE any verification round-trip, so nothing is persisted or pushed.
+	//
+	// "Non-empty" alone is insufficient (D9): a trivial root like "/" or
+	// "/mnt" satisfies non-empty while providing zero containment — the node's
+	// own withinMediaRoots would pass any nodePath against it. Reject if the
+	// list is empty OR if ANY entry is trivial (a single "/" entry alone
+	// re-opens the unrestricted hole, since withinMediaRoots passes a path
+	// contained in ANY configured root).
+	if len(body.MediaRoots) == 0 {
+		http.Error(w, "node has no configured mediaRoots; add a media root before authoring a path mapping", http.StatusUnprocessableEntity)
+		return
+	}
+	for _, root := range body.MediaRoots {
+		if nodepath.Trivial(root) {
+			http.Error(w, fmt.Sprintf("node reported a trivial mediaRoot %q; a media root must be a real directory (at least %d path segments), not a filesystem root or shallow mount, before authoring a path mapping", root, nodepath.MinDepth), http.StatusUnprocessableEntity)
+			return
+		}
+	}
+
+	// D3: MaxJobs is operator-owned. Load the stored value and use it for BOTH
+	// persistence and the SSE push, so a node body carrying MaxJobs=0 can never
+	// zero the node's live job cap — neither in the DB nor over the wire.
+	stored, _, err := nodeSettingsStore.Get(ctx, nodeID)
+	if err != nil {
+		log.Printf("nodes/settings: get stored settings for %s: %v", nodeID, err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	storedMaxJobs := stored.MaxJobs
+
+	// Partition the request (D7): a Clear=true entry deletes its row; a
+	// non-blank NodePath is a set (runs the verification gate); a blank
+	// NodePath with Clear=false is a no-op skip — blank is NOT the delete
+	// signal. Blanks are dropped here, never handed to verify+Set: that
+	// function appends blank rows and Set upserts node_path="", which would
+	// WIPE the existing value — the exact wipe-by-blank bug resolvePathMap
+	// guards against on the wire push.
+	var sets []apidto.NodePathMappingInput
+	var clears []apidto.LibraryPathKey
+	for _, pm := range body.PathMap {
+		switch {
+		case pm.Clear:
+			clears = append(clears, pm.Key)
+		case pm.NodePath == "":
+			// skip — leave this key untouched
+		default:
+			sets = append(sets, pm)
+		}
+	}
+
+	// Stage 4 (authoritative backstop): validate the nodePath VALUE of every set
+	// before the verification gate runs, using the same canonical rule
+	// (nodepath.Trivial) the mediaRoots gate and the node itself use. A "/" or
+	// too-shallow nodePath provides no containment and must never reach the DB —
+	// the node rejects these locally too, but the server does not trust that.
+	//
+	// A blank nodePath is NOT checked here: it was already partitioned out as a
+	// no-op skip above (D7 — blank means "leave untouched", never "set" and never
+	// "clear"), so "empty nodePath" is enforced node-side (validateMediaRootPath)
+	// rather than rejected here, which would break the blank-is-skip contract.
+	// Containment (withinMediaRoots) is likewise node-only: the server has no
+	// filesystem access to the node's paths (D9), so it cannot re-run it.
+	for _, pm := range sets {
+		if nodepath.Trivial(pm.NodePath) {
+			http.Error(w, fmt.Sprintf("nodePath %q for %q is too shallow (need at least %d path segments); a filesystem root or shallow mount provides no containment", pm.NodePath, pm.Key, nodepath.MinDepth), http.StatusUnprocessableEntity)
+			return
+		}
+	}
+
+	// Verify + persist the sets. Single-key delta: Store.Set upserts only these
+	// keys and never wipes siblings, so only the changed key(s) are re-verified
+	// via a live RequestBrowse (D6: that browse runs over the SSE stream while
+	// this HTTP push is still in flight — the node's push goroutine and its SSE
+	// reader are independent, so this is not a deadlock). On any mismatch,
+	// nothing is persisted — the store is left exactly as it was.
+	if len(sets) > 0 {
+		toPersist, err := verifyAndBuildPersistedSettings(ctx, reg, settingsStore, nodeID, sets, storedMaxJobs)
 		if err != nil {
 			var mismatch *errMappingMismatch
 			var unreachable *errNodeUnreachable
@@ -566,19 +686,64 @@ func updateNodeSettingsHandler(reg *nodes.Registry, settingsStore *settings.Stor
 			}
 			return
 		}
-
-		if err := nodeSettingsStore.Set(r.Context(), nodeID, toPersist); err != nil {
+		if err := nodeSettingsStore.Set(ctx, nodeID, toPersist); err != nil {
 			log.Printf("nodes/settings: persist settings for %s: %v", nodeID, err)
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
 		}
+	}
 
-		pathMap := resolvePathMap(r.Context(), settingsStore, body.PathMap)
-
-		if !reg.SendSettings(nodeID, nodes.NodeSettings{PathMap: pathMap, MaxJobs: body.MaxJobs}) {
-			http.Error(w, "node not connected", http.StatusNotFound)
+	// Apply the clears (D7): a real row delete — Store.Set cannot express
+	// deletion (it upserts and blank-skips), so without this a stale verified
+	// mapping would survive a reimage and re-push to the node on reconnect.
+	for _, key := range clears {
+		if err := nodeSettingsStore.Delete(ctx, nodeID, string(key)); err != nil {
+			log.Printf("nodes/settings: delete mapping %q for %s: %v", key, nodeID, err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
 		}
-		w.WriteHeader(http.StatusNoContent)
 	}
+
+	// Push the single-key delta to the live node (D3: STORED MaxJobs, never
+	// body.MaxJobs). resolvePathMap skips blanks and clears, so only the changed
+	// set key(s) are pushed; the server cannot push a delete DOWN
+	// (mergePathMap is add/replace-only — the accepted node-authoritative
+	// reconciliation invariant, D7). Best-effort: if the node isn't connected,
+	// the persisted state is authoritative and re-pushes on reconnect.
+	pathMap := resolvePathMap(ctx, settingsStore, sets)
+	reg.SendSettings(nodeID, nodes.NodeSettings{PathMap: pathMap, MaxJobs: storedMaxJobs})
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// updateNodeSettingsOperatorAuth is the operator write path: it touches ONLY
+// MaxJobs and preserves the node-authored PathMap untouched (D3). PathMap in an
+// operator body is ignored — path mappings are node-owned now (Stage 5 makes
+// the frontend read-only, but the backend partition is already authoritative
+// so no operator-submitted PathMap is ever trusted going forward).
+func updateNodeSettingsOperatorAuth(w http.ResponseWriter, r *http.Request, reg *nodes.Registry, settingsStore *settings.Store, nodeSettingsStore *nodesettings.Store, nodeID string, body apidto.NodeSettingsRequest) {
+	ctx := r.Context()
+
+	stored, _, err := nodeSettingsStore.Get(ctx, nodeID)
+	if err != nil {
+		log.Printf("nodes/settings: get stored settings for %s: %v", nodeID, err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	if err := nodeSettingsStore.Set(ctx, nodeID, nodesettings.Settings{PathMappings: stored.PathMappings, MaxJobs: body.MaxJobs}); err != nil {
+		log.Printf("nodes/settings: persist settings for %s: %v", nodeID, err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	// Re-push the (unchanged) stored PathMap plus the new MaxJobs to the live
+	// node. Best-effort, same as the node-auth path — the persisted value is
+	// authoritative and re-pushes on the node's next reconnect if it is
+	// currently offline.
+	if err := pushPersistedNodeSettings(ctx, reg, settingsStore, nodeSettingsStore, nodeID); err != nil {
+		log.Printf("nodes/settings: push settings for %s: %v", nodeID, err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }

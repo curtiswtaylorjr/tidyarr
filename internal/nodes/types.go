@@ -78,17 +78,28 @@ type JobResult struct {
 // NodeInfo is the server's live view of one connected node, returned by
 // ListNodes for the Settings → Nodes tab.
 type NodeInfo struct {
-	ID            string    // server-assigned connection id (crypto/rand.Text(); ephemeral)
+	ID            string    // durable node_keys.id (minted once by nodekeys.Create, stable across every reconnect)
 	Name          string    // node self-reported
 	Capabilities  []string  // hwaccels reported at connect, e.g. ["cuda"]
 	LastHeartbeat time.Time //
 }
 
 // ConnectAck is the first SSE event the server sends on a new stream, before
-// any Job, handing the node its server-assigned id for use in subsequent
-// heartbeat and result POSTs.
+// any Job, handing the node its durable node_keys.id — the same id minted
+// once at approval time and reused unchanged on every subsequent reconnect —
+// for use in subsequent heartbeat and result POSTs.
+//
+// LibraryPathKeys carries the server's bounded library-path-key catalog (D4):
+// the fixed set of keys a node may author a path mapping for, so the node-side
+// UI can render pickers for the ones it hasn't configured yet. It is a
+// compile-time constant server-side (see internal/api's libraryPathKeys), so
+// piggybacking it on the connect ack — sent once, on connect — avoids a
+// separate node-auth catalog endpoint. Modeled as []string (not
+// []apidto.LibraryPathKey) so this package takes no dependency on apidto; the
+// api layer converts when it populates the ack.
 type ConnectAck struct {
-	NodeID string `json:"nodeId"`
+	NodeID          string   `json:"nodeId"`
+	LibraryPathKeys []string `json:"libraryPathKeys,omitempty"`
 }
 
 // BrowseRequest is one directory-listing request pushed to a specific,

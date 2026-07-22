@@ -3,6 +3,7 @@ package nodes
 import (
 	"context"
 	"crypto/rand"
+	"log/slog"
 	"time"
 )
 
@@ -49,11 +50,15 @@ func (d *Dispatcher) Hash(ctx context.Context, path string) (string, error) {
 	select {
 	case res := <-result:
 		if res.Error != "" {
+			slog.Warn("nodes: falling back to local hasher — node reported an error",
+				"node", nodeID, "jobType", d.jobType, "path", path, "reason", res.Error)
 			return d.local.Hash(ctx, path) // node reported a hash error
 		}
 		d.reg.noteSuccess(nodeID)
 		return res.Hash, nil
 	case <-time.After(d.timeout):
+		slog.Warn("nodes: falling back to local hasher — node dispatch timed out",
+			"node", nodeID, "jobType", d.jobType, "path", path, "timeout", d.timeout)
 		d.reg.noteTimeout(nodeID) // true timeout — drives the circuit breaker
 		return d.local.Hash(ctx, path)
 	case <-ctx.Done():

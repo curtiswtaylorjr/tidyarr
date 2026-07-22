@@ -1417,12 +1417,25 @@ type DownloaderConfig struct {
 
 // NodeInfo is one connected (or recently disconnected) worker node as
 // returned by GET /api/nodes.
+//
+// MaxJobs is the node's stored, operator-owned concurrency cap (from
+// nodesettings.Store — 0 if nothing was ever saved). It's included here so
+// the frontend's EditSettingsModal can preload the real current value
+// instead of defaulting its input to 0: without this, an operator who opens
+// the modal just to look at the (now read-only) path mappings and clicks
+// "Save settings" without touching MaxJobs would silently reset an existing
+// non-zero cap to 0, since updateNodeSettingsOperatorAuth applies
+// body.MaxJobs unconditionally by design (MaxJobs is the one field operator
+// auth is meant to write). The frontend already fetches this list on
+// Nodes-screen load and again whenever the modal opens, so extending this
+// existing DTO avoids a new endpoint.
 type NodeInfo struct {
 	ID            string   `json:"id"`
 	Name          string   `json:"name"`
 	Status        string   `json:"status"`        // "online" | "offline"
 	Capabilities  []string `json:"capabilities"`  // hwaccels, e.g. ["cuda"]
 	LastHeartbeat string   `json:"lastHeartbeat"` // RFC3339
+	MaxJobs       int      `json:"maxJobs"`       // stored operator-owned concurrency cap, 0 = unlimited/unset
 }
 
 // PendingNodeInfo is a node waiting for operator approval in GET /api/nodes.
@@ -1443,16 +1456,30 @@ type PathMapping struct {
 	Local  string `json:"local"`
 }
 
-// NodeSettingsRequest is the body for PUT /api/nodes/{id}/settings.
-// PathMap and MaxJobs travel together deliberately: cmd/sakms-node's
-// EventSettings handler assigns MaxJobs directly (a scalar, not a merge), so
-// splitting these into separate write endpoints would let a path-mapping-only
-// save silently reset MaxJobs to 0. There is no separate PUT
-// /api/nodes/{id}/path-mappings endpoint for this reason — see
-// GET /api/nodes/{id}/path-mappings below, which is read-only.
+// NodeSettingsRequest is the body for PUT /api/nodes/{id}/settings — served by
+// BOTH operator auth and node bearer auth, with the write partitioned by which
+// credential authenticated it (D1/D3):
+//
+//   - Operator auth writes ONLY MaxJobs (concurrency stays an operator knob);
+//     PathMap in an operator body is ignored — it is now node-owned.
+//   - Node bearer auth writes ONLY PathMap (a single-key delta per entry, or a
+//     Clear per entry, see NodePathMappingInput), keyed by the node's bearer
+//     identity — NOT the URL {id} — and always preserves the stored MaxJobs.
+//
+// PathMap and MaxJobs no longer "travel together" on one write path (that
+// coupling was what would silently reset MaxJobs to 0 on a path-only save); the
+// auth partition is what now prevents that, so each side touches exactly one.
+//
+// MediaRoots is the node's locally-asserted media-root allowlist, reported by
+// the node on its own push (mediaRoots is node-local — the server has no other
+// way to know it). A node-auth request with zero MediaRoots is hard-rejected
+// before any verification runs: a mapping may only be authored once at least
+// one independent containment boundary exists on the node. Ignored on the
+// operator path.
 type NodeSettingsRequest struct {
-	PathMap []NodePathMappingInput `json:"pathMap"`
-	MaxJobs int                    `json:"maxJobs"`
+	PathMap    []NodePathMappingInput `json:"pathMap"`
+	MaxJobs    int                    `json:"maxJobs"`
+	MediaRoots []string               `json:"mediaRoots,omitempty"`
 }
 
 // ApproveNodeRequest is the body for POST /api/nodes/{id}/approve.
@@ -1513,9 +1540,16 @@ type NodePathMappingsResponse struct {
 // NodeSettingsRequest/ApproveNodeRequest's PathMap field). ServerPath is
 // never submitted — it's derived server-side from Library settings by Key,
 // never editable here.
+//
+// Clear is the explicit delete signal (D7): true means "remove this key's
+// mapping row entirely." A blank NodePath still means "skip / leave this key
+// untouched" — it is NOT overloaded to mean delete (blank is skipped on every
+// push path, so it cannot express deletion). Clear is the only delete signal;
+// when Clear is true, NodePath is ignored.
 type NodePathMappingInput struct {
 	Key      LibraryPathKey `json:"key"`
 	NodePath string         `json:"nodePath"`
+	Clear    bool           `json:"clear,omitempty"`
 }
 
 // NodeBrowseEntry is one directory GET /api/nodes/{id}/browse's response
