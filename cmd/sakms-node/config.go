@@ -11,9 +11,16 @@ const defaultStatusPort = 7810
 
 // PathMapEntry maps one server-absolute path prefix to a local prefix. The
 // node replaces the server prefix with the local prefix before opening a file.
+//
+// Key is INERT display metadata: the library-path key the server derived this
+// prefix pair from, carried through purely so the tray can label a live Remap
+// row (including legacy operator-authored mappings absent from AuthoredPaths).
+// Remap and mergePathMap never match or dedup on it — they stay keyed by Server
+// exactly as before (D7's add/replace-by-Server invariant is untouched).
 type PathMapEntry struct {
 	Server string `json:"server"`
 	Local  string `json:"local"`
+	Key    string `json:"key,omitempty"`
 }
 
 // AuthoredPathMapping records ONE library-path-key → node-local path the

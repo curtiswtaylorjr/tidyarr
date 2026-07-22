@@ -233,6 +233,51 @@ func TestUpdateNodeSettings_OperatorAuth_ChangesOnlyMaxJobs(t *testing.T) {
 	}
 }
 
+// TestPushPersistedNodeSettings_PopulatesWireKey proves the reconnect
+// conversion site (pushPersistedNodeSettings) carries the persisted
+// LibraryPathKey onto the wire PathMapping. This is the load-bearing site for
+// the legacy-mapping display fix: a mapping set via the OLD server-side operator
+// UI lives only in nodeSettingsStore (never in the node's own AuthoredPaths), so
+// its wire Key can ONLY come from here on reconnect — that Key is what lets the
+// tray render it as mapped-with-its-real-path instead of "not set".
+func TestPushPersistedNodeSettings_PopulatesWireKey(t *testing.T) {
+	_, reg, _, settingsStore, nodeSettingsStore, nodeKeyStore, _ := testNodesMux(t)
+
+	ctx := context.Background()
+	if err := settingsStore.Set(ctx, string(apidto.LibraryPathMoviesRoot), "/data/movies"); err != nil {
+		t.Fatalf("settingsStore.Set: %v", err)
+	}
+	id, _, err := nodeKeyStore.Create(ctx, "node-a")
+	if err != nil {
+		t.Fatalf("nodekeys.Create: %v", err)
+	}
+	// A persisted (server-side) mapping — the legacy shape: present in
+	// nodeSettingsStore, and the node has no local AuthoredPaths record of it.
+	if err := nodeSettingsStore.Set(ctx, id, nodesettings.Settings{
+		PathMappings: []nodesettings.PathMappingEntry{
+			{LibraryPathKey: string(apidto.LibraryPathMoviesRoot), NodePath: "/mnt/movies", VerificationStatus: nodesettings.VerificationVerified},
+		},
+		MaxJobs: 2,
+	}); err != nil {
+		t.Fatalf("pre-seed: %v", err)
+	}
+
+	settings := connectCapturingNode(t, reg, id, nil)
+	if err := pushPersistedNodeSettings(ctx, reg, settingsStore, nodeSettingsStore, id); err != nil {
+		t.Fatalf("pushPersistedNodeSettings: %v", err)
+	}
+	push := readSettingsPush(t, settings)
+	if len(push.PathMap) != 1 {
+		t.Fatalf("expected 1 pushed mapping, got %+v", push.PathMap)
+	}
+	if push.PathMap[0].Key != string(apidto.LibraryPathMoviesRoot) {
+		t.Errorf("wire Key = %q, want %q", push.PathMap[0].Key, string(apidto.LibraryPathMoviesRoot))
+	}
+	if push.PathMap[0].Server != "/data/movies" || push.PathMap[0].Local != "/mnt/movies" {
+		t.Errorf("Server/Local = %q/%q, want /data/movies//mnt/movies", push.PathMap[0].Server, push.PathMap[0].Local)
+	}
+}
+
 // TestUpdateNodeSettings_NodeAuth_Clear_RemovesRowAndDoesNotReappear is
 // acceptance (f): a node clear (explicit Clear field) deletes the (node,key)
 // row, and it does NOT reappear on the node's next reconnect push.

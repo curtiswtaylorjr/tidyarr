@@ -77,7 +77,7 @@ func pair(ctx context.Context, cfg *NodeConfig, configPath string, status *statu
 				}
 				pathMap := make([]PathMapEntry, len(pairCfg.Settings.PathMap))
 				for i, pm := range pairCfg.Settings.PathMap {
-					pathMap[i] = PathMapEntry{Server: pm.Server, Local: pm.Local}
+					pathMap[i] = PathMapEntry{Server: pm.Server, Local: pm.Local, Key: pm.Key}
 				}
 				if err := cfg.applyPairConfig(configPath, pairCfg.APIKey, pairCfg.Settings.MaxJobs, pathMap); err != nil {
 					return fmt.Errorf("saving config after pairing: %w", err)

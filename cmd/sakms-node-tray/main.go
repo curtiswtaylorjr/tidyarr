@@ -122,11 +122,15 @@ type trayUI struct {
 	notifiedCode string // which pairing code we already notified about
 
 	// Path-mapping state (guarded by mu). mediaRootCount drives the UX gate;
-	// pmFetched/pmCatalog/pmAuthored/pmLastPushError hold the last GET /pathmap.
+	// pmFetched/pmCatalog/pmAuthored/pmPathMap/pmLastPushError hold the last
+	// GET /pathmap. pmPathMap is the live server-authoritative Remap table,
+	// consulted (by Key) ahead of pmAuthored so a legacy operator-authored
+	// mapping renders as mapped-with-its-real-path.
 	mediaRootCount  int
 	pmFetched       bool
 	pmCatalog       []string
 	pmAuthored      []authoredMapping
+	pmPathMap       []remapEntry
 	pmLastPushError string
 
 	// Dispatch-pause state (guarded by mu). dispatchFetched gates rendering and
@@ -400,7 +404,7 @@ func (t *trayUI) renderRoots(scopes []mediaRootStatus) {
 		case i < len(scopes):
 			s := scopes[i]
 			rs.path = s.Path
-			rs.item.SetTitle("• " + s.Path + "  [" + scopeLabel(s.Scope) + "]")
+			rs.item.SetTitle("• " + escapeMenuLabel(s.Path) + "  [" + scopeLabel(s.Scope) + "]")
 			rs.item.SetTooltip(s.Path + " — " + s.Scope)
 			rs.item.Show()
 		default:

@@ -262,6 +262,38 @@ func TestResolvePathMap_ConfiguredWithNodePath_Included(t *testing.T) {
 	}
 }
 
+// TestResolvePathMap_PopulatesWireKey proves the live-save conversion site
+// (resolvePathMap) carries the library-path key onto the wire PathMapping so the
+// node/tray can label the resulting Remap row. This is one of the two
+// independent server-side conversion sites; the reconnect site
+// (pushPersistedNodeSettings) is covered separately.
+func TestResolvePathMap_PopulatesWireKey(t *testing.T) {
+	sqlDB, err := db.Open(filepath.Join(t.TempDir(), "sakms.db"))
+	if err != nil {
+		t.Fatalf("opening db: %v", err)
+	}
+	defer sqlDB.Close()
+	settingsStore := settings.New(sqlDB)
+
+	ctx := context.Background()
+	if err := settingsStore.Set(ctx, string(apidto.LibraryPathSeriesRoot), "/data/series"); err != nil {
+		t.Fatalf("settingsStore.Set: %v", err)
+	}
+
+	got := resolvePathMap(ctx, settingsStore, []apidto.NodePathMappingInput{
+		{Key: apidto.LibraryPathSeriesRoot, NodePath: "/mnt/series"},
+	})
+	if len(got) != 1 {
+		t.Fatalf("expected 1 wire entry, got %+v", got)
+	}
+	if got[0].Key != string(apidto.LibraryPathSeriesRoot) {
+		t.Errorf("wire Key = %q, want %q", got[0].Key, string(apidto.LibraryPathSeriesRoot))
+	}
+	if got[0].Server != "/data/series" || got[0].Local != "/mnt/series" {
+		t.Errorf("Server/Local = %q/%q, want /data/series//mnt/series", got[0].Server, got[0].Local)
+	}
+}
+
 func TestNodeBrowse_NodeNotConnected_ClearError(t *testing.T) {
 	mux, _, _, _, _, _, apiKey := testNodesMux(t)
 	srv := httptest.NewServer(mux)

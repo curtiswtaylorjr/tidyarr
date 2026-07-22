@@ -69,7 +69,10 @@ func mergePathMap(existing []PathMapEntry, incoming []nodes.PathMapping) []PathM
 		merged[pm.Server] = pm
 	}
 	for _, pm := range incoming {
-		merged[pm.Server] = PathMapEntry{Server: pm.Server, Local: pm.Local}
+		// Key rides along as inert display metadata; dedup is still by Server
+		// only (map key), so merge behavior is unchanged whether or not Key is
+		// populated on the incoming entries.
+		merged[pm.Server] = PathMapEntry{Server: pm.Server, Local: pm.Local, Key: pm.Key}
 	}
 	out := make([]PathMapEntry, 0, len(merged))
 	for _, pm := range merged {

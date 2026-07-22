@@ -20,9 +20,19 @@ const (
 
 // PathMapping translates one server-side path prefix to its local equivalent
 // on the worker node's filesystem.
+//
+// Key is the library-path key this prefix pair was derived from (e.g.
+// movies_library_root_folder). It is INERT display metadata only: the node's
+// Remap (longest-Server-prefix match) and mergePathMap (add/replace-by-Server
+// dedup) never key off it — it exists purely so the node-side tray can label a
+// live Remap row with its originating key, including legacy operator-authored
+// mappings the node never recorded in its own AuthoredPaths. Populating it does
+// NOT make merge key-aware/delete-capable (D7 stays intact). Modeled as string
+// (not apidto.LibraryPathKey) so this package keeps its zero apidto dependency.
 type PathMapping struct {
 	Server string `json:"server"`
 	Local  string `json:"local"`
+	Key    string `json:"key,omitempty"`
 }
 
 // NodeSettings is the operator-controlled configuration pushed to a node at

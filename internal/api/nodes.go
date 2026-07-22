@@ -60,7 +60,7 @@ func resolvePathMap(ctx context.Context, settingsStore *settings.Store, in []api
 		if serverPath == "" {
 			continue
 		}
-		out = append(out, nodes.PathMapping{Server: serverPath, Local: pm.NodePath})
+		out = append(out, nodes.PathMapping{Server: serverPath, Local: pm.NodePath, Key: string(pm.Key)})
 	}
 	return out
 }
@@ -185,7 +185,7 @@ func pushPersistedNodeSettings(ctx context.Context, reg *nodes.Registry, setting
 		if serverPath == "" {
 			continue
 		}
-		pathMap = append(pathMap, nodes.PathMapping{Server: serverPath, Local: e.NodePath})
+		pathMap = append(pathMap, nodes.PathMapping{Server: serverPath, Local: e.NodePath, Key: e.LibraryPathKey})
 	}
 
 	// PauseDispatch MUST come from the STORED value, not a zero value: this is

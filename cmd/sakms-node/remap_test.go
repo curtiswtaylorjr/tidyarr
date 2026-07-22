@@ -220,3 +220,55 @@ func TestMergePathMap(t *testing.T) {
 		}
 	})
 }
+
+// TestKeyIsInert_RemapAndMergeUnchanged proves the additive PathMapEntry.Key /
+// PathMapping.Key field is genuinely inert: neither Remap's longest-Server-prefix
+// matching nor mergePathMap's add/replace-by-Server dedup keys off it, so the
+// safety-relevant matching/keying behavior is identical whether or not Key is
+// populated (D7's add/replace-by-Server invariant is untouched).
+func TestKeyIsInert_RemapAndMergeUnchanged(t *testing.T) {
+	t.Run("Remap ignores Key entirely", func(t *testing.T) {
+		withoutKey := []PathMapEntry{{Server: "/mnt/movies", Local: "/data/movies"}}
+		withKey := []PathMapEntry{{Server: "/mnt/movies", Local: "/data/movies", Key: "movies_library_root_folder"}}
+		gotNoKey := Remap(withoutKey, "/mnt/movies/foo.mkv")
+		gotKey := Remap(withKey, "/mnt/movies/foo.mkv")
+		if gotNoKey != gotKey {
+			t.Fatalf("Remap diverged on Key presence: without=%q with=%q", gotNoKey, gotKey)
+		}
+		if gotKey != "/data/movies/foo.mkv" {
+			t.Fatalf("Remap = %q, want /data/movies/foo.mkv", gotKey)
+		}
+	})
+
+	t.Run("mergePathMap dedups by Server, NOT by Key", func(t *testing.T) {
+		// Two incoming entries share a Server but carry DIFFERENT Keys. If merge
+		// keyed off Key, this would yield two rows; keyed off Server (correct),
+		// the later one wins and there is exactly one row — proving Key plays no
+		// part in the dedup key.
+		incoming := []nodes.PathMapping{
+			{Server: "/mnt/movies", Local: "/data/first", Key: "movies_library_root_folder"},
+			{Server: "/mnt/movies", Local: "/data/second", Key: "series_library_root_folder"},
+		}
+		got := mergePathMap(nil, incoming)
+		if len(got) != 1 {
+			t.Fatalf("got %d entries, want 1 (dedup must be by Server, not Key): %+v", len(got), got)
+		}
+		if got[0].Server != "/mnt/movies" || got[0].Local != "/data/second" {
+			t.Errorf("got %+v, want the last same-Server entry to win by Server", got[0])
+		}
+	})
+
+	t.Run("replace-by-Server holds even when Keys differ", func(t *testing.T) {
+		existing := []PathMapEntry{{Server: "/mnt/movies", Local: "/old", Key: "movies_library_root_folder"}}
+		// Incoming carries the same Server with a different Key — still a replace
+		// (Server match), and the new Key/Local ride through as the merged value.
+		incoming := []nodes.PathMapping{{Server: "/mnt/movies", Local: "/new", Key: "adult_library_root_folder"}}
+		got := mergePathMap(existing, incoming)
+		if len(got) != 1 {
+			t.Fatalf("got %d entries, want 1 (replace by Server): %+v", len(got), got)
+		}
+		if got[0].Local != "/new" || got[0].Key != "adult_library_root_folder" {
+			t.Errorf("got %+v, want replaced {Local:/new Key:adult_library_root_folder}", got[0])
+		}
+	})
+}

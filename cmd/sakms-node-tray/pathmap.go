@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 
 	"fyne.io/systray"
 )
@@ -22,12 +23,16 @@ import (
 // the parent and an enabled parent-with-submenu does not reliably emit ClickedCh on
 // Linux DBusMenu (the same reason mediaroots.go disables its root rows).
 
-// remapEntry mirrors the daemon's server→local Remap pair from GET /pathmap. The
-// tray does not render it (it displays authored keys), but decoding it keeps the
-// view a faithful mirror of the daemon response.
+// remapEntry mirrors the daemon's server→local Remap pair from GET /pathmap.
+// Key is the library-path key the server derived this pair from (inert display
+// metadata carried through the wire — see nodes.PathMapping/PathMapEntry). It
+// lets buildKeyRows show a live, authoritative Remap row for a key even when the
+// node has no matching AuthoredPaths record — notably a legacy mapping set via
+// the old server-side operator UI before node-side authoring existed.
 type remapEntry struct {
 	Server string `json:"server"`
 	Local  string `json:"local"`
+	Key    string `json:"key,omitempty"`
 }
 
 // authoredMapping mirrors the daemon's AuthoredPathMapping: one library-path-key →
@@ -101,38 +106,124 @@ func (c *controlClient) clearPathMap(ctx context.Context, key string) (pathMapVi
 
 // --- pure display logic (unit-tested; no systray / no I/O) -----------------
 
-// keyRow is one library-path-key's render state: the key, its authored node path
-// (empty when unset), and whether a mapping exists.
+// keyRow is one library-path-key's render state: the key, its effective node
+// path (empty when unset), and whether a mapping exists.
+//
+// HasAuthoredKey distinguishes a node-authored mapping (this node holds an
+// AuthoredPaths record for the key — Remove is safe, the D7 clear path can
+// correlate and delete the Remap entry) from a legacy-only mapping (Mapped
+// solely via a live PathMap correlation, no AuthoredPaths record — a mapping
+// set through the OLD server-side operator UI). Remove on a legacy-only row is a
+// near-no-op on the node: clearAuthoredLocked finds no correlation and leaves
+// cfg.PathMap intact, so the node keeps remapping while only the server's record
+// is dropped. The tray therefore hides Remove for legacy-only rows; re-picking
+// via "Change folder…" authors a real node-side key, after which Remove works.
 type keyRow struct {
-	Key      string
-	NodePath string
-	Mapped   bool
+	Key            string
+	NodePath       string
+	Mapped         bool
+	HasAuthoredKey bool
 }
 
-// buildKeyRows pairs each catalog key with its authored node path (if any),
-// preserving catalog order. A blank authored NodePath is treated as unset (blank
-// means "skip" everywhere in the daemon, never "mapped").
-func buildKeyRows(catalog []string, authored []authoredMapping) []keyRow {
-	byKey := make(map[string]string, len(authored))
+// escapeMenuLabel neutralizes the DBusMenu/GTK mnemonic-accelerator convention
+// so an underscore in a menu-item title renders literally instead of being
+// swallowed. fyne.io/systray never sets the DBusMenu `use-underline` property,
+// and libdbusmenu-gtk3 (GNOME Shell's AppIndicator extension, XFCE, Cinnamon)
+// then defaults to treating a single "_" as a mnemonic marker and eats it from
+// the displayed label — so "movies_library_root_folder" shows as
+// "movieslibraryrootfolder". Under that same GTK/Pango mnemonic parsing a
+// doubled "__" is the standard escape for a literal underscore (see
+// gtk_label_new_with_mnemonic and the underline-markup convention), so doubling
+// every literal "_" is the robust fix. This behavior is a rendering-side GTK
+// convention we cannot exercise from a Go unit test, so the doubling rule is
+// asserted directly and this comment cites the reasoning.
+func escapeMenuLabel(s string) string {
+	return strings.ReplaceAll(s, "_", "__")
+}
+
+// keyLabels maps each known library-path key to a short human-friendly label.
+// Unknown/future keys fall back to escapeMenuLabel(rawKey) via keyDisplayLabel,
+// so an unrecognized catalog addition never crashes or renders blank.
+var keyLabels = map[string]string{
+	"movies_library_root_folder": "Movies",
+	"series_library_root_folder": "Series",
+	"adult_library_root_folder":  "Adult",
+	"movies_kids_root_path":      "Movies (Kids)",
+	"series_kids_root_path":      "Series (Kids)",
+}
+
+// keyDisplayLabel returns the human-friendly label for a known library-path key,
+// or the mnemonic-escaped raw key for an unknown one (never blank, never a
+// mangled underscore).
+func keyDisplayLabel(key string) string {
+	if label, ok := keyLabels[key]; ok {
+		return label
+	}
+	return escapeMenuLabel(key)
+}
+
+// buildKeyRows pairs each catalog key with its effective node path, preserving
+// catalog order. It consults BOTH sources, in priority order:
+//
+//   - The live PathMap (server-authoritative Remap table) by Key: this is what
+//     is actually in effect for dispatch right now, so its Local wins whenever a
+//     matching entry exists — including legacy mappings authored via the old
+//     server-side operator UI, which the node never recorded in AuthoredPaths.
+//   - AuthoredPaths (the node's own record) is the fallback for the pending
+//     case: a just-authored key whose set the server has not yet echoed back
+//     into PathMap still shows as mapped, using the authored value.
+//
+// A blank path from either source is treated as unset (blank means "skip"
+// everywhere in the daemon, never "mapped").
+func buildKeyRows(catalog []string, authored []authoredMapping, pathMap []remapEntry) []keyRow {
+	liveByKey := make(map[string]string, len(pathMap))
+	for _, e := range pathMap {
+		if e.Key != "" && e.Local != "" {
+			liveByKey[e.Key] = e.Local
+		}
+	}
+	authoredByKey := make(map[string]string, len(authored))
 	for _, a := range authored {
 		if a.NodePath != "" {
-			byKey[a.Key] = a.NodePath
+			authoredByKey[a.Key] = a.NodePath
 		}
 	}
 	rows := make([]keyRow, 0, len(catalog))
 	for _, k := range catalog {
-		p, ok := byKey[k]
-		rows = append(rows, keyRow{Key: k, NodePath: p, Mapped: ok})
+		_, hasAuthored := authoredByKey[k]
+		if live, ok := liveByKey[k]; ok {
+			rows = append(rows, keyRow{Key: k, NodePath: live, Mapped: true, HasAuthoredKey: hasAuthored})
+			continue
+		}
+		if p, ok := authoredByKey[k]; ok {
+			rows = append(rows, keyRow{Key: k, NodePath: p, Mapped: true, HasAuthoredKey: true})
+			continue
+		}
+		rows = append(rows, keyRow{Key: k, NodePath: "", Mapped: false})
 	}
 	return rows
 }
 
-// keyRowTitle formats a key row's disabled display line.
+// keyRowTitle formats a key row's disabled display line, using the human-friendly
+// key label and mnemonic-escaping the node path (a real folder like "My_Show"
+// would otherwise be mangled by the same DBusMenu underscore bug).
 func keyRowTitle(kr keyRow) string {
+	label := keyDisplayLabel(kr.Key)
 	if kr.Mapped {
-		return kr.Key + "  →  " + kr.NodePath
+		return label + "  →  " + escapeMenuLabel(kr.NodePath)
 	}
-	return kr.Key + "  →  not set"
+	return label + "  →  not set"
+}
+
+// removeItemVisible reports whether a key row's "Remove mapping" sub-item should
+// be shown. Only a node-authored mapping (Mapped AND HasAuthoredKey) is
+// removable: a legacy-only mapping (Mapped via a live PathMap correlation with
+// no AuthoredPaths record) hides Remove because clearAuthoredLocked cannot
+// correlate it — Remove would be a near-no-op on the node while dropping only
+// the server's record. Re-picking via "Change folder…" authors a real node-side
+// key, after which Remove works.
+func removeItemVisible(kr keyRow) bool {
+	return kr.Mapped && kr.HasAuthoredKey
 }
 
 // setItemTitle labels the picker sub-item by whether a mapping already exists.
@@ -194,6 +285,7 @@ func (t *trayUI) pollPathMap() {
 	t.pmFetched = true
 	t.pmCatalog = view.LibraryPathKeys
 	t.pmAuthored = view.AuthoredPaths
+	t.pmPathMap = view.PathMap
 	t.pmLastPushError = view.LastPushError
 	t.renderPathMap()
 }
@@ -222,7 +314,7 @@ func (t *trayUI) renderPathMap() {
 		t.mAddRootFirst.Show()
 	}
 
-	rows := buildKeyRows(t.pmCatalog, t.pmAuthored)
+	rows := buildKeyRows(t.pmCatalog, t.pmAuthored, t.pmPathMap)
 	overflow := len(rows) > len(t.keySlots)
 	for i, ks := range t.keySlots {
 		last := i == len(t.keySlots)-1
@@ -252,10 +344,16 @@ func (t *trayUI) renderPathMap() {
 				ks.setItem.Disable()
 			}
 
-			// Remove is shown only when mapped and stays enabled regardless of the
-			// gate: the daemon's local clear handler is not mediaRoots-gated, and an
-			// operator must always be able to drop a now-stale mapping (D7).
-			if r.Mapped {
+			// Remove is shown only for a node-authored mapping (Mapped AND
+			// HasAuthoredKey) and stays enabled regardless of the gate: the daemon's
+			// local clear handler is not mediaRoots-gated, and an operator must
+			// always be able to drop a now-stale node-authored mapping (D7). A
+			// legacy-only mapping (Mapped via a live PathMap correlation but with no
+			// AuthoredPaths record) hides Remove: clearAuthoredLocked cannot correlate
+			// it, so Remove would be a near-no-op on the node (it keeps remapping)
+			// while dropping only the server's record. Re-picking via "Change folder…"
+			// authors a real node-side key first, after which Remove works correctly.
+			if removeItemVisible(r) {
 				ks.removeItem.Show()
 				ks.removeItem.Enable()
 			} else {
@@ -270,7 +368,10 @@ func (t *trayUI) renderPathMap() {
 	}
 
 	if text, show := pathPushWarningLine(t.pmLastPushError); show {
-		t.mPathWarning.SetTitle(text)
+		// Escape at the render boundary: the push-error string embeds a raw key
+		// (e.g. movies_library_root_folder), which the DBusMenu mnemonic bug would
+		// otherwise mangle. pathPushWarningLine stays a pure, exact-output helper.
+		t.mPathWarning.SetTitle(escapeMenuLabel(text))
 		t.mPathWarning.Show()
 	} else {
 		t.mPathWarning.Hide()
