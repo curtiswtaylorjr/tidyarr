@@ -621,6 +621,26 @@ export function putWatchFoldersEnabled(enabled: boolean): Promise<void> {
   });
 }
 
+// Global watch-folders config-poll cadence in whole seconds (>= 0,
+// backend-validated; 0 = unset, meaning "use the 30s default" — NOT "off";
+// the feature's own on/off is the separate "Watch folders enabled" checkbox
+// above). Same shape/semantics as entity-sync-interval/adult-newest-scan-interval
+// above; no generated DTO, wire shape inlined here.
+export function fetchWatchFoldersPollInterval(): Promise<number> {
+  return api<{ intervalSeconds: number }>(
+    "/api/settings/watch-folders-poll-interval",
+  ).then((r) => r.intervalSeconds);
+}
+
+export function putWatchFoldersPollInterval(
+  intervalSeconds: number,
+): Promise<void> {
+  return api<void>("/api/settings/watch-folders-poll-interval", {
+    method: "PUT",
+    body: JSON.stringify({ intervalSeconds }),
+  });
+}
+
 // --- Worker nodes ----------------------------------------------------------
 
 export function fetchNodes(): Promise<NodesResponse> {

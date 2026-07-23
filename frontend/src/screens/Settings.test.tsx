@@ -70,6 +70,12 @@ function defaultGet(url: string): Response | undefined {
     return jsonResponse({ intervalSeconds: 0 });
   if (url.includes("/api/settings/entity-sync-interval"))
     return jsonResponse({ intervalSeconds: 0 });
+  // WatchFoldersSection (Advanced, global — mounts on every Advanced-tab
+  // render regardless of mode) mount GETs.
+  if (url.includes("/api/settings/watch-folders-poll-interval"))
+    return jsonResponse({ intervalSeconds: 0 });
+  if (url.includes("/api/admin/watch-folders"))
+    return jsonResponse({ enabled: false, roots: {} });
   // EntityDatabaseSection (Advanced > Adult) mount GET — empty cache, no
   // sources synced yet.
   if (url.includes("/api/admin/entity-sync"))
@@ -1424,6 +1430,20 @@ describe("DurationSetting — select-all-on-focus", () => {
   });
 });
 
+// clickAdvancedSectionSave scopes the click to the "Advanced Settings" card's
+// own SectionSave button. Needed because WatchFoldersSection's poll-interval
+// DurationSetting (added below the Advanced Settings card, standalone — not
+// wrapped in this tab's SectionSave, same as Entity Database's
+// entity-sync-interval) renders its own always-visible "Save" button. Unlike
+// entity-sync-interval (Adult-only), WatchFoldersSection mounts in every
+// mode, so a bare "Save" role query is no longer unique on this tab at all,
+// not just in Adult mode — see the pre-existing identify-enabled test further
+// down for the original instance of this same scoping need.
+const clickAdvancedSectionSave = () => {
+  const advancedCard = screen.getByText(/^Advanced Settings/).closest("div")!;
+  fireEvent.click(within(advancedCard).getByRole("button", { name: "Save" }));
+};
+
 describe("Advanced Settings", () => {
   it("recheck-interval (Days/Hours/Minutes picker) saves to the GLOBAL /api/settings/recheck-interval as seconds", async () => {
     const calls = stubFetch((url) => {
@@ -1439,7 +1459,7 @@ describe("Advanced Settings", () => {
       "Monitored title refresh interval — global",
     )) as HTMLInputElement;
     fireEvent.input(input, { target: { value: "1" } });
-    clickSectionSave();
+    clickAdvancedSectionSave();
     await waitFor(() =>
       expect(
         calls.some(
@@ -1469,7 +1489,7 @@ describe("Advanced Settings", () => {
     )) as HTMLInputElement;
     fireEvent.input(input, { target: { value: "-5" } });
     await waitFor(() => expect(input.value).toBe("0"));
-    clickSectionSave();
+    clickAdvancedSectionSave();
     await waitFor(() =>
       expect(
         calls.some(
@@ -1514,7 +1534,7 @@ describe("Advanced Settings", () => {
     fireEvent.input(input, { target: { value: "" } });
     fireEvent.blur(input);
     expect(input.value).toBe("0");
-    clickSectionSave();
+    clickAdvancedSectionSave();
     await waitFor(() =>
       expect(
         calls.some(
@@ -1577,7 +1597,12 @@ describe("Advanced Settings", () => {
     const input = (await screen.findByLabelText(
       "Dedup phash similarity threshold (0–256)",
     )) as HTMLInputElement;
-    const saveButton = screen.getByRole("button", {
+    // Scoped to the Advanced Settings card's own SectionSave button — the
+    // Watch Folders card below also renders its own (always-visible,
+    // non-disabling) "Save" button, so a bare "Save" query is no longer
+    // unique on this tab.
+    const advancedCard = screen.getByText(/^Advanced Settings/).closest("div")!;
+    const saveButton = within(advancedCard).getByRole("button", {
       name: "Save",
     }) as HTMLButtonElement;
     fireEvent.input(input, { target: { value: "300" } });
@@ -1616,7 +1641,7 @@ describe("Advanced Settings", () => {
     )) as HTMLInputElement;
     await waitFor(() => expect(input.value).toBe("8"));
     fireEvent.input(input, { target: { value: "12" } });
-    clickSectionSave();
+    clickAdvancedSectionSave();
     await waitFor(() =>
       expect(
         calls.some(
@@ -1686,6 +1711,53 @@ describe("Advanced Settings", () => {
       (c) => c.method === "PUT" && c.url.includes("/identify-enabled"),
     )!;
     expect(put.body).toEqual({ enabled: false });
+  });
+
+  it("watch-folders poll interval saves to the GLOBAL /api/settings/watch-folders-poll-interval as seconds", async () => {
+    const calls = stubFetch((url) => {
+      if (url.includes("/api/settings/watch-folders-poll-interval"))
+        return jsonResponse({ intervalSeconds: 0 });
+      if (url.includes("/api/admin/watch-folders"))
+        return jsonResponse({ enabled: false, roots: {} });
+      return undefined;
+    });
+    renderSettings();
+    goToSection("Advanced");
+    // Value 0 defaults the picker to the "Hours" unit; typing "1" there means
+    // 1 hour = 3600 seconds — same convention as recheck-interval above.
+    const input = (await screen.findByLabelText(
+      "Config poll interval — global",
+    )) as HTMLInputElement;
+    // Zero-state help text uses this control's own zeroLabel override, NOT
+    // the shared "(0 = off, the default)" fallback the other three
+    // DurationSetting call sites use — confirms the new zeroLabel prop
+    // actually took effect for this call site.
+    expect(
+      screen.getByText(/0 = use the default 30-second cadence/i),
+    ).toBeInTheDocument();
+    fireEvent.input(input, { target: { value: "1" } });
+    // WatchFoldersSection is a standalone card (not wrapped in the Advanced
+    // tab's SectionSave), so this DurationSetting has its own Save button —
+    // same shape as EntityDatabaseSection's entity-sync-interval. Scope to
+    // the field's own container to avoid colliding with the Watch Folders
+    // enabled-toggle's own standalone Save button in the same card.
+    const container = input.closest("div.mb-3") as HTMLElement;
+    fireEvent.click(within(container).getByRole("button", { name: "Save" }));
+    await waitFor(() =>
+      expect(
+        calls.some(
+          (c) =>
+            c.method === "PUT" &&
+            c.url.includes("/api/settings/watch-folders-poll-interval"),
+        ),
+      ).toBe(true),
+    );
+    const put = calls.find(
+      (c) =>
+        c.method === "PUT" &&
+        c.url.includes("/api/settings/watch-folders-poll-interval"),
+    )!;
+    expect(put.body).toEqual({ intervalSeconds: 3600 });
   });
 });
 

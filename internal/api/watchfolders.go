@@ -31,9 +31,26 @@ const WatchFoldersEnabledKey = "watch_folders_enabled"
 // full directory tree into the root folder.
 const watchDebounce = 10 * time.Second
 
-// watchPollInterval is how often RunWatchFolders re-reads configuration from
-// the settings store to pick up root-folder-path or enabled/disabled changes.
-const watchPollInterval = 30 * time.Second
+// defaultWatchPollInterval is how often RunWatchFolders re-reads
+// configuration from the settings store to pick up root-folder-path or
+// enabled/disabled changes, used whenever watchPollIntervalKey is
+// unset/0/negative/unparseable.
+const defaultWatchPollInterval = 30 * time.Second
+
+// watchPollIntervalKey is the settings key for the configurable watch-folders
+// poll cadence, in whole seconds.
+const watchPollIntervalKey = "watch_folders_poll_interval_seconds"
+
+// pollInterval reads the configured config-poll cadence, substituting the
+// default for any unset/0/negative/unparseable value, so a timer duration
+// derived from it can never be zero (which would busy-loop).
+func pollInterval(ctx context.Context, s *settings.Store) time.Duration {
+	secs, err := loadIntervalSeconds(ctx, s, watchPollIntervalKey, 0)
+	if err != nil || secs <= 0 {
+		return defaultWatchPollInterval
+	}
+	return time.Duration(secs) * time.Second
+}
 
 // RunWatchFolders monitors each mode's library root folder for new files and
 // triggers a Rename Scan when new content appears. Gated off by default
@@ -43,12 +60,14 @@ const watchPollInterval = 30 * time.Second
 // ctx when the server shuts down.
 func RunWatchFolders(ctx context.Context, httpClient *http.Client, connStore *connections.Store, settingsStore *settings.Store, propStore *proposals.Store, libStore *library.Store, videoHasher rename.PHasher, prober dedup.Prober, entityStore parseentity.EntityStore) {
 	for {
+		d := pollInterval(ctx, settingsStore)
+
 		enabled, err := settingsStore.GetBool(ctx, WatchFoldersEnabledKey, false)
 		if err != nil || !enabled {
 			select {
 			case <-ctx.Done():
 				return
-			case <-time.After(watchPollInterval):
+			case <-time.After(d):
 			}
 			continue
 		}
@@ -75,12 +94,12 @@ func RunWatchFolders(ctx context.Context, httpClient *http.Client, connStore *co
 			select {
 			case <-ctx.Done():
 				return
-			case <-time.After(watchPollInterval):
+			case <-time.After(d):
 			}
 			continue
 		}
 
-		runWatcher(ctx, roots, httpClient, connStore, settingsStore, propStore, libStore, videoHasher, prober, entityStore)
+		runWatcher(ctx, roots, httpClient, connStore, settingsStore, propStore, libStore, videoHasher, prober, entityStore, d)
 
 		if ctx.Err() != nil {
 			return
@@ -91,8 +110,9 @@ func RunWatchFolders(ctx context.Context, httpClient *http.Client, connStore *co
 
 // runWatcher sets up an fsnotify.Watcher on the given roots and serves events
 // until ctx is cancelled or the poll interval fires (so the caller can re-read
-// settings and restart with updated paths).
-func runWatcher(ctx context.Context, roots map[mode.Mode]string, httpClient *http.Client, connStore *connections.Store, settingsStore *settings.Store, propStore *proposals.Store, libStore *library.Store, videoHasher rename.PHasher, prober dedup.Prober, entityStore parseentity.EntityStore) {
+// settings and restart with updated paths). pollEvery is the caller's
+// already-resolved poll cadence (see pollInterval) — always > 0.
+func runWatcher(ctx context.Context, roots map[mode.Mode]string, httpClient *http.Client, connStore *connections.Store, settingsStore *settings.Store, propStore *proposals.Store, libStore *library.Store, videoHasher rename.PHasher, prober dedup.Prober, entityStore parseentity.EntityStore, pollEvery time.Duration) {
 	w, err := fsnotify.NewWatcher()
 	if err != nil {
 		log.Printf("watchfolders: creating watcher: %v", err)
@@ -123,7 +143,7 @@ func runWatcher(ctx context.Context, roots map[mode.Mode]string, httpClient *htt
 		})
 	}
 
-	poll := time.NewTicker(watchPollInterval)
+	poll := time.NewTimer(pollEvery)
 	defer poll.Stop()
 
 	for {
@@ -289,7 +309,8 @@ func getWatchFoldersHandler(settingsStore *settings.Store) http.HandlerFunc {
 
 // putWatchFoldersEnabledHandler enables or disables the watch-folders feature.
 // The change takes effect on the watcher goroutine's next poll tick (within
-// watchPollInterval seconds).
+// the configured watch-folders poll interval, defaultWatchPollInterval by
+// default — see pollInterval).
 func putWatchFoldersEnabledHandler(settingsStore *settings.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req watchFoldersEnabledRequest
@@ -299,6 +320,55 @@ func putWatchFoldersEnabledHandler(settingsStore *settings.Store) http.HandlerFu
 		}
 		if err := settingsStore.SetBool(r.Context(), WatchFoldersEnabledKey, req.Enabled); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+type watchFoldersPollIntervalResponse struct {
+	IntervalSeconds int `json:"intervalSeconds"`
+}
+
+type watchFoldersPollIntervalRequest struct {
+	IntervalSeconds int `json:"intervalSeconds"`
+}
+
+// getWatchFoldersPollIntervalHandler returns the configured watch-folders
+// config-poll cadence in seconds — 0 when unset (mirroring recheck/
+// entity-sync-interval's unset-default, not adult-newest's 24h-default
+// pattern), since an unset value and an explicit 0 both collapse to the same
+// defaultWatchPollInterval at runtime (see pollInterval) — there's no
+// unset-vs-explicit-0 distinction to preserve here.
+func getWatchFoldersPollIntervalHandler(settingsStore *settings.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		secs, err := loadIntervalSeconds(r.Context(), settingsStore, watchPollIntervalKey, 0)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, watchFoldersPollIntervalResponse{IntervalSeconds: secs})
+	}
+}
+
+// putWatchFoldersPollIntervalHandler stores the watch-folders config-poll
+// cadence in seconds. 0 is accepted (falls back to defaultWatchPollInterval
+// at runtime, same as unset); a negative value is rejected. No floor is
+// enforced, unlike scanschedule's 60s minimum.
+func putWatchFoldersPollIntervalHandler(settingsStore *settings.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req watchFoldersPollIntervalRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+		badRequest, err := storeIntervalSeconds(r.Context(), settingsStore, watchPollIntervalKey, req.IntervalSeconds, 0)
+		if err != nil {
+			status := http.StatusInternalServerError
+			if badRequest {
+				status = http.StatusBadRequest
+			}
+			http.Error(w, err.Error(), status)
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)

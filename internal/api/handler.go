@@ -358,9 +358,13 @@ func NewMux(httpClient *http.Client, connStore *connections.Store, propStore *pr
 
 	// Watch-folders toggle — opt-in, off by default. The background goroutine
 	// (RunWatchFolders, started from main) polls this setting every
-	// watchPollInterval seconds and starts/stops watching accordingly.
+	// defaultWatchPollInterval seconds (or the configured
+	// watch-folders-poll-interval, if set) and starts/stops watching
+	// accordingly.
 	mux.HandleFunc("GET /api/admin/watch-folders", getWatchFoldersHandler(settingsStore))
 	mux.HandleFunc("PUT /api/admin/watch-folders/enabled", putWatchFoldersEnabledHandler(settingsStore))
+	mux.HandleFunc("GET /api/settings/watch-folders-poll-interval", getWatchFoldersPollIntervalHandler(settingsStore))
+	mux.HandleFunc("PUT /api/settings/watch-folders-poll-interval", putWatchFoldersPollIntervalHandler(settingsStore))
 	mux.HandleFunc("GET /api/settings/adult-newest-scan-interval", getAdultNewestScanIntervalHandler(settingsStore))
 	mux.HandleFunc("PUT /api/settings/adult-newest-scan-interval", putAdultNewestScanIntervalHandler(settingsStore))
 

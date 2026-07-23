@@ -20,12 +20,14 @@ import {
   fetchPHashThreshold,
   fetchRecheckInterval,
   fetchWatchFolders,
+  fetchWatchFoldersPollInterval,
   putConfidenceThreshold,
   putEntitySyncInterval,
   putIdentifyEnabled,
   putPHashThreshold,
   putRecheckInterval,
   putWatchFoldersEnabled,
+  putWatchFoldersPollInterval,
   triggerEntitySync,
   triggerRecheck,
   type EntitySyncSource,
@@ -117,6 +119,13 @@ export const DurationSetting: Component<{
   help: string;
   value: () => number | undefined; // seconds
   onSave: (v: number) => Promise<void>;
+  // zeroLabel overrides the zero-state suffix text below (default: "(0 =
+  // off, the default)"). Optional so the three existing call sites
+  // (recheck-interval, entity-sync-interval, adult-newest-scan-interval) are
+  // byte-for-byte unaffected — none of them pass it. Added for
+  // watch-folders-poll-interval, where 0 means "use the 30s default", not
+  // "off".
+  zeroLabel?: string;
 }> = (props) => {
   const [unit, setUnit] = createSignal<DurationUnit>("hours");
   const [amount, setAmount] = createSignal(0);
@@ -293,7 +302,7 @@ export const DurationSetting: Component<{
       <Muted class="mt-1">
         {props.help}{" "}
         {amount() === 0
-          ? "(0 = off, the default)"
+          ? (props.zeroLabel ?? "(0 = off, the default)")
           : `— every ${amount()} ${UNIT_LABELS[unit()].toLowerCase()}`}
       </Muted>
     </div>
@@ -513,6 +522,7 @@ const RecheckTriggerButton: Component = () => {
 // of which mode tab is active.
 const WatchFoldersSection: Component = () => {
   const [status, { refetch }] = createResource(fetchWatchFolders);
+  const [pollInterval] = createResource(fetchWatchFoldersPollInterval);
   const [enabled, setEnabled] = createSignal(false);
   const [dirty, setDirty] = createSignal(false);
   const saveStatus = useSaveStatus();
@@ -543,7 +553,8 @@ const WatchFoldersSection: Component = () => {
         When enabled, SAK monitors each mode's configured library root folder
         for new content and automatically runs a Rename Scan. Only Scan is
         triggered — proposals still require a human Apply click. Takes effect
-        within 30 seconds of toggling.
+        within one config-poll interval (default 30s, configurable below) of
+        toggling.
       </p>
       <label class="mb-3 flex items-center gap-2">
         <input
@@ -557,6 +568,14 @@ const WatchFoldersSection: Component = () => {
         />
         <span class="text-sm text-fg">Watch folders enabled</span>
       </label>
+      <DurationSetting
+        id="watch-folders-poll-interval"
+        label="Config poll interval — global"
+        help="How often SAK re-reads the enabled toggle and each mode's root path above — NOT how often folders are scanned (scanning is event-driven off filesystem events, unrelated to this cadence)."
+        value={() => pollInterval()}
+        onSave={(v) => putWatchFoldersPollInterval(v)}
+        zeroLabel="(0 = use the default 30-second cadence)"
+      />
       <Show when={status()}>
         {(s) => {
           const roots = Object.entries(s().roots);
