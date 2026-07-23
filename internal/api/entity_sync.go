@@ -173,7 +173,7 @@ func putEntitySyncIntervalHandler(settingsStore *settings.Store) http.HandlerFun
 			http.Error(w, "invalid request body", http.StatusBadRequest)
 			return
 		}
-		badRequest, err := storeIntervalSeconds(r.Context(), settingsStore, parseentity.IntervalSettingKey, req.IntervalSeconds)
+		badRequest, err := storeIntervalSeconds(r.Context(), settingsStore, parseentity.IntervalSettingKey, req.IntervalSeconds, 0)
 		if err != nil {
 			status := http.StatusInternalServerError
 			if badRequest {

@@ -54,25 +54,30 @@ func TestMigration0041_NodeCPUCap_UpDown(t *testing.T) {
 		t.Fatalf("setting dialect: %v", err)
 	}
 
-	// Up: migrate fully (through 0041).
-	if err := goose.Up(sqlDB, "migrations"); err != nil {
-		t.Fatalf("goose Up: %v", err)
+	// Up to exactly 0041 (not goose.Up, which migrates to whatever the
+	// latest migration happens to be — that made this test silently depend
+	// on 0041 staying the newest file; it broke the moment 0042 landed,
+	// since "Down one step" then rolled back 0042, not 0041). Pinning both
+	// Up and Down to explicit versions makes this test about migration 0041
+	// specifically, independent of how many migrations exist after it.
+	if err := goose.UpTo(sqlDB, "migrations", 41); err != nil {
+		t.Fatalf("goose UpTo 41: %v", err)
 	}
 	if !columnExists(t, sqlDB, "node_max_jobs", "cpu_cap_percent") {
 		t.Fatal("after Up, node_max_jobs.cpu_cap_percent should exist")
 	}
 
-	// Down one step: 0041 rolls back, dropping the column.
-	if err := goose.Down(sqlDB, "migrations"); err != nil {
-		t.Fatalf("goose Down: %v", err)
+	// Down to 0040: 0041 rolls back, dropping the column.
+	if err := goose.DownTo(sqlDB, "migrations", 40); err != nil {
+		t.Fatalf("goose DownTo 40: %v", err)
 	}
 	if columnExists(t, sqlDB, "node_max_jobs", "cpu_cap_percent") {
 		t.Fatal("after Down, node_max_jobs.cpu_cap_percent should be dropped")
 	}
 
 	// Up again: re-applies cleanly.
-	if err := goose.Up(sqlDB, "migrations"); err != nil {
-		t.Fatalf("goose Up (re-apply): %v", err)
+	if err := goose.UpTo(sqlDB, "migrations", 41); err != nil {
+		t.Fatalf("goose UpTo 41 (re-apply): %v", err)
 	}
 	if !columnExists(t, sqlDB, "node_max_jobs", "cpu_cap_percent") {
 		t.Fatal("after re-Up, node_max_jobs.cpu_cap_percent should exist again")

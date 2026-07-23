@@ -63,7 +63,7 @@ func putAdultNewestScanIntervalHandler(settingsStore *settings.Store) http.Handl
 			http.Error(w, "invalid request body", http.StatusBadRequest)
 			return
 		}
-		badRequest, err := storeIntervalSeconds(r.Context(), settingsStore, adultNewestScanIntervalKey, req.IntervalSeconds)
+		badRequest, err := storeIntervalSeconds(r.Context(), settingsStore, adultNewestScanIntervalKey, req.IntervalSeconds, 0)
 		if err != nil {
 			status := http.StatusInternalServerError
 			if badRequest {

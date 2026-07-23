@@ -891,6 +891,37 @@ CHANGELOG.md's "transactional multi-episode upserts" entry.
 
 ## Backlog (not yet started, roughly in discussion order)
 
+### Dedup review UX refinement (list/card toggle, multi-keep, Skip, click-to-play) — deferred, plan approved, not built
+Consensus-approved plan at `.omc/plans/dedup-ux-refine.md` (6 review rounds,
+ambiguity 15%, status `pending approval`) to refine the Dedup review queue: a
+list/card view toggle, checkbox multi-keep selection, a per-group Skip
+action, and click-to-play video tiles for visual side-by-side comparison.
+Explicitly **sequenced after** the VMAF-backend work
+(`.omc/plans/vmaf-backend.md`), which lands the perceptual-quality score
+these cards will surface — this UI is where a computed VMAF score becomes
+operator-visible. Documentation only: not yet built, and this entry does not
+authorize building it — it's the approved-but-pending follow-up the VMAF
+backend clears the way for.
+
+### Native TV-app player enabling real transcoding — future, DIFFERENT and higher legal-risk profile, needs its own scoping
+A Jellyfin/Stash-like native TV app player for SAK's library, which would
+enable **real transcoding** (actual H.264/HEVC/etc. re-encoding, not just
+decoding). Flagged explicitly as a **materially different and higher
+legal-risk profile than the VMAF work**: VMAF is decode-only and never
+encodes, so it stays outside the codec patent-royalty territory FFmpeg's own
+legal page warns commercial encoders about (see `NOTICE.md`). A transcoding
+player crosses into real encoding — real codec-royalty exposure — a
+genuinely different risk analysis that `NOTICE.md`'s current decode-only
+rationale does NOT cover and would have to be extended for. Captured here as
+a future item per the VMAF spec's explicit instruction
+(`.omc/specs/deep-interview-vmaf-backend.md` Follow-ups); **not designed or
+scoped here** — it needs its own future scoping effort before any work
+starts. Cross-reference: this is the deliberate future reconsideration of the
+"Hardware acceleration for transcoding/thumbnails" item in "Dropped from
+scope" below (dropped because SAK doesn't transcode *today*) — as a player
+feature, with the legal caveat above attached, not a silent reversal of that
+drop.
+
 ### Frontend redesign — fully shipped 2026-07-19
 Shell shipped 2026-07-13; bulk-apply tables + system dashboard shipped
 2026-07-17; Collections/structured tagging UI (the last open content

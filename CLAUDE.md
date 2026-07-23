@@ -62,6 +62,31 @@ no scheduler infrastructure exists anywhere in this codebase today. That's
 the default for anything new, too — **don't build speculative scheduling
 ahead of proven manual usage.**
 
+**AMENDED 2026-07-23 — the "no scheduler infrastructure exists anywhere in
+this codebase today" claim above is stale, corrected here (a deliberate,
+documented reversal, not a silent one — same class as the bulk-apply
+amendment below; see `.omc/plans/vmaf-backend.md` and `CHANGELOG.md`).** The
+original text in this section read "no background pollers, no scheduler
+infrastructure exists anywhere in this codebase today." That blanket claim
+was already inaccurate when written and is more so now: three background
+schedulers predate this note — `internal/recheck` (availability re-check
+ticker), `internal/adultnewest` (Adult "newest releases" background scan),
+and `internal/api`'s `RunWatchFolders` (inotify watch-folder Scan trigger) —
+each an interval-driven goroutine launched from `main.go`, exactly the
+"scheduled second, once manual is proven" upgrade this section's closing
+paragraph explicitly permits. The VMAF-backend work adds a fourth,
+`internal/scanschedule` — a general Rename/Purge/Dedup scan scheduler (all 3
+modes, per-workflow/mode configurable, 0/off by default) built as a
+compile-time-enforced **Scan-only safety boundary**: it may only ever
+trigger Scan (propose), never Apply, Dismiss, Repick, fingerprint-submit, or
+any other mutating, operator-approval-gated action, on any workflow, under
+any condition. So the corrected statement is: scheduler infrastructure DOES
+exist, but every scheduler in it is Scan/propose/passive-flag only — the
+staged-for-approval invariant above is fully preserved, nothing is
+auto-Applied. The "manual by default, don't build speculative scheduling
+ahead of proven manual usage" principle stands unchanged for anything new;
+what's corrected is only the factual "none exists" claim, not the policy.
+
 (Bulk apply, added 2026-07-17, is a same-screen multi-select of
 already-reviewed Pending proposals — see the amended engineering-convention
 note below. It doesn't change this section: there is still no automation,

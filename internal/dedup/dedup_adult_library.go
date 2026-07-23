@@ -271,6 +271,11 @@ func ApplyLibraryAdult(ctx context.Context, libStore *library.Store, p proposals
 		// fails, and NotifyPlayers must still learn about it (Critic fix #3).
 		if removedPath != "" {
 			changes = append(changes, mode.PathChange{Path: removedPath, Kind: mode.Deleted})
+			// Event-driven vmaf_scores cleanup: the scene file is physically
+			// gone (captured even when the DB row delete failed), so any cached
+			// VMAF pair naming it — on either side — is now dead. Best-effort,
+			// not transactional with os.Remove (see PruneVMAFScoresForPath).
+			libStore.PruneVMAFScoresForPath(ctx, removedPath)
 		}
 		if err != nil {
 			return 0, changes, fmt.Errorf("removing %s: %w", c.Path, err)

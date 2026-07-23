@@ -36,6 +36,7 @@ import (
 	"github.com/labbersanon/sakms/internal/proposals"
 	"github.com/labbersanon/sakms/internal/recheck"
 	"github.com/labbersanon/sakms/internal/rssfeeds"
+	"github.com/labbersanon/sakms/internal/scanschedule"
 	"github.com/labbersanon/sakms/internal/secrets"
 	"github.com/labbersanon/sakms/internal/settings"
 	"github.com/labbersanon/sakms/internal/trakt"
@@ -332,6 +333,19 @@ func run() error {
 	// by default (WatchFoldersEnabledKey = false). To remove entirely: delete
 	// internal/api/watchfolders.go and this line.
 	go api.RunWatchFolders(ctx, &http.Client{Timeout: outboundTimeout}, connStore, settingsStore, propStore, libStore, videoDispatcher, prober, entityStore)
+
+	// General Rename/Purge/Dedup scan scheduler — the fourth deliberate, opt-in
+	// exception to "manual by default" (see internal/scanschedule's package doc
+	// + CLAUDE.md's AMENDED "no scheduler" note). Built as a compile-time
+	// Scan-only safety boundary: it drives its workflows only through the narrow
+	// scanschedule.Scanner interface (scanAdapter below), which cannot reach any
+	// Apply-family call. Per-workflow interval + dedup eager-VMAF toggle, all
+	// gated OFF by default (0/off). Run launches one goroutine per workflow and
+	// returns; all are cancelled via ctx on shutdown. Dedup cycles share the
+	// same dedupHub concurrency guard as manual Dedup scans. To remove entirely:
+	// delete internal/scanschedule, scanadapter.go, and this block.
+	scanScheduler := newScanAdapter(&http.Client{Timeout: outboundTimeout}, connStore, settingsStore, propStore, allowStore, libStore, prober, phashDispatcher, videoDispatcher, entityStore)
+	scanschedule.Run(ctx, scanScheduler, settingsStore, dedupHub)
 
 	select {
 	case err := <-errCh:

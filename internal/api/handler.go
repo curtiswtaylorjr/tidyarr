@@ -140,6 +140,12 @@ func NewMux(httpClient *http.Client, connStore *connections.Store, propStore *pr
 	// mux, so both are session-gated like the download/notification streams.
 	mux.HandleFunc("GET /api/modes/{mode}/dedup/scan/stream", dedupScanStreamHandler(hub))
 	mux.HandleFunc("GET /api/modes/{mode}/dedup/scan/status", dedupScanStatusHandler(hub))
+	// On-demand VMAF perceptual-quality score for one Dedup candidate measured
+	// against the group's chosen reference/primary (star topology, AC1). Async
+	// + poll-shaped like the dedup scan above it: a cache miss kicks off a
+	// background computation and returns "computing"; the cache (vmaf_scores)
+	// serves repeat views without recomputing (AC2). See vmaf.go.
+	mux.HandleFunc("GET /api/modes/{mode}/dedup/proposals/{id}/vmaf", vmafHandler(propStore, libStore))
 
 	// Discover is a read-only proxy against TMDB (trending/popular titles,
 	// poster art) — the browse entry point into Search. Search itself is a
@@ -349,6 +355,19 @@ func NewMux(httpClient *http.Client, connStore *connections.Store, propStore *pr
 	mux.HandleFunc("PUT /api/admin/watch-folders/enabled", putWatchFoldersEnabledHandler(settingsStore))
 	mux.HandleFunc("GET /api/settings/adult-newest-scan-interval", getAdultNewestScanIntervalHandler(settingsStore))
 	mux.HandleFunc("PUT /api/settings/adult-newest-scan-interval", putAdultNewestScanIntervalHandler(settingsStore))
+
+	// General Rename/Purge/Dedup scan scheduler settings (see
+	// internal/scanschedule) — one interval per workflow plus the Dedup
+	// eager-VMAF toggle, all 0/off by default. Settings scalars only; the
+	// scheduler goroutines live in their own package, started once from main.
+	mux.HandleFunc("GET /api/settings/rename-scan-interval", getScanIntervalHandler(settingsStore, renameScanIntervalKey))
+	mux.HandleFunc("PUT /api/settings/rename-scan-interval", putScanIntervalHandler(settingsStore, renameScanIntervalKey))
+	mux.HandleFunc("GET /api/settings/purge-scan-interval", getScanIntervalHandler(settingsStore, purgeScanIntervalKey))
+	mux.HandleFunc("PUT /api/settings/purge-scan-interval", putScanIntervalHandler(settingsStore, purgeScanIntervalKey))
+	mux.HandleFunc("GET /api/settings/dedup-scan-interval", getScanIntervalHandler(settingsStore, dedupScanIntervalKey))
+	mux.HandleFunc("PUT /api/settings/dedup-scan-interval", putScanIntervalHandler(settingsStore, dedupScanIntervalKey))
+	mux.HandleFunc("GET /api/settings/dedup-vmaf-scan-enabled", getDedupVMAFScanEnabledHandler(settingsStore))
+	mux.HandleFunc("PUT /api/settings/dedup-vmaf-scan-enabled", putDedupVMAFScanEnabledHandler(settingsStore))
 
 	// Webhook subscriptions — CRUD plus a fire-once test delivery.
 	mux.HandleFunc("GET /api/webhooks", listWebhooksHandler(whStore))

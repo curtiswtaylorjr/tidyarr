@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strconv"
 
 	"github.com/labbersanon/sakms/internal/settings"
@@ -46,11 +47,16 @@ func loadIntervalSeconds(ctx context.Context, settingsStore *settings.Store, set
 
 // storeIntervalSeconds validates and persists an interval-in-seconds value
 // under settingsKey. 0 is accepted (it's how an operator turns a job off);
-// a negative value is rejected — badRequest reports which case an error is,
-// so the caller can pick the right HTTP status.
-func storeIntervalSeconds(ctx context.Context, settingsStore *settings.Store, settingsKey string, intervalSeconds int) (badRequest bool, err error) {
+// a negative value is rejected; a positive value below minSeconds is also
+// rejected (pass 0 for "no floor," preserving every pre-scanschedule caller's
+// original behavior) — badRequest reports which case an error is, so the
+// caller can pick the right HTTP status.
+func storeIntervalSeconds(ctx context.Context, settingsStore *settings.Store, settingsKey string, intervalSeconds, minSeconds int) (badRequest bool, err error) {
 	if intervalSeconds < 0 {
 		return true, errors.New("intervalSeconds must be zero (off) or a positive number of seconds")
+	}
+	if intervalSeconds > 0 && minSeconds > 0 && intervalSeconds < minSeconds {
+		return true, fmt.Errorf("intervalSeconds must be zero (off) or at least %d", minSeconds)
 	}
 	return false, settingsStore.Set(ctx, settingsKey, strconv.Itoa(intervalSeconds))
 }

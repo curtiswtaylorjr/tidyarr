@@ -41,15 +41,58 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 go build -trimpath -o /out/sakms ./cmd/sakms
 
-# Debian, not Alpine: ffmpeg's Debian package is the more predictable ffprobe
-# build, and CGO is off anyway (modernc.org/sqlite is pure Go), so there's no
-# musl-vs-glibc tradeoff to weigh here.
+# ffmpeg stage: fetch a pinned, checksum-verified BtbN static FFmpeg build that
+# INCLUDES the libvmaf filter. Debian trixie's own ffmpeg package — base AND the
+# `libavfilter-extra` flavor — is built WITHOUT `--enable-libvmaf`, and trixie
+# ships no `libvmaf` package at all (both empirically confirmed 2026-07-23 by an
+# actual build test), so internal/vmaf's `ffmpeg -lavfi libvmaf` call cannot work
+# on the distro package. jellyfin-ffmpeg was also tested and likewise lacks the
+# libvmaf filter. BtbN/FFmpeg-Builds is the community-standard prebuilt ffmpeg
+# (auditable public GitHub Actions build) — and is exactly what FileFlows' own
+# "FFmpeg FileFlows Edition" installs for its VMAF support. Using a third-party
+# prebuilt binary here is a DELIBERATE, user-approved exception to the
+# vmaf-backend spec's original "no custom/static ffmpeg build" non-goal, made
+# with full awareness of the tradeoff — see NOTICE.md for the rationale and
+# GPLv3/no-nonfree license posture. Pinned to a dated release tag + SHA256 (never
+# `latest`) for reproducibility; the build FAILS on a checksum mismatch rather
+# than silently proceeding. Bump: pick a newer dated release from
+# github.com/BtbN/FFmpeg-Builds/releases and update all three ARGs from that
+# release's checksums.sha256.
+# Review if: internal/vmaf drops the libvmaf dependency, or trixie's ffmpeg gains
+# --enable-libvmaf (then the distro package could replace this whole stage).
+FROM debian:trixie-slim AS ffmpeg
+ARG FFMPEG_TAG=autobuild-2026-07-23-14-16
+ARG FFMPEG_ASSET=ffmpeg-n7.1.5-9-gb9a218bc1e-linux64-gpl-7.1.tar.xz
+ARG FFMPEG_SHA256=be92c8080a25ab71067f9e80cbf0483112af88b855425796d63ab890add6a64c
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates wget xz-utils
+RUN set -eux; \
+    wget --no-verbose -O /tmp/ffmpeg.tar.xz \
+      "https://github.com/BtbN/FFmpeg-Builds/releases/download/${FFMPEG_TAG}/${FFMPEG_ASSET}"; \
+    echo "${FFMPEG_SHA256}  /tmp/ffmpeg.tar.xz" | sha256sum -c -; \
+    mkdir -p /tmp/ffmpeg /out; \
+    tar -xf /tmp/ffmpeg.tar.xz -C /tmp/ffmpeg --strip-components=1; \
+    install -m0755 /tmp/ffmpeg/bin/ffmpeg  /out/ffmpeg; \
+    install -m0755 /tmp/ffmpeg/bin/ffprobe /out/ffprobe; \
+    /out/ffmpeg -hide_banner -h filter=libvmaf | grep -q "Calculate the VMAF"
+
+# Debian, not Alpine, for the runtime base: the BtbN ffmpeg build links glibc
+# (not musl), and CGO is off anyway (modernc.org/sqlite is pure Go), so glibc is
+# the right call. ffmpeg/ffprobe come from the pinned BtbN stage above (NOT the
+# distro package, which lacks libvmaf) and are placed on PATH at /usr/local/bin,
+# which is where sakms resolves the bare `ffmpeg`/`ffprobe` names it exec's
+# (internal/phash, internal/videophash, internal/vmaf).
 FROM debian:trixie-slim AS base
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates ffmpeg gosu \
+    && apt-get install -y --no-install-recommends ca-certificates gosu \
     && useradd --create-home --home-dir /data --uid 1000 sakms
+
+COPY --from=ffmpeg /out/ffmpeg  /usr/local/bin/ffmpeg
+COPY --from=ffmpeg /out/ffprobe /usr/local/bin/ffprobe
 
 COPY --from=build /out/sakms /usr/local/bin/sakms
 

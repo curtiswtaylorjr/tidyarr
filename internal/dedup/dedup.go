@@ -423,6 +423,11 @@ func ApplyLibrary(ctx context.Context, libStore *library.Store, p proposals.Prop
 		// fails, and NotifyPlayers must still learn about it (Critic fix #3).
 		if removedPath != "" {
 			changes = append(changes, mode.PathChange{Path: removedPath, Kind: mode.Deleted})
+			// Event-driven vmaf_scores cleanup: the file is physically gone
+			// (captured even when the DB row delete failed), so any cached VMAF
+			// pair naming it — on either side — is now dead. Best-effort, not
+			// transactional with os.Remove (see PruneVMAFScoresForPath).
+			libStore.PruneVMAFScoresForPath(ctx, removedPath)
 		}
 		if err != nil {
 			return 0, changes, fmt.Errorf("removing %s: %w", c.Path, err)
@@ -708,6 +713,11 @@ func ApplyLibrarySeries(ctx context.Context, libStore *library.Store, p proposal
 			return 0, changes, fmt.Errorf("removing %s: %w", c.Path, err)
 		}
 		changes = append(changes, mode.PathChange{Path: c.Path, Kind: mode.Deleted})
+		// Event-driven vmaf_scores cleanup for the just-deleted loser. Reached
+		// only after the refCount>1 shared-file guard above lets the delete
+		// through, so a still-referenced file (skipped by continue) is never
+		// pruned. Best-effort (see PruneVMAFScoresForPath).
+		libStore.PruneVMAFScoresForPath(ctx, c.Path)
 	}
 
 	if winner.TrackedID != 0 {
